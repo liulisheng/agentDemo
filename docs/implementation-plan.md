@@ -106,3 +106,7 @@ P4 验证记录：离线 `pytest` 为 88 passed、1 skipped；真实 MySQL 8.4.1
 离线测试默认运行，不依赖 API Key。真实模型测试必须显式开启，可能产生费用；没有凭据时报告未验证，不用 Fake 结果替代。第一版不以第二个生产引擎、多租户或 HTTP 服务作为验收条件。
 
 关联：[架构设计](design.md)、[技术决策](decisions.md)。
+
+## 最小闭环实现（2026-11-14）
+
+当前已落地一条后端控制面闭环：Tool/Skill/数字员工版本发布、Deployment 固定版本、Session/Run 创建、Fake Runtime 执行、Trace/Usage 查询，以及前端 Run Trace 页面。实现位于 `backend/src/agent_platform/{domain,application,ports,adapters,api}` 和 `frontend/src/features/runs/`，验证命令与边界见[数字员工最小闭环](数字员工最小闭环.md)。当前仍未完成 MySQL 持久化、真实 Runtime、消息渠道、企业记忆和生产沙箱等后续阶段。

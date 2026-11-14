@@ -4,7 +4,7 @@
 
 - [x] 1.1 Create the independent `backend/` Python project with `api`, `application`, `domain`, `ports`, `adapters`, `infrastructure`, and `workers` packages; verify the expected directory tree and package import smoke check.
 - [ ] 1.2 Add the one-way backend dependency on `harness-engine` without making `harness-engine` import platform modules; verify dependency direction with an import test or static check.
-- [ ] 1.3 Define shared platform identifiers, TenantContext, request metadata, error categories, and resource references; verify invalid blank identifiers and cross-scope references are rejected by unit tests.
+- [x] 1.3 Define shared platform identifiers, TenantContext, request metadata, error categories, and resource references; verify invalid blank identifiers and cross-scope references are rejected by unit tests.
 - [x] 1.4 Document the backend directory responsibilities and dependency rules in `docs/backend-architecture.md`; verify every top-level backend package has an explicit responsibility.
 - [x] 1.5 Create Chinese architecture, data-model, API, runtime-flow, state, deployment, and documentation-convention diagrams for the first backend/frontend slice; verify each document links to the implemented package and its test command.
 - [x] 1.6 Add root project collaboration rules for Chinese commits, Chinese code comments, staged-file hygiene, and documentation traceability; verify the rules are readable from `AGENTS.md` and `docs/文档维护约定.md`.
@@ -14,16 +14,16 @@
 - [x] 2.1 Define the IdentityProvider, TenantDirectory, and AuthorizationProvider ports using platform, tenant, user, role, scope, membership, and status fields aligned with Dadi; verify the ports have no Dadi Java imports.
 - [x] 2.2 Add immutable Fake Platform, Tenant, User, membership, role, and Scope fixtures for at least two tenants and normal/disabled users; verify the fixture loader is deterministic.
 - [x] 2.3 Implement FakeIdentityProvider resolution and authorization decisions; verify active users succeed and disabled users, unknown tenants, and cross-tenant resources fail closed.
-- [ ] 2.4 Add identity context and authorization API contracts; verify forged request-body or ordinary header identity fields cannot change the resolved TenantContext.
+- [x] 2.4 Add identity context and authorization API contracts; verify forged request-body or ordinary header identity fields cannot change the resolved TenantContext.
 
 ## 3. Catalogs and versioned resources
 
-- [ ] 3.1 Implement domain models and repositories for DigitalEmployee, DigitalEmployeeVersion, Deployment, SkillVersion, ToolVersion, and their lifecycle states; verify draft, publish, deprecate, and immutable-version transitions.
+- [x] 3.1 Implement domain models and repositories for DigitalEmployee, DigitalEmployeeVersion, Deployment, SkillVersion, ToolVersion, and their lifecycle states; verify draft, publish, deprecate, and immutable-version transitions.
 - [ ] 3.2 Implement dependency validation for DigitalEmployeeVersion, including Skill, Tool, ExecutionProfile, ModelRoute, workspace, and policy references; verify invalid dependencies block publish with structured errors.
 - [ ] 3.3 Implement tenant-scoped CRUD and publish application services; verify every read/write accepts TenantContext and rejects cross-tenant access.
 - [ ] 3.4 Add version and deployment API request/response schemas; verify published versions can be deployed, rolled back, and resolved without changing active Run snapshots.
-- [ ] 3.5 Document digital employee, Skill, Tool, version, and deployment lifecycle diagrams in `docs/catalog-and-versioning.md`; verify the documented transitions match the domain tests.
-- [ ] 3.6 Define instruction, tool-bundle, and workflow Skill types with trigger rules, input/output schemas, tool declarations, steps, memory policy, and approval policy; verify each type has a valid published representation.
+- [x] 3.5 Document digital employee, Skill, Tool, version, and deployment lifecycle diagrams in `docs/catalog-and-versioning.md`; verify the documented transitions match the domain tests.
+- [x] 3.6 Define instruction, tool-bundle, and workflow Skill types with trigger rules, input/output schemas, tool declarations, steps, memory policy, and approval policy; verify each type has a valid published representation.
 - [ ] 3.7 Implement AgentResolver and SkillResolver to select a Skill from a DigitalEmployeeVersion and create an immutable Agent Run snapshot; verify a version change during a Run does not change its selected Skill or tools.
 - [ ] 3.8 Implement SkillExecutor and SkillExecution records for instruction, tool-bundle, and workflow skills; verify input/output validation, policy intersection, step state, and failure propagation.
 - [ ] 3.9 Use `docs/staffdeck-reference/domain-model.md` as a behavior fixture to implement the project-owned DigitalEmployeeVersion, CapabilityBinding, CompositionSnapshot, Session, Turn, and Trace relationships; verify no StaffDeck source or static asset is imported.
