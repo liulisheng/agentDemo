@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harness-runs
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: harness-runs
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: harness-worker-smoke
+  namespace: harness-runs
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      labels:
+        app: harness-worker-smoke
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: worker
+          image: agentdemo/harness-worker:sdk-task7
+          imagePullPolicy: Never
+          command: ["python", "-m", "harness_engine.cli", "--engine", "fake", "k8s-sandbox-ok"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

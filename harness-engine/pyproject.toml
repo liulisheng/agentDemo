@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness-engine"
+version = "0.1.0"
+description = "Pluggable Python orchestration layer for Harness engines"
+requires-python = ">=3.12"
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+mcp = ["mcp==2.3.0"]
+mysql = ["mysql-connector-python==9.7.0"]
+
+[project.scripts]
+harness = "harness_engine.cli:main"
+harness-doctor = "harness_engine.doctor:main"
+harness-persistence-demo = "harness_engine.persistence_demo:main"
+deepseek-harness-verify = "harness_engine.deepseek_demo:main"
+harness-mcp-tools = "harness_engine.mcp_server:main"
+
+[project.entry-points."agent_harness.tools"]
+echo = "harness_engine.tools:echo_tool_definition"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

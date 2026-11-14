@@ -1,0 +1,3 @@
+# Keep this file aligned with the SDK/runtime pair recorded in docs/sdk-validation.md.
+# The package installs the matching runtime wheel automatically.
+deepseek-harness-sdk==0.2.2rc2

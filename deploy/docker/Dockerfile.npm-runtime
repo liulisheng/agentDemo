@@ -1,0 +1,31 @@
+FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS node_deps
+WORKDIR /opt/dsh
+RUN npm config set fetch-retries 8 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && npm config set fetch-timeout 300000 \
+    && npm install --omit=dev --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.3
+
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+WORKDIR /opt/harness
+COPY harness-engine/src /opt/harness/src
+COPY harness-engine/pyproject.toml /opt/harness/pyproject.toml
+COPY harness-engine/requirements-deepseek-check.txt /opt/harness/requirements-deepseek-check.txt
+COPY harness-engine/requirements-mcp.txt /opt/harness/requirements-mcp.txt
+COPY harness-engine/requirements-mysql.txt /opt/harness/requirements-mysql.txt
+COPY deploy/docker/lifecycle_smoke.py /opt/harness/lifecycle_smoke.py
+COPY --from=node_deps /usr/local/bin/node /usr/local/bin/node
+COPY --from=node_deps /opt/dsh/node_modules /opt/harness/node_modules
+RUN python -m pip install --no-cache-dir 'cryptography>=42' \
+    && python -m pip install --no-cache-dir -r /opt/harness/requirements-deepseek-check.txt \
+    && python -m pip install --no-cache-dir -r /opt/harness/requirements-mcp.txt \
+    && python -m pip install --no-cache-dir -r /opt/harness/requirements-mysql.txt \
+    && python -m pip install --no-cache-dir --no-deps /opt/harness \
+    && mkdir -p /opt/harness/bin \
+    && printf '#!/bin/sh\nexec /usr/local/bin/node /opt/harness/node_modules/@deepseek-ai/dsh/lib/bin.js "$@"\n' > /opt/harness/bin/dsh \
+    && chmod +x /opt/harness/bin/dsh
+
+ENV PYTHONPATH=/opt/harness/src
+ENV DSH_BIN=/opt/harness/bin/dsh
+ENV NARB_DISABLE_NATIVE_CACHE=1
+USER 65532:65532
+ENTRYPOINT ["python", "-m", "harness_engine.cli"]

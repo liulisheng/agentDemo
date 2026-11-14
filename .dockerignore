@@ -1,0 +1,9 @@
+.git
+.idea
+.artifacts
+**/.artifacts
+**/.pytest_cache
+**/.ruff_cache
+**/__pycache__
+deploy/mysql/.env
+harness-engine/tests
