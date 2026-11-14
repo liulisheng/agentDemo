@@ -42,6 +42,7 @@
 - `usage-accounting`: Token、模型费用、工具费用和按平台/租户/用户聚合的用量台账。
 - `identity-context`: Fake 用户中心和后续 Dadi 身份适配的统一上下文与授权接口。
 - `documentation-and-design`: 中文架构、流程、数据模型、接口、部署和代码维护文档。
+- `media-and-artifacts`: 图片、文件、音频、视频和运行产物的租户隔离存储、处理和配置化对象存储适配。
 
 ### Modified Capabilities
 

@@ -74,6 +74,12 @@
 - [ ] 8.3 Add Git checkout and artifact/diff result contracts for code agents; verify a run is bound to a specific repository and commit and cannot write the main branch by default.
 - [ ] 8.4 Add read-only log-query and approval-gated operations capability examples; verify read actions succeed and restart/delete/configure actions require policy approval.
 - [ ] 8.5 Document code, log, and operations Agent environments in `docs/workspaces-and-sandboxes.md`; verify each environment mode has platform lifecycle, credential, quota, cleanup, and Runtime handoff behavior.
+- [ ] 8.6 Define the ObjectStore and StorageProfile ports with local, S3, MinIO, OSS, and COS provider configurations; verify provider selection is explicit and unsupported providers fail without local fallback.
+- [ ] 8.7 Implement LocalObjectStore for development with tenant-safe generated keys, upload intents, bounded reads, and delete/GC operations; verify clients never receive arbitrary host paths.
+- [ ] 8.8 Add external object-storage adapter contracts and configuration examples for S3, MinIO, OSS, and COS; verify credentials are represented only by SecretRef and signed URL TTL is enforced.
+- [ ] 8.9 Document media/object storage and processing flows in `docs/对象存储与媒体处理设计.md`; verify lifecycle, configuration, tenant isolation, retention, and recovery diagrams are present.
+- [ ] 8.10 Add MessageAttachment and RuntimeAttachmentRef contracts; verify Codex/DeepSeek Runtime uses platform MediaAsset references while Runtime Workspace remains an execution copy.
+- [ ] 8.11 Add EPHEMERAL, SESSION, CONVERSATION, and KNOWLEDGE_BASE retention policies; verify conversation attachments can be reused across later Runs only after tenant authorization.
 
 ## 9. Trace, audit, and usage accounting
 

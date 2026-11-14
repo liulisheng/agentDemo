@@ -192,6 +192,8 @@ sequenceDiagram
 
 平台传递业务上下文和 opaque 引用，不重复实现 Runtime 内部压缩和私有记忆格式。
 
+对话附件遵循同样边界：平台 ObjectStore 是持久化权威来源，Runtime Workspace 只是执行副本，RuntimeAdapter 只接收 `RuntimeAttachmentRef`。
+
 ## 七、当前代码状态
 
 当前已实现：

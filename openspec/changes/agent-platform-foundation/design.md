@@ -321,6 +321,48 @@ Runtime engine                   RuntimeAdapter
 
 代码任务完成条件包含三部分：实现、自动化验证、中文文档。文档必须标明状态、更新时间、已验证行为、未知项和外部依赖，并链接到对应代码目录和 OpenSpec 任务。
 
+### 16. Configurable object storage
+
+媒体、用户附件、运行产物和 Runtime 工作区归档通过统一 `ObjectStore` 端口访问。第一阶段默认使用本地文件存储，部署配置可以选择 S3、MinIO、OSS 或 COS。
+
+```text
+ObjectStore
+  +-- LocalObjectStore
+  +-- S3ObjectStore
+  +-- MinioObjectStore
+  +-- OssObjectStore
+  +-- CosObjectStore
+```
+
+平台使用 `StorageProfile` 描述后端：
+
+```text
+StorageProfile
+- provider: local | s3 | minio | oss | cos
+- endpoint
+- region
+- bucket
+- base_prefix
+- credential_ref
+- encryption_policy
+- signed_url_ttl_seconds
+- retention_policy
+```
+
+`StorageBinding` 可以按 platform、tenant 或 project 绑定 StorageProfile，默认解析顺序为 project > tenant > platform > system default。凭据只保存 Secret 引用，不写入数据库或日志。
+
+本地存储不提供宿主路径给客户端，而是通过一次性上传/下载接口模拟受控上传地址。外部存储使用短期预签名 URL；外部存储不可用时请求失败，不自动回退到本地存储。
+
+对象键必须由服务端生成并包含租户边界：
+
+```text
+platform/{platform_id}/tenant/{tenant_id}/media/{asset_id}/original
+platform/{platform_id}/tenant/{tenant_id}/media/{asset_id}/derivatives/{type}
+platform/{platform_id}/tenant/{tenant_id}/runtime/{session_id}/{name}
+```
+
+MySQL 只保存对象引用、哈希、大小、媒体状态和处理元数据；二进制内容放入 ObjectStore。删除先撤销读取，再将对象引用加入 GC 队列，清理失败可重试。
+
 ## Runtime Flow
 
 ```text
