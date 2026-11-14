@@ -6,12 +6,14 @@ import hashlib
 from uuid import uuid4
 
 from agent_platform.application.catalog_service import CatalogService
+from agent_platform.application.context import BusinessContextAssembler
+from agent_platform.application.resolvers import AgentResolver
 from agent_platform.domain.common import DomainError
+from agent_platform.domain.context import BusinessContextPolicy
 from agent_platform.domain.execution import RuntimeReference, RuntimeStatus, UsageRecord
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.observability import (
     RunRecord,
-    RunSnapshot,
     RunTimeline,
     SessionRecord,
     SpanType,
@@ -23,9 +25,12 @@ from agent_platform.ports.runtime import RuntimeAdapter, RuntimeEvent, RuntimeRe
 class ControlPlaneService:
     """同步执行本地 Fake Runtime，并保存可查询的租户级 Trace。"""
 
-    def __init__(self, catalog: CatalogService, runtime: RuntimeAdapter) -> None:
+    def __init__(self, catalog: CatalogService, runtime: RuntimeAdapter, persistence: object | None = None) -> None:
         self.catalog = catalog
         self.runtime = runtime
+        self.persistence = persistence
+        self.agent_resolver = AgentResolver(catalog)
+        self.context_assembler = BusinessContextAssembler(BusinessContextPolicy())
         self._sessions: dict[tuple[str, str, str], SessionRecord] = {}
         self._runs: dict[tuple[str, str, str], RunRecord] = {}
         self._spans: dict[str, list[TraceSpan]] = {}
@@ -102,6 +107,8 @@ class ControlPlaneService:
         )
         session.span_id = session_span.span_id
         self._sessions[self._scope(identity, session_id)] = session
+        if self.persistence is not None and hasattr(self.persistence, "register_session"):
+            self.persistence.register_session(identity, session_id, deployment_id, trace_id)
         return session
 
     def _selected_tools(
@@ -177,13 +184,7 @@ class ControlPlaneService:
                 return self._get_run(identity, previous_run_id)
         deployment = self.catalog.resolve_deployment(identity, session.deployment_id)
         employee_version = deployment.employee_version
-        snapshot = RunSnapshot(
-            employee_id=employee_version.employee_id,
-            employee_version=employee_version.version,
-            skill_version_ids=tuple(employee_version.skill_version_ids),
-            tool_version_ids=tuple(employee_version.tool_version_ids),
-            execution_profile_id=employee_version.execution_profile_id,
-        )
+        snapshot = self.agent_resolver.snapshot(identity, deployment)
         run = RunRecord(
             run_id=self._new_id("run"),
             session_id=session.session_id,
@@ -213,6 +214,24 @@ class ControlPlaneService:
                 parent_span_id=run.span_id,
                 attributes={"skill_id": skill_id},
             )
+        context_snapshot = self.context_assembler.assemble(
+            run_id=run.run_id,
+            trace_id=session.trace_id,
+            agent_ref=f"{snapshot.employee_id}:v{snapshot.employee_version}",
+            skill_refs=snapshot.skill_version_ids,
+            recent_messages=(),
+            memory_refs=(),
+            tool_result_refs=(),
+        )
+        run.context_snapshot = context_snapshot
+        self._append_span(
+            session.trace_id,
+            run_id=run.run_id,
+            span_type=SpanType.CONTEXT,
+            status="assembled",
+            parent_span_id=run.span_id,
+            attributes={"snapshot_id": context_snapshot.snapshot_id, "total_tokens": context_snapshot.total_tokens},
+        )
         result = self.runtime.run(
             RuntimeRequest(
                 run_id=run.run_id,
@@ -230,6 +249,16 @@ class ControlPlaneService:
             runtime_session_ref=result.runtime_session_ref,
             runtime_result_ref=result.runtime_result_ref,
         )
+        if self.persistence is not None and hasattr(self.persistence, "acquire_lease") and hasattr(self.persistence, "save_run"):
+            lease = self.persistence.acquire_lease(identity, session.session_id)
+            self.persistence.save_run(
+                identity,
+                session.session_id,
+                run.run_id,
+                lease.fencing_token,
+                {"employee_version": snapshot.employee_version, "execution_profile_id": snapshot.execution_profile_id, "trace_id": run.trace_id},
+                {"runtime_session_ref": result.runtime_session_ref, "result_ref": result.runtime_result_ref},
+            )
         run.error_category = next(
             (
                 str(event.payload["error_category"])

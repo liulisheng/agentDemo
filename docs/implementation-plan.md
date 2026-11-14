@@ -110,3 +110,8 @@ P4 验证记录：离线 `pytest` 为 88 passed、1 skipped；真实 MySQL 8.4.1
 ## 最小闭环实现（2026-11-14）
 
 当前已落地一条后端控制面闭环：Tool/Skill/数字员工版本发布、Deployment 固定版本、Session/Run 创建、Fake Runtime 执行、Trace/Usage 查询，以及前端 Run Trace 页面。实现位于 `backend/src/agent_platform/{domain,application,ports,adapters,api}` 和 `frontend/src/features/runs/`，验证命令与边界见[数字员工最小闭环](数字员工最小闭环.md)。当前仍未完成 MySQL 持久化、真实 Runtime、消息渠道、企业记忆和生产沙箱等后续阶段。
+
+
+## agent-platform-foundation 清单收尾（2026-11-15）
+
+OpenSpec 任务已全部实现并同步为 71/71；完成证据、离线测试数字和外部未验证边界见《agent-platform-foundation 清单完成说明》。

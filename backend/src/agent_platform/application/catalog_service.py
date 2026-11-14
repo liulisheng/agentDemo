@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
 from uuid import uuid4
 
 from agent_platform.domain.catalog import (
@@ -32,6 +33,9 @@ class InMemoryCatalogRepository:
         self.employees: dict[tuple[str, str, str], DigitalEmployee] = {}
         self.employee_versions: dict[tuple[str, str, str, int], DigitalEmployeeVersion] = {}
         self.profiles: dict[tuple[str, str, str], ExecutionProfile] = {}
+        self.model_routes: dict[tuple[str, str, str], object] = {}
+        self.workspace_profiles: dict[tuple[str, str, str], object] = {}
+        self.sandbox_profiles: dict[tuple[str, str, str], object] = {}
         self.deployments: dict[tuple[str, str, str], Deployment] = {}
 
     def _get(self, values: Mapping, key: tuple, resource: str):
@@ -131,6 +135,18 @@ class CatalogService:
         self.repository.save_tool(identity, value)
         return value
 
+    def update_tool(self, identity: IdentityContext, tool_id: str, *, description: str | None = None, input_schema: Mapping[str, object] | None = None) -> ToolVersion:
+        current = self.repository.get_tool(identity, tool_id)
+        current.assert_mutable()
+        updated = replace(current, description=description or current.description, input_schema=input_schema or current.input_schema)
+        self.repository.save_tool(identity, updated)
+        return updated
+
+    def delete_tool(self, identity: IdentityContext, tool_id: str) -> None:
+        current = self.repository.get_tool(identity, tool_id)
+        current.assert_mutable()
+        self.repository.tools.pop(_key(identity, tool_id), None)
+
     def publish_tool(self, identity: IdentityContext, tool_id: str) -> ToolVersion:
         current = self.repository.get_tool(identity, tool_id)
         published = current.publish()
@@ -156,6 +172,18 @@ class CatalogService:
         self.repository.save_skill(identity, value)
         return value
 
+    def update_skill(self, identity: IdentityContext, skill_id: str, *, instruction: str | None = None, allowed_tool_ids: Iterable[str] | None = None) -> SkillVersion:
+        current = self.repository.get_skill(identity, skill_id)
+        current.assert_mutable()
+        updated = replace(current, instruction=instruction or current.instruction, allowed_tool_ids=tuple(allowed_tool_ids) if allowed_tool_ids is not None else current.allowed_tool_ids)
+        self.repository.save_skill(identity, updated)
+        return updated
+
+    def delete_skill(self, identity: IdentityContext, skill_id: str) -> None:
+        current = self.repository.get_skill(identity, skill_id)
+        current.assert_mutable()
+        self.repository.skills.pop(_key(identity, skill_id), None)
+
     def publish_skill(self, identity: IdentityContext, skill_id: str) -> SkillVersion:
         current = self.repository.get_skill(identity, skill_id)
         for tool_id in current.allowed_tool_ids:
@@ -169,6 +197,50 @@ class CatalogService:
         published = current.publish()
         self.repository.save_skill(identity, published)
         return published
+
+    def update_employee(self, identity: IdentityContext, employee_id: str, *, name: str | None = None, role_name: str | None = None, description: str | None = None) -> DigitalEmployee:
+        current = self.repository.get_employee(identity, employee_id)
+        updated = replace(current, name=name or current.name, role_name=role_name or current.role_name, description=description or current.description)
+        self.repository.save_employee(identity, updated)
+        return updated
+
+    def delete_employee(self, identity: IdentityContext, employee_id: str) -> None:
+        self.repository.get_employee(identity, employee_id)
+        self.repository.employees.pop(_key(identity, employee_id), None)
+
+    def create_profile(
+        self,
+        identity: IdentityContext,
+        engine_name: str,
+        model_alias: str,
+        *,
+        model_route_id: str | None = None,
+        workspace_profile_id: str | None = None,
+        sandbox_profile_id: str | None = None,
+        approval_policy: str = "none",
+    ) -> ExecutionProfile:
+        for ref, registry, kind in ((model_route_id, self.repository.model_routes, "model_route"), (workspace_profile_id, self.repository.workspace_profiles, "workspace_profile"), (sandbox_profile_id, self.repository.sandbox_profiles, "sandbox_profile")):
+            if ref is not None and (*_key(identity, ref),) not in registry:
+                raise DomainError("DEPENDENCY_VALIDATION_ERROR", "ExecutionProfile 引用不存在", {"kind": kind, "id": ref})
+        profile = ExecutionProfile(
+            profile_id=self._new_id("profile"),
+            tenant_id=identity.tenant_id,
+            engine_name=engine_name,
+            model_alias=model_alias,
+            model_route_id=model_route_id,
+            workspace_profile_id=workspace_profile_id,
+            sandbox_profile_id=sandbox_profile_id,
+            approval_policy=approval_policy,
+        ).publish()
+        self.repository.save_profile(identity, profile)
+        return profile
+
+    def list_profiles(self, identity: IdentityContext) -> tuple[ExecutionProfile, ...]:
+        prefix = (identity.platform_id, identity.tenant_id)
+        return tuple(
+            profile for (platform_id, tenant_id, _), profile in self.repository.profiles.items()
+            if (platform_id, tenant_id) == prefix
+        )
 
     def create_employee(
         self, identity: IdentityContext, name: str, role_name: str, description: str
@@ -188,6 +260,10 @@ class CatalogService:
         skill_version_ids: Iterable[str],
         tool_version_ids: Iterable[str],
         execution_profile_id: str = "profile-fake",
+        model_route_id: str | None = None,
+        workspace_profile_id: str | None = None,
+        sandbox_profile_id: str | None = None,
+        approval_policy: str = "none",
     ) -> DigitalEmployeeVersion:
         employee = self.repository.get_employee(identity, employee_id)
         versions = [
@@ -207,6 +283,10 @@ class CatalogService:
             skill_version_ids=tuple(skill_version_ids),
             tool_version_ids=tuple(tool_version_ids),
             execution_profile_id=execution_profile_id,
+            model_route_id=model_route_id,
+            workspace_profile_id=workspace_profile_id,
+            sandbox_profile_id=sandbox_profile_id,
+            approval_policy=approval_policy,
         )
         self.repository.save_version(identity, value)
         return value
@@ -239,6 +319,14 @@ class CatalogService:
         else:
             if profile.status is not LifecycleStatus.PUBLISHED:
                 missing.append({"kind": "execution_profile", "id": current.execution_profile_id})
+        for field_name, registry, kind in (
+            ("model_route_id", self.repository.model_routes, "model_route"),
+            ("workspace_profile_id", self.repository.workspace_profiles, "workspace_profile"),
+            ("sandbox_profile_id", self.repository.sandbox_profiles, "sandbox_profile"),
+        ):
+            ref = getattr(current, field_name)
+            if ref is not None and (*_key(identity, ref),) not in registry:
+                missing.append({"kind": kind, "id": ref})
         if missing:
             raise DomainError(
                 "DEPENDENCY_VALIDATION_ERROR",
@@ -259,6 +347,27 @@ class CatalogService:
         )
         self.repository.save_deployment(identity, deployment)
         return deployment
+
+    def list_tools(self, identity: IdentityContext) -> tuple[ToolVersion, ...]:
+        prefix = (identity.platform_id, identity.tenant_id)
+        return tuple(value for (platform_id, tenant_id, _), value in self.repository.tools.items() if (platform_id, tenant_id) == prefix)
+
+    def list_skills(self, identity: IdentityContext) -> tuple[SkillVersion, ...]:
+        prefix = (identity.platform_id, identity.tenant_id)
+        return tuple(value for (platform_id, tenant_id, _), value in self.repository.skills.items() if (platform_id, tenant_id) == prefix)
+
+    def list_employees(self, identity: IdentityContext) -> tuple[DigitalEmployee, ...]:
+        prefix = (identity.platform_id, identity.tenant_id)
+        return tuple(value for (platform_id, tenant_id, _), value in self.repository.employees.items() if (platform_id, tenant_id) == prefix)
+
+    def rollback(self, identity: IdentityContext, deployment_id: str, employee_id: str, version: int) -> Deployment:
+        current = self.repository.get_deployment(identity, deployment_id)
+        target = self.repository.get_version(identity, employee_id, version)
+        if target.status is not LifecycleStatus.PUBLISHED:
+            raise DomainError("DEPENDENCY_VALIDATION_ERROR", "回滚目标必须是已发布版本")
+        updated = current.rollback(target)
+        self.repository.save_deployment(identity, updated)
+        return updated
 
     def resolve_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
         return self.repository.get_deployment(identity, deployment_id)

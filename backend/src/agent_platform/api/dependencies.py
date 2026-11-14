@@ -5,6 +5,8 @@ from fastapi import Header, HTTPException, Request, status
 from agent_platform.adapters.identity.fake import FakeIdentityProvider
 from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.control_plane import ControlPlaneService
+from agent_platform.application.conversations import ConversationService
+from agent_platform.application.model_routes import ModelRouteService
 from agent_platform.domain.identity import IdentityContext
 
 fake_identity_provider = FakeIdentityProvider()
@@ -33,3 +35,15 @@ def control_plane_service(request: Request) -> ControlPlaneService:
     """读取应用启动时注入的 Session/Run 编排服务。"""
 
     return request.app.state.control_plane_service
+
+
+def conversation_service(request: Request) -> ConversationService:
+    """读取应用启动时注入的 Conversation 服务。"""
+
+    return request.app.state.conversation_service
+
+
+def model_route_service(request: Request) -> ModelRouteService:
+    """读取应用启动时注入的模型路由服务。"""
+
+    return request.app.state.model_route_service

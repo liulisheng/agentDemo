@@ -7,6 +7,8 @@ from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
 from agent_platform.api.routes import router
 from agent_platform.application.catalog_service import CatalogService, InMemoryCatalogRepository
 from agent_platform.application.control_plane import ControlPlaneService
+from agent_platform.application.conversations import ConversationService
+from agent_platform.application.model_routes import InMemoryModelRouteRepository, ModelRouteService
 from agent_platform.domain.common import DomainError
 
 
@@ -17,6 +19,8 @@ def create_app() -> FastAPI:
     catalog = CatalogService(InMemoryCatalogRepository())
     app.state.catalog_service = catalog
     app.state.control_plane_service = ControlPlaneService(catalog, FakeRuntimeAdapter())
+    app.state.conversation_service = ConversationService()
+    app.state.model_route_service = ModelRouteService(InMemoryModelRouteRepository())
     app.include_router(router)
 
     @app.exception_handler(DomainError)

@@ -11,11 +11,14 @@ from agent_platform.domain.execution import RuntimeStatus, UsageRecord
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
-    """调用方可据此判断 Runtime 是否支持恢复、取消等能力。"""
+    """调用方可据此判断 Runtime 是否支持恢复、取消、审批和工作区。"""
 
     streaming: bool = False
     resume: bool = True
     cancellation: bool = False
+    approvals: bool = False
+    mcp: bool = False
+    workspace: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +30,8 @@ class RuntimeRequest:
     prompt: str
     skill_instructions: Sequence[str]
     allowed_tools: Sequence[str]
+    workspace_ref: str | None = None
+    thread_ref: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -55,6 +60,8 @@ class RuntimeResult:
     usage: UsageRecord
     events: tuple[RuntimeEvent, ...]
     capabilities: RuntimeCapabilities = field(default_factory=RuntimeCapabilities)
+    runtime_thread_ref: str | None = None
+    runtime_workspace_ref: str | None = None
 
 
 class RuntimeAdapter(Protocol):
@@ -69,4 +76,7 @@ class RuntimeAdapter(Protocol):
         ...
 
     def run(self, request: RuntimeRequest) -> RuntimeResult:
+        ...
+
+    def cancel(self, session_ref: str) -> bool:
         ...

@@ -16,7 +16,9 @@ from agent_platform.ports.runtime import (
 class FakeRuntimeAdapter:
     """用确定性文本和无副作用 echo 工具验证平台 Runtime 边界。"""
 
-    capabilities = RuntimeCapabilities(streaming=False, resume=True, cancellation=True)
+    capabilities = RuntimeCapabilities(
+        streaming=False, resume=True, cancellation=True, approvals=False, mcp=False, workspace=True
+    )
 
     def __init__(self) -> None:
         self._sessions: set[str] = set()
@@ -83,4 +85,12 @@ class FakeRuntimeAdapter:
             usage=UsageRecord(input_tokens, output_tokens, input_tokens + output_tokens),
             events=tuple(events),
             capabilities=self.capabilities,
+            runtime_thread_ref=f"fake-thread-{session_ref}",
+            runtime_workspace_ref=request.workspace_ref,
         )
+
+    def cancel(self, session_ref: str) -> bool:
+        """Fake Runtime 只确认已存在 Session，真实取消由供应商适配器负责。"""
+
+        self.resume_session(session_ref)
+        return True

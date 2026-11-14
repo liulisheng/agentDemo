@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+TraceId = str
+
+from .context import ContextSnapshot
 from .execution import RuntimeReference, RuntimeStatus, UsageRecord
 
 
@@ -19,6 +22,11 @@ class SpanType(StrEnum):
     RUNTIME = "runtime"
     MODEL = "model"
     RESULT = "result"
+    CONTEXT = "context"
+    MEMORY = "memory"
+    APPROVAL = "approval"
+    SANDBOX = "sandbox"
+    CHANNEL = "channel"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +84,7 @@ class RunRecord:
     result_text: str = ""
     runtime_reference: RuntimeReference | None = None
     error_category: str | None = None
+    context_snapshot: ContextSnapshot | None = None
     span_id: str = ""
 
 

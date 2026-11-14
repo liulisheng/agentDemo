@@ -85,3 +85,15 @@ def test_run_trace_excludes_sibling_run_spans() -> None:
     first_trace = service.get_trace(identity, first.run_id)
     assert all(span.run_id in {"", first.run_id} for span in first_trace.spans)
     assert any(span.run_id == second.run_id for span in service.get_session_trace(identity, session.session_id))
+
+
+def test_control_plane_can_persist_run_snapshot_and_runtime_refs() -> None:
+    from agent_platform.infrastructure.persistence import InMemorySessionRunPersistence
+
+    service, identity, deployment = _published_service()
+    persistence = InMemorySessionRunPersistence()
+    integrated = ControlPlaneService(service.catalog, FakeRuntimeAdapter(), persistence=persistence)
+    session = integrated.create_session(identity, deployment.deployment_id)
+    run = integrated.create_run(identity, session.session_id, "hello", "persist-1")
+    persisted = persistence.get_run(identity, run.run_id)
+    assert persisted["runtime_refs"]["runtime_session_ref"].startswith("fake-session-")

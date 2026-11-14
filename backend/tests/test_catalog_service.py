@@ -59,3 +59,27 @@ def test_cross_tenant_deployment_is_hidden() -> None:
     with pytest.raises(DomainError) as error:
         service.resolve_deployment(other, deployment.deployment_id)
     assert error.value.code == "RESOURCE_NOT_FOUND"
+
+
+def test_publish_validates_model_route_workspace_and_sandbox_references() -> None:
+    service, identity = _service()
+    repo = service.repository
+    repo.model_routes[(identity.platform_id, identity.tenant_id, "route-1")] = object()
+    repo.workspace_profiles[(identity.platform_id, identity.tenant_id, "workspace-1")] = object()
+    repo.sandbox_profiles[(identity.platform_id, identity.tenant_id, "sandbox-1")] = object()
+    tool = service.create_tool(identity, "echo", "回显", {"type": "object"})
+    service.publish_tool(identity, tool.tool_id)
+    skill = service.create_skill(identity, "技能", SkillType.INSTRUCTION, "回答", [])
+    service.publish_skill(identity, skill.skill_id)
+    employee = service.create_employee(identity, "助手", "支持", "支持")
+    version = service.create_employee_version(
+        identity,
+        employee.employee_id,
+        "prompt",
+        [skill.skill_id],
+        [],
+        model_route_id="route-1",
+        workspace_profile_id="workspace-1",
+        sandbox_profile_id="sandbox-1",
+    )
+    assert service.publish_employee_version(identity, employee.employee_id, version.version).status is LifecycleStatus.PUBLISHED

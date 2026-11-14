@@ -58,3 +58,22 @@ def test_fake_runtime_rejects_unknown_session() -> None:
                 allowed_tools=(),
             )
         )
+
+
+def test_fake_runtime_exposes_opaque_thread_and_workspace_and_cancel() -> None:
+    runtime = FakeRuntimeAdapter()
+    session_ref = runtime.create_session()
+    result = runtime.run(
+        RuntimeRequest(
+            run_id="run-2",
+            session_ref=session_ref,
+            prompt="hello",
+            skill_instructions=(),
+            allowed_tools=(),
+            workspace_ref="fake-workspace-1",
+        )
+    )
+
+    assert result.runtime_thread_ref
+    assert result.runtime_workspace_ref == "fake-workspace-1"
+    assert runtime.cancel(session_ref)

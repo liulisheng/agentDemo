@@ -147,10 +147,18 @@ class ExecutionProfile:
     context_policy: str = "default"
     version: int = 1
     status: LifecycleStatus = LifecycleStatus.DRAFT
+    model_route_id: str | None = None
+    workspace_profile_id: str | None = None
+    sandbox_profile_id: str | None = None
+    approval_policy: str = "none"
 
     def __post_init__(self) -> None:
         for field_name in ("profile_id", "tenant_id", "engine_name", "model_alias"):
             _text(getattr(self, field_name), field_name)
+        for field_name in ("model_route_id", "workspace_profile_id", "sandbox_profile_id"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _text(value, field_name)
         if self.version < 1:
             raise ValueError("version must be positive")
 
@@ -172,6 +180,10 @@ class DigitalEmployeeVersion:
     tool_version_ids: tuple[str, ...]
     execution_profile_id: str
     status: LifecycleStatus = LifecycleStatus.DRAFT
+    model_route_id: str | None = None
+    workspace_profile_id: str | None = None
+    sandbox_profile_id: str | None = None
+    approval_policy: str = "none"
 
     def __post_init__(self) -> None:
         for field_name in ("employee_id", "tenant_id", "system_prompt", "execution_profile_id"):
@@ -180,6 +192,10 @@ class DigitalEmployeeVersion:
             raise ValueError("version must be positive")
         if not isinstance(self.skill_version_ids, tuple) or not isinstance(self.tool_version_ids, tuple):
             raise TypeError("version references must be tuples")
+        for field_name in ("model_route_id", "workspace_profile_id", "sandbox_profile_id"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _text(value, field_name)
 
     def publish(self) -> DigitalEmployeeVersion:
         self.assert_mutable()

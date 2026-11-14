@@ -35,6 +35,10 @@ class EmployeeVersionCreateRequest(TenantAwareRequest):
     skill_ids: list[str] = Field(default_factory=list)
     tool_ids: list[str] = Field(default_factory=list)
     execution_profile_id: str = "profile-fake"
+    model_route_id: str | None = None
+    workspace_profile_id: str | None = None
+    sandbox_profile_id: str | None = None
+    approval_policy: str = "none"
 
 
 class DeploymentCreateRequest(TenantAwareRequest):
@@ -49,3 +53,45 @@ class SessionCreateRequest(TenantAwareRequest):
 class RunCreateRequest(TenantAwareRequest):
     prompt: str
     idempotency_key: str | None = None
+
+class ModelRouteCreateRequest(TenantAwareRequest):
+    alias: str
+    model_name: str
+    provider: str = "fake"
+    endpoint: str = "fake://model"
+    secret_id: str | None = None
+
+
+class ConversationCreateRequest(TenantAwareRequest):
+    title: str
+    is_group: bool = False
+
+
+class AgentBindingRequest(TenantAwareRequest):
+    employee_id: str
+    employee_name: str
+    session_id: str
+
+
+class MessageCreateRequest(TenantAwareRequest):
+    sender_id: str
+    text: str
+    source: str = "user"
+    routing_depth: int = 0
+
+
+class DeliveryCreateRequest(TenantAwareRequest):
+    body: str
+    idempotency_key: str
+
+class ExecutionProfileCreateRequest(TenantAwareRequest):
+    engine_name: str = "fake"
+    model_alias: str = "fake-model"
+    model_route_id: str | None = None
+    workspace_profile_id: str | None = None
+    sandbox_profile_id: str | None = None
+    approval_policy: str = "none"
+
+class DeploymentRollbackRequest(TenantAwareRequest):
+    employee_id: str
+    version: int

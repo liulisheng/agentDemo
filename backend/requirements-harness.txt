@@ -1,0 +1,2 @@
+# 可选的本地 Runtime 集成；控制面默认仍可离线使用 FakeRuntime。
+-e ../harness-engine

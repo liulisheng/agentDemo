@@ -154,3 +154,23 @@ def test_api_body_cannot_switch_tenant() -> None:
     )
     assert response.status_code == 403
     assert response.json()["code"] == "AUTHORIZATION_DENIED"
+
+
+def test_api_lists_catalog_and_rolls_back_deployment() -> None:
+    client = TestClient(create_app())
+    headers = HEADERS
+    tool = client.post("/api/v1/tools", headers=headers, json={"name": "echo", "description": "回显"}).json()
+    client.post(f"/api/v1/tools/{tool['id']}/publish", headers=headers)
+    skill = client.post("/api/v1/skills", headers=headers, json={"name": "技能", "skill_type": "instruction", "instruction": "回答"}).json()
+    client.post(f"/api/v1/skills/{skill['id']}/publish", headers=headers)
+    employee = client.post("/api/v1/digital-employees", headers=headers, json={"name": "助手", "role_name": "支持", "description": "支持"}).json()
+    client.post(f"/api/v1/digital-employees/{employee['id']}/versions", headers=headers, json={"system_prompt": "p", "skill_ids": [skill['id']]}).json()
+    client.post(f"/api/v1/digital-employees/{employee['id']}/versions/1/publish", headers=headers)
+    deployment = client.post("/api/v1/deployments", headers=headers, json={"employee_id": employee['id'], "version": 1}).json()
+    client.post(f"/api/v1/digital-employees/{employee['id']}/versions", headers=headers, json={"system_prompt": "p2", "skill_ids": [skill['id']]}).json()
+    client.post(f"/api/v1/digital-employees/{employee['id']}/versions/2/publish", headers=headers)
+    rollback = client.post(f"/api/v1/deployments/{deployment['id']}/rollback", headers=headers, json={"employee_id": employee['id'], "version": 1})
+    assert rollback.status_code == 200
+    assert rollback.json()["version"] == 1
+    assert client.get("/api/v1/tools", headers=headers).status_code == 200
+    assert client.get("/api/v1/skills", headers=headers).status_code == 200
