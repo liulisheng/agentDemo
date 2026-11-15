@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from agent_platform.domain.catalog import (
+    AuditEventRecord,
     Deployment,
     DigitalEmployee,
     DigitalEmployeeVersion,
@@ -40,6 +42,13 @@ class CatalogRepository(Protocol):
     ) -> tuple[DigitalEmployeeVersion, ...]: ...
 
     def save_skill(self, identity: IdentityContext, value: SkillVersion) -> None: ...
+
+    def save_skill_if_revision_matches(
+        self,
+        identity: IdentityContext,
+        value: SkillVersion,
+        expected_revision: SkillVersion,
+    ) -> None: ...
 
     def get_skill_version(
         self, identity: IdentityContext, skill_id: str, version: int
@@ -104,3 +113,15 @@ class DeploymentRepository(Protocol):
     def get_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment: ...
 
     def list_deployments(self, identity: IdentityContext) -> tuple[Deployment, ...]: ...
+
+    def list_audit_events(
+        self,
+        identity: IdentityContext,
+        *,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 100,
+        before_created_at: datetime | None = None,
+        before_event_id: str | None = None,
+    ) -> tuple[AuditEventRecord, ...]: ...

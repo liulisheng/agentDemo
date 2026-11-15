@@ -140,3 +140,14 @@ def test_catalog_service_publishes_deploys_rolls_back_and_scopes_tenant(mysql_ca
     assert restarted_service.resolve_deployment(identity, deployment2.deployment_id).employee_version.status is LifecycleStatus.PUBLISHED
     assert restarted_service.resolve_deployment(identity, deployment2.deployment_id).employee_version.version == 1
     assert control_plane.get_run(identity, run.run_id).snapshot.employee_version == 1
+    audit_page = restarted_service.list_audit_events_page(
+        identity,
+        resource_type="deployment",
+        resource_id=deployment2.deployment_id,
+        limit=10,
+    )
+    assert {event.event_type for event in audit_page.items} == {
+        "DEPLOYMENT_CREATED",
+        "DEPLOYMENT_ROLLED_BACK",
+    }
+    assert all(event.tenant_id == identity.tenant_id for event in audit_page.items)

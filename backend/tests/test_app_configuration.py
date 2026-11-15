@@ -47,6 +47,7 @@ def test_mysql_application_closes_resources_on_shutdown() -> None:
         catalog_repository=InMemoryCatalogRepository(),
         execution_repository=object(),
         conversation_repository=object(),
+        resource_center_repository=object(),
         object_store=object(),
         lifecycle_resources=(resource,),
     )

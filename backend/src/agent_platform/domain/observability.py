@@ -44,6 +44,44 @@ class TraceSpan:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillFileSnapshotEntry:
+    """Run 固定的 Skill 文件引用；对象内容仍由租户 MediaAsset 授权读取。"""
+
+    file_path: str
+    media_asset_id: str
+    mime_type: str
+    size_bytes: int
+    content_sha256: str
+    asset_platform_id: str = ""
+    asset_tenant_id: str = ""
+    source_mode: str = "LOCAL"
+
+
+@dataclass(frozen=True, slots=True)
+class SkillFilePackageSnapshot:
+    """Run 固定的 Skill 文件入口、清单摘要和只读文件 refs。"""
+
+    skill_id: str
+    skill_version: int
+    entry_path: str
+    manifest_sha256: str
+    files: tuple[SkillFileSnapshotEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HubResourceSnapshot:
+    """Run 使用的 Hub 来源固定记录；保存版本/摘要/模式，不保存 Package 正文。"""
+
+    local_resource_type: str
+    local_resource_id: str
+    local_resource_version: int
+    hub_resource_id: str
+    hub_version: int
+    manifest_sha256: str
+    mode: str
+
+
+@dataclass(frozen=True, slots=True)
 class RunSnapshot:
     """Run 启动时复制的版本快照，后续发布不会改变它。"""
 
@@ -56,6 +94,8 @@ class RunSnapshot:
     tool_version_refs: tuple[tuple[str, int], ...] = ()
     execution_profile_version: int = 1
     model_route_id: str | None = None
+    hub_resource_refs: tuple[HubResourceSnapshot, ...] = ()
+    skill_file_packages: tuple[SkillFilePackageSnapshot, ...] = ()
 
 
 @dataclass(slots=True)

@@ -2,7 +2,7 @@
 
 `docs/migrations/` 是仓库中唯一的可执行 schema/migration SQL 目录。V001/V002 是历史迁移，禁止为补注释或兼容代码而修改；新增或修改表结构时必须新增 migration，并为每张新表和每个新建/变更字段添加中文 MySQL `COMMENT`。MySQL 集成测试读取 `information_schema.TABLES` 和 `information_schema.COLUMNS` 验证实际落库注释。
 
-当前迁移面向 MySQL 8.4、InnoDB 和 `utf8mb4_0900_ai_ci`。V003 是在首次共享环境应用前完成的控制面迁移。如果任何共享环境已经应用较早的 V003 草案，不得重写 V003，应先核对 schema/checksum 并制定向前兼容的 V004。当前仓库没有针对未知 V003 草案数据的通用 V004；Runner 会 fail closed。
+当前迁移面向 MySQL 8.4、InnoDB 和 `utf8mb4_0900_ai_ci`。V003 是在首次共享环境应用前完成的控制面迁移。如果任何共享环境已经应用较早的 V003 草案，不得重写 V003，应先核对 schema/checksum 并制定向前兼容的 V004。当前 V004 是资源中心向前迁移，V005 增加 Skill `INLINE`/`FILE_PACKAGE` 模式与文件清单；Runner 会在检测到部分 V005 DDL 或版本标记不一致时 fail closed。
 
 ## 显式预检和迁移
 
@@ -34,7 +34,7 @@ python -m pytest tests/integration/test_production_control_plane_migration.py \
   tests/integration/test_mysql_migration_runner.py -q
 ```
 
-测试覆盖 V003 正向/回滚、外键与租户联合键、CHAR(26) 主键、中文表/字段注释、重复迁移、checksum 变化和失败停止。运行版本和最终 checksum 记录在 [`../验证记录.md`](../验证记录.md)。
+测试覆盖 V003 正向/回滚、V004 资源中心和 V005 Skill 文件包迁移、外键与租户联合键、中文表/字段注释、重复迁移、checksum 变化和失败停止。V005 文件包清单外键确保文件行与当前租户 Skill 版本和 MediaAsset 同平台同租户。运行版本和最终 checksum 记录在 [`../验证记录.md`](../验证记录.md)。
 
 ## 备份与回滚
 

@@ -27,6 +27,17 @@ V003_SENTINEL_OBJECTS = frozenset(
         "usage_ledger",
     }
 )
+V004_SENTINEL_OBJECTS = frozenset(
+    {
+        "hub_resources",
+        "hub_resource_versions",
+        "hub_resource_dependencies",
+        "hub_resource_grants",
+        "tenant_resource_imports",
+    }
+)
+V005_SENTINEL_OBJECTS = frozenset({"skill_file_entries"})
+V005_SKILL_COLUMNS = frozenset({"content_format", "entry_path", "file_manifest_sha256"})
 V001_SENTINEL_OBJECTS = frozenset(
     {"schema_version", "platforms", "tenants", "users", "sessions", "runs", "audit_events"}
 )
@@ -270,7 +281,7 @@ def main(
 
 
 class MigrationPreflight:
-    """比较当前 schema 与 migration 文件，只建议 V003 或 forward V004。"""
+    """比较当前 schema 与 migration 文件，只建议按版本执行或使用向前迁移。"""
 
     def __init__(self, expected_checksums: Mapping[int, str] | None = None) -> None:
         self._checksums = dict(expected_checksums or {})
@@ -289,9 +300,15 @@ class MigrationPreflight:
             expected = self._checksums.get(version)
             if expected is None or expected == applied_checksum:
                 continue
-            # 只允许把正在核对的草稿 V003 转成 V004；历史版本或当前版本的 checksum
-            # 不一致表示数据库历史与仓库不一致，必须停止而不是继续猜测。
-            if not (version == 3 and current == 3):
+            # 已应用向前迁移后，V003 草案 checksum 差异由已核验的 V004 接管；
+            # V004 本身和其他历史版本 checksum 不一致时继续 fail closed。
+            forward_checkpoint_valid = bool(
+                version == 3
+                and current is not None
+                and current >= 4
+                and baseline.applied_checksums.get(4) == self._checksums.get(4)
+            )
+            if not (version == 3 and current == 3) and not forward_checkpoint_valid:
                 errors.append(f"checksum_mismatch:V{version:03d}")
             else:
                 warnings.append(f"checksum_mismatch:V{version:03d}")
@@ -310,7 +327,16 @@ class MigrationPreflight:
         if baseline.introspection_available:
             current_objects = baseline.schema_objects
             any_known_objects = bool(
-                current_objects.intersection(V001_SENTINEL_OBJECTS | V002_SENTINEL_OBJECTS | V003_SENTINEL_OBJECTS)
+                current_objects.intersection(
+                    V001_SENTINEL_OBJECTS
+                    | V002_SENTINEL_OBJECTS
+                    | V003_SENTINEL_OBJECTS
+                    | V004_SENTINEL_OBJECTS
+                    | V005_SENTINEL_OBJECTS
+                )
+                or baseline.schema_columns.get("skill_versions", frozenset()).intersection(
+                    V005_SKILL_COLUMNS
+                )
             )
             if current is None and any_known_objects:
                 return MigrationPreflightResult(
@@ -357,6 +383,46 @@ class MigrationPreflight:
                 errors=("partial_v003_schema:" + ",".join(missing),),
             )
 
+        found_v004_objects = baseline.schema_objects.intersection(V004_SENTINEL_OBJECTS)
+        if found_v004_objects and found_v004_objects != V004_SENTINEL_OBJECTS:
+            missing = sorted(V004_SENTINEL_OBJECTS.difference(found_v004_objects))
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v004_schema:" + ",".join(missing),),
+            )
+        if found_v004_objects == V004_SENTINEL_OBJECTS and (current is None or current < 4):
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                errors=("v004_objects_present_without_schema_version",),
+            )
+
+        found_v005_objects = baseline.schema_objects.intersection(V005_SENTINEL_OBJECTS)
+        skill_columns = baseline.schema_columns.get("skill_versions", frozenset())
+        found_v005_columns = skill_columns.intersection(V005_SKILL_COLUMNS)
+        found_any_v005 = bool(found_v005_objects or found_v005_columns)
+        complete_v005 = (
+            found_v005_objects == V005_SENTINEL_OBJECTS
+            and found_v005_columns == V005_SKILL_COLUMNS
+        )
+        if found_any_v005 and not complete_v005:
+            missing = sorted(V005_SENTINEL_OBJECTS.difference(found_v005_objects))
+            missing.extend(sorted(V005_SKILL_COLUMNS.difference(found_v005_columns)))
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v005_schema:" + ",".join(missing),),
+            )
+        if complete_v005 and (current is None or current < 5):
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                errors=("v005_objects_present_without_schema_version",),
+            )
+
         v003_present = found_v003_objects == V003_SENTINEL_OBJECTS
         if v003_present and (current is None or current < 3):
             warnings.append("v003_objects_present_without_schema_version")
@@ -376,30 +442,51 @@ class MigrationPreflight:
             )
 
         if current is not None and current >= 3:
+            if current >= 4 and found_v004_objects != V004_SENTINEL_OBJECTS:
+                missing = sorted(V004_SENTINEL_OBJECTS.difference(found_v004_objects))
+                return MigrationPreflightResult(
+                    PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                    current,
+                    errors=("partial_v004_schema:" + ",".join(missing),),
+                )
+            if current >= 5 and not complete_v005:
+                missing = sorted(V005_SENTINEL_OBJECTS.difference(found_v005_objects))
+                missing.extend(sorted(V005_SKILL_COLUMNS.difference(found_v005_columns)))
+                return MigrationPreflightResult(
+                    PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                    current,
+                    errors=("partial_v005_schema:" + ",".join(missing),),
+                )
             if current == 3:
                 applied = baseline.applied_checksums.get(3)
                 expected = self._checksums.get(3)
                 if applied is None or expected is None:
+                    pending = tuple(f"V{version:03d}" for version in sorted(self._checksums) if version > current)
                     warnings.append("v003_checksum_unavailable_requires_forward_migration")
                     return MigrationPreflightResult(
                         PreflightAction.USE_FORWARD_MIGRATION,
                         current,
-                        migrations_to_apply=("V004",),
+                        migrations_to_apply=pending or ("V004",),
                         warnings=tuple(warnings),
                     )
                 if applied != expected:
                     warnings.append("checksum_mismatch:V003")
+                    pending = tuple(f"V{version:03d}" for version in sorted(self._checksums) if version > current)
                     return MigrationPreflightResult(
                         PreflightAction.USE_FORWARD_MIGRATION,
                         current,
-                        migrations_to_apply=("V004",),
+                        migrations_to_apply=pending or ("V004",),
                         warnings=tuple(warnings),
                     )
-            return MigrationPreflightResult(
-                PreflightAction.UP_TO_DATE,
-                current,
-                warnings=tuple(warnings),
-            )
+            pending = tuple(f"V{version:03d}" for version in sorted(self._checksums) if version > current)
+            if pending:
+                return MigrationPreflightResult(
+                    PreflightAction.APPLY_MIGRATIONS,
+                    current,
+                    migrations_to_apply=pending,
+                    warnings=tuple(warnings),
+                )
+            return MigrationPreflightResult(PreflightAction.UP_TO_DATE, current, warnings=tuple(warnings))
 
         if current is None:
             start = 1
@@ -413,7 +500,7 @@ class MigrationPreflight:
             start = current + 1
 
         available_versions = sorted(self._checksums) or [1, 2, 3]
-        pending = tuple(f"V{version:03d}" for version in available_versions if version >= start and version <= 3)
+        pending = tuple(f"V{version:03d}" for version in available_versions if version >= start)
         if not pending:
             return MigrationPreflightResult(
                 PreflightAction.BLOCK_INCONSISTENT_SCHEMA,

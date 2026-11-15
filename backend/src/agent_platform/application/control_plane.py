@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 
 from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.context import BusinessContextAssembler
 from agent_platform.application.resolvers import AgentResolver
+from agent_platform.domain.catalog import Deployment, LifecycleStatus
 from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.context import BusinessContextPolicy
 from agent_platform.domain.execution import RuntimeReference, RuntimeStatus, UsageRecord
@@ -19,7 +21,8 @@ from agent_platform.domain.observability import (
     TraceSpan,
 )
 from agent_platform.ports.execution_repository import ExecutionRepository
-from agent_platform.ports.runtime import RuntimeAdapter, RuntimeEvent, RuntimeRequest
+from agent_platform.ports.resource_center import ResourceCenterRepository
+from agent_platform.ports.runtime import RuntimeAdapter, RuntimeEvent, RuntimeRequest, RuntimeResult
 from agent_platform.ports.storage import ObjectStore, UploadRequest
 
 
@@ -32,12 +35,15 @@ class ControlPlaneService:
         runtime: RuntimeAdapter,
         persistence: ExecutionRepository | None = None,
         object_store: ObjectStore | None = None,
+        resource_center_repository: ResourceCenterRepository | None = None,
     ) -> None:
         self.catalog = catalog
         self.runtime = runtime
         self.persistence = persistence
         self.object_store = object_store
-        self.agent_resolver = AgentResolver(catalog)
+        self.agent_resolver = AgentResolver(
+            catalog, resource_center_repository, object_store=object_store
+        )
         self.context_assembler = BusinessContextAssembler(BusinessContextPolicy())
         self._sessions: dict[tuple[str, str, str], SessionRecord] = {}
         self._runs: dict[tuple[str, str, str], RunRecord] = {}
@@ -131,30 +137,6 @@ class ControlPlaneService:
             self.persistence.register_session(identity, session_id, deployment_id, trace_id)
         return session
 
-    def _selected_tools(
-        self,
-        identity: IdentityContext,
-        employee_version: object,
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        skill_instructions: list[str] = []
-        declared_tool_ids: set[str] = set()
-        for skill_id in employee_version.skill_version_ids:
-            skill = self.catalog.repository.get_skill(identity, skill_id)
-            skill_instructions.append(skill.instruction)
-            declared_tool_ids.update(skill.allowed_tool_ids)
-        employee_tool_ids = set(employee_version.tool_version_ids)
-        allowed_ids = declared_tool_ids.intersection(employee_tool_ids)
-        names_by_id = {
-            tool_id: self.catalog.repository.get_tool(identity, tool_id).name
-            for tool_id in allowed_ids
-        }
-        profile = self.catalog.repository.get_profile(identity, employee_version.execution_profile_id)
-        if profile.tool_policy:
-            names_by_id = {
-                tool_id: name for tool_id, name in names_by_id.items() if name in profile.tool_policy
-            }
-        return tuple(skill_instructions), tuple(names_by_id.values())
-
     def _event_to_span(
         self,
         trace_id: str,
@@ -203,8 +185,8 @@ class ControlPlaneService:
                     raise DomainError("IDEMPOTENCY_CONFLICT", "幂等键对应的请求内容已改变")
                 return self._get_run(identity, previous_run_id)
         deployment = self.catalog.resolve_deployment(identity, session.deployment_id)
-        employee_version = deployment.employee_version
-        snapshot = self.agent_resolver.snapshot(identity, deployment)
+        resolved_agent = self.agent_resolver.resolve(identity, deployment)
+        snapshot = resolved_agent.snapshot
         run = RunRecord(
             run_id=self._new_id("run"),
             session_id=session.session_id,
@@ -215,7 +197,8 @@ class ControlPlaneService:
             snapshot=snapshot,
             status=RuntimeStatus.UNKNOWN,
         )
-        skill_instructions, allowed_tools = self._selected_tools(identity, employee_version)
+        skill_instructions = resolved_agent.skill_instructions
+        allowed_tools = resolved_agent.allowed_tools
         context_snapshot = self.context_assembler.assemble(
             run_id=run.run_id,
             trace_id=session.trace_id,
@@ -255,14 +238,29 @@ class ControlPlaneService:
             attributes={"employee_version": snapshot.employee_version},
         )
         run.span_id = run_span.span_id
+        file_package_by_skill = {
+            package.skill_id: package for package in snapshot.skill_file_packages
+        }
         for skill_id in snapshot.skill_version_ids:
+            file_package = file_package_by_skill.get(skill_id)
             self._append_span(
                 session.trace_id,
                 run_id=run.run_id,
                 span_type=SpanType.SKILL,
                 status="selected",
                 parent_span_id=run.span_id,
-                attributes={"skill_id": skill_id},
+                attributes={
+                    "skill_id": skill_id,
+                    **(
+                        {
+                            "file_manifest_sha256": file_package.manifest_sha256,
+                            "file_count": len(file_package.files),
+                            "entry_path": file_package.entry_path,
+                        }
+                        if file_package is not None
+                        else {}
+                    ),
+                },
             )
         self._append_span(
             session.trace_id,
@@ -280,6 +278,8 @@ class ControlPlaneService:
                     prompt=prompt,
                     skill_instructions=skill_instructions,
                     allowed_tools=allowed_tools,
+                    system_prompt=resolved_agent.system_prompt,
+                    skill_file_packages=resolved_agent.skill_file_packages,
                 )
             )
         except Exception:
@@ -402,6 +402,50 @@ class ControlPlaneService:
                 run.run_id,
             )
         return run
+
+    def test_employee_version(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        version: int,
+        prompt: str,
+    ) -> RuntimeResult:
+        """对 DRAFT 版本执行一次不创建 Deployment/Session/Run/Trace 的管理员预览。"""
+
+        if "admin" not in identity.roles:
+            raise DomainError("AUTHORIZATION_DENIED", "只有租户管理员可以测试员工版本")
+        if not prompt.strip():
+            raise DomainError("INVALID_ARGUMENT", "测试 prompt 不能为空")
+        employee = self.catalog.repository.get_employee(identity, employee_id)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能测试版本")
+        employee_version = self.catalog.repository.get_employee_version(identity, employee_id, version)
+        if employee_version.status not in {LifecycleStatus.DRAFT, LifecycleStatus.PUBLISHED}:
+            raise DomainError("INVALID_STATE", "当前员工版本状态不支持测试")
+        preview_version = (
+            employee_version
+            if employee_version.status is LifecycleStatus.PUBLISHED
+            else replace(employee_version, status=LifecycleStatus.PUBLISHED)
+        )
+        deployment = Deployment(
+            deployment_id=generate_database_id(),
+            tenant_id=identity.tenant_id,
+            employee_id=employee_id,
+            employee_version=preview_version,
+        )
+        resolved_agent = self.agent_resolver.resolve(identity, deployment)
+        return self.runtime.run(
+            RuntimeRequest(
+                run_id=generate_database_id(),
+                session_ref=None,
+                prompt=prompt,
+                skill_instructions=resolved_agent.skill_instructions,
+                allowed_tools=resolved_agent.allowed_tools,
+                system_prompt=resolved_agent.system_prompt,
+                skill_file_packages=resolved_agent.skill_file_packages,
+                metadata={"execution_mode": "draft_test"},
+            )
+        )
 
     def get_run(self, identity: IdentityContext, run_id: str) -> RunRecord:
         try:

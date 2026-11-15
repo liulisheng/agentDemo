@@ -15,3 +15,64 @@ body { margin: 0; min-width: 1100px; }
 .content-stack { width: 100%; }
 .employee-grid { display: grid; grid-template-columns: repeat(3, minmax(280px, 1fr)); gap: 20px; }
 .employee-card { min-height: 220px; }
+
+.management-shell { min-height: 100vh; background: #f5f7fb; }
+.management-sider { border-right: 1px solid #e8ecf3; background: #fff; }
+.management-brand { display: flex; align-items: center; gap: 10px; padding: 20px 18px 28px; font-size: 16px; font-weight: 700; }
+.brand-mark { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 9px; color: #fff; background: #3456d1; }
+.management-nav-label { padding: 0 18px 8px; color: #8b92a3; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.management-nav { display: grid; gap: 4px; padding: 0 10px; }
+.management-nav-link { padding: 11px 12px; border-radius: 8px; color: #4b5263; text-decoration: none; font-weight: 500; }
+.management-nav-link:hover { color: #2444be; background: #f3f6ff; }
+.management-nav-link.selected { color: #2444be; background: #eaf0ff; font-weight: 650; }
+.management-header { display: flex; height: 70px; align-items: center; justify-content: space-between; padding: 0 28px; background: #fff; border-bottom: 1px solid #e8ecf3; }
+.management-header .tenant-title { margin: 2px 0 0; }
+.tenant-switcher { display: flex; align-items: center; gap: 10px; color: #70788b; font-size: 12px; }
+.tenant-switcher select { min-width: 165px; padding: 8px 10px; border: 1px solid #dce1ea; border-radius: 7px; color: #262b38; background: white; }
+.management-content { min-height: calc(100vh - 70px); padding: 28px 32px; }
+.management-page { max-width: 1440px; margin: 0 auto; }
+.management-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.management-page-header .ant-typography { margin-top: 0; }
+.management-eyebrow { display: block; margin-bottom: 6px; color: #7b8497; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.management-filter-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+.management-card { border: 1px solid #e8ecf3; border-radius: 12px; box-shadow: 0 2px 8px rgba(28, 42, 75, .03); }
+.management-card + .management-card { margin-top: 16px; }
+.management-stat { color: #737c90; font-size: 12px; }
+.management-empty { padding: 56px 0; text-align: center; }
+.management-loading { display: flex; min-height: 180px; align-items: center; justify-content: center; gap: 10px; color: #81899a; }
+.management-pagination { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; }
+.employee-name-link { display: inline-flex; flex-direction: column; gap: 3px; color: #202739; text-decoration: none; }
+.employee-name-link:hover .employee-name-primary { color: #3155cf; }
+.employee-name-primary { font-weight: 600; }
+.employee-name-secondary { color: #8a92a2; font-size: 12px; }
+.employee-detail-title { margin-bottom: 0 !important; }
+.employee-version-table { margin-top: 14px; }
+.version-snapshot-grid { display: grid; grid-template-columns: minmax(300px, .9fr) minmax(340px, 1.1fr); gap: 24px; }
+.prompt-preview { min-height: 96px; margin: 8px 0 0; padding: 12px; overflow: auto; border: 1px solid #edf0f5; border-radius: 8px; color: #343b4d; background: #fafbfc; white-space: pre-wrap; font: inherit; }
+.resource-ref-list { display: grid; gap: 8px; }
+.resource-ref-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px; border: 1px solid #edf0f5; border-radius: 8px; }
+.skill-file-workspace-grid { display: grid; grid-template-columns: minmax(260px, .7fr) minmax(500px, 1.6fr); gap: 18px; margin-top: 18px; }
+.skill-file-tree-card, .skill-file-editor-card { min-height: 540px; }
+.file-editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.file-editor-toolbar .ant-typography { margin-bottom: 2px; }
+.skill-file-editor { min-height: 430px !important; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.65; }
+.file-action-error { margin-top: 12px; }
+.file-readonly-alert { margin-bottom: 16px; }
+.zip-upload-button { display: inline-flex; height: 32px; align-items: center; padding: 0 15px; border: 1px solid #d9d9d9; border-radius: 6px; color: #333b4d; cursor: pointer; }
+.zip-upload-button:hover { border-color: #4262d4; color: #3155cf; }
+.zip-preview-content { width: 100%; }
+.modal-warning { margin-top: 12px; }
+.deployment-modal-content { width: 100%; }
+.deployment-modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.audit-event-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 4px; border-bottom: 1px solid #edf0f5; }
+.audit-event-row:last-child { border-bottom: 0; }
+.hub-resource-name { padding-left: 0; font-weight: 600; }
+.hub-import-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 4px; border-bottom: 1px solid #edf0f5; }
+.hub-import-row:last-child { border-bottom: 0; }
+.hub-import-meta { margin-top: 4px; color: #858d9e; font-size: 12px; }
+.hub-detail-content { width: 100%; }
+.hub-detail-content .ant-table-wrapper { width: 100%; }
+.management-two-column { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(320px, .8fr); gap: 18px; }
+.management-version-list { display: grid; gap: 8px; }
+.management-version-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px; border: 1px solid #eaedf3; border-radius: 9px; background: #fff; }
+.management-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }

@@ -47,7 +47,19 @@ class HarnessRuntimeAdapter:
     def run(self, request: RuntimeRequest) -> RuntimeResult:
         session_ref = request.session_ref or self.create_session()
         engine = self._ensure_engine()
-        engine_request = type("PlatformRequest", (), {"prompt": request.prompt, "session_id": session_ref, "run_id": request.run_id})()
+        engine_request = type(
+            "PlatformRequest",
+            (),
+            {
+                "prompt": request.prompt,
+                "system_prompt": request.system_prompt,
+                "skill_instructions": request.skill_instructions,
+                "allowed_tools": request.allowed_tools,
+                "skill_file_packages": request.skill_file_packages,
+                "session_id": session_ref,
+                "run_id": request.run_id,
+            },
+        )()
         result = engine.run(engine_request)
         text = str(getattr(result, "text", ""))
         result_ref = str(getattr(result, "result_ref", f"{self._engine_name}-result"))

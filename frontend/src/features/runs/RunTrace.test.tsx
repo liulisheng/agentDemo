@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, expect, test, vi } from 'vitest'
 
 import { RunTracePage } from './RunTrace'
+import { TenantProvider } from '../management/TenantContext'
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -31,11 +32,13 @@ function renderTrace() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={['/workspace/runs/run-1/trace']}>
-        <Routes>
-          <Route path="/workspace/runs/:runId/trace" element={<RunTracePage />} />
-        </Routes>
-      </MemoryRouter>
+      <TenantProvider>
+        <MemoryRouter initialEntries={['/workspace/runs/run-1/trace']}>
+          <Routes>
+            <Route path="/workspace/runs/:runId/trace" element={<RunTracePage />} />
+          </Routes>
+        </MemoryRouter>
+      </TenantProvider>
     </QueryClientProvider>,
   )
 }

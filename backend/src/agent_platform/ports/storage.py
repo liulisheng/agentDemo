@@ -242,6 +242,12 @@ class ObjectStore(Protocol):
     def read(self, object_ref: str, platform_id: str, tenant_id: str, *, max_bytes: int = 10 * 1024 * 1024) -> bytes:
         ...
 
+    def read_asset(
+        self, asset_id: str, platform_id: str, tenant_id: str, *, max_bytes: int = 10 * 1024 * 1024
+    ) -> bytes:
+        """通过当前租户 MediaAsset ID 受控读取对象字节。"""
+        ...
+
     def get(self, object_ref: str, platform_id: str, tenant_id: str, *, max_bytes: int = 10 * 1024 * 1024) -> bytes:
         ...
 
@@ -262,6 +268,8 @@ class MediaAssetRepository(Protocol):
     def publish_upload(self, upload_id: str, asset: MediaAsset) -> None: ...
 
     def get_asset(self, object_ref: str, platform_id: str, tenant_id: str) -> MediaAsset | None: ...
+
+    def get_asset_by_id(self, asset_id: str, platform_id: str, tenant_id: str) -> MediaAsset | None: ...
 
     def mark_deleted_and_enqueue(self, object_ref: str, platform_id: str, tenant_id: str) -> None: ...
 
@@ -432,6 +440,34 @@ class LocalObjectStore:
         """兼容文档中的 get 命名，仍复用受控读取逻辑。"""
 
         return self.read(object_ref, platform_id, tenant_id, max_bytes=max_bytes)
+
+    def read_asset(
+        self,
+        asset_id: str,
+        platform_id: str,
+        tenant_id: str,
+        *,
+        max_bytes: int = 10 * 1024 * 1024,
+    ) -> bytes:
+        """按租户授权的 MediaAsset ID 读取文件，调用方无需持有可枚举 object_ref。"""
+
+        asset = (
+            self._metadata_repository.get_asset_by_id(asset_id, platform_id, tenant_id)
+            if self._metadata_repository is not None
+            else next(
+                (
+                    item
+                    for item in self._assets.values()
+                    if item.asset_id == asset_id
+                    and item.platform_id == platform_id
+                    and item.tenant_id == tenant_id
+                ),
+                None,
+            )
+        )
+        if asset is None:
+            raise PermissionError("asset is outside the authorized scope")
+        return self.read(asset.object_ref, platform_id, tenant_id, max_bytes=max_bytes)
 
     def delete(self, object_ref: str, platform_id: str, tenant_id: str) -> None:
         asset = (

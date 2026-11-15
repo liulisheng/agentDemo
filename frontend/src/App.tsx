@@ -1,22 +1,44 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 
 import { EmployeeGallery } from './features/digital-employees/EmployeeGallery'
+import { EmployeeDetailPage } from './features/digital-employees/EmployeeDetailPage'
+import { EmployeeListPage } from './features/digital-employees/EmployeeListPage'
+import { EmployeeVersionEditorPage } from './features/digital-employees/EmployeeVersionEditorPage'
+import { SkillFileWorkspacePage } from './features/digital-employees/SkillFileWorkspacePage'
+import { ToolManagementPage } from './features/digital-employees/ToolManagementPage'
+import { DeploymentListPage } from './features/deployments/DeploymentListPage'
+import { ResourceCenterPage } from './features/resources/ResourceCenterPage'
+import { ManagementLayout } from './features/management/ManagementLayout'
+import { TenantProvider } from './features/management/TenantContext'
 import { RunTracePage } from './features/runs/RunTrace'
-import { AgentDashboard, ChatWorkspace, SkillList } from './features/platform/PlatformPages'
+import { ChatWorkspace } from './features/platform/PlatformPages'
 
 export function App() {
-  // 路由保持项目自有页面边界，后续继续扩展员工、技能、工具和运行页面。
+  // 管理控制台以租户上下文分区；Skill/Tool/文件工作区后续只从员工详情进入。
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/workspace/gallery" element={<EmployeeGallery />} />
-        <Route path="/enterprise/platform" element={<EmployeeGallery />} />
-        <Route path="/workspace/runs/:runId/trace" element={<RunTracePage />} />
-        <Route path="/enterprise/dashboard" element={<AgentDashboard />} />
-        <Route path="/enterprise/skills" element={<SkillList />} />
-        <Route path="/workspace/chat" element={<ChatWorkspace />} />
-        <Route path="*" element={<Navigate to="/workspace/gallery" replace />} />
-      </Routes>
-    </BrowserRouter>
+    <TenantProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Navigate to="/enterprise/employees" replace />} />
+          <Route path="/workspace/gallery" element={<EmployeeGallery />} />
+          <Route path="/enterprise/platform" element={<EmployeeGallery />} />
+          <Route path="/workspace/runs/:runId/trace" element={<RunTracePage />} />
+          <Route path="/enterprise/dashboard" element={<Navigate to="/enterprise/employees" replace />} />
+          <Route path="/enterprise/skills" element={<Navigate to="/enterprise/employees" replace />} />
+          <Route path="/workspace/chat" element={<ChatWorkspace />} />
+          <Route path="/enterprise" element={<ManagementLayout />}>
+            <Route index element={<Navigate to="employees" replace />} />
+            <Route path="employees" element={<EmployeeListPage />} />
+            <Route path="employees/:employeeId" element={<EmployeeDetailPage />} />
+            <Route path="employees/:employeeId/versions/:version" element={<EmployeeVersionEditorPage />} />
+            <Route path="employees/:employeeId/skills/:skillId/versions/:version/files" element={<SkillFileWorkspacePage />} />
+            <Route path="employees/:employeeId/tools/:toolId" element={<ToolManagementPage />} />
+            <Route path="resources" element={<ResourceCenterPage />} />
+            <Route path="deployments" element={<DeploymentListPage />} />
+          </Route>
+          <Route path="*" element={<Navigate to="/enterprise/employees" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </TenantProvider>
   )
 }

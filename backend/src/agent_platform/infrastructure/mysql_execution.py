@@ -12,10 +12,13 @@ from agent_platform.domain.context import ContextSnapshot, ContextSource, Contex
 from agent_platform.domain.execution import RuntimeReference, RuntimeStatus, UsageRecord
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.observability import (
+    HubResourceSnapshot,
     RunRecord,
     RunSnapshot,
     RunTimeline,
     SessionRecord,
+    SkillFilePackageSnapshot,
+    SkillFileSnapshotEntry,
     SpanType,
     TraceSpan,
 )
@@ -52,6 +55,40 @@ def _snapshot_data(snapshot: RunSnapshot) -> dict[str, object]:
         "execution_profile_id": snapshot.execution_profile_id,
         "execution_profile_version": snapshot.execution_profile_version,
         "model_route_id": snapshot.model_route_id,
+        "hub_resource_refs": [
+            {
+                "local_resource_type": item.local_resource_type,
+                "local_resource_id": item.local_resource_id,
+                "local_resource_version": item.local_resource_version,
+                "hub_resource_id": item.hub_resource_id,
+                "hub_version": item.hub_version,
+                "manifest_sha256": item.manifest_sha256,
+                "mode": item.mode,
+            }
+            for item in snapshot.hub_resource_refs
+        ],
+        "skill_file_packages": [
+            {
+                "skill_id": package.skill_id,
+                "skill_version": package.skill_version,
+                "entry_path": package.entry_path,
+                "manifest_sha256": package.manifest_sha256,
+                "files": [
+                    {
+                        "file_path": item.file_path,
+                        "media_asset_id": item.media_asset_id,
+                        "mime_type": item.mime_type,
+                        "size_bytes": item.size_bytes,
+                        "content_sha256": item.content_sha256,
+                        "asset_platform_id": item.asset_platform_id,
+                        "asset_tenant_id": item.asset_tenant_id,
+                        "source_mode": item.source_mode,
+                    }
+                    for item in package.files
+                ],
+            }
+            for package in snapshot.skill_file_packages
+        ],
     }
 
 
@@ -838,6 +875,43 @@ class MySqlExecutionRepository:
             execution_profile_id=str(snapshot_data["execution_profile_id"]),
             execution_profile_version=int(snapshot_data["execution_profile_version"]),
             model_route_id=str(snapshot_data["model_route_id"]) if snapshot_data.get("model_route_id") else None,
+            hub_resource_refs=tuple(
+                HubResourceSnapshot(
+                    local_resource_type=str(item["local_resource_type"]),
+                    local_resource_id=str(item["local_resource_id"]),
+                    local_resource_version=int(item["local_resource_version"]),
+                    hub_resource_id=str(item["hub_resource_id"]),
+                    hub_version=int(item["hub_version"]),
+                    manifest_sha256=str(item["manifest_sha256"]),
+                    mode=str(item["mode"]),
+                )
+                for item in snapshot_data.get("hub_resource_refs", [])
+                if isinstance(item, dict)
+            ),
+            skill_file_packages=tuple(
+                SkillFilePackageSnapshot(
+                    skill_id=str(item["skill_id"]),
+                    skill_version=int(item["skill_version"]),
+                    entry_path=str(item["entry_path"]),
+                    manifest_sha256=str(item["manifest_sha256"]),
+                    files=tuple(
+                        SkillFileSnapshotEntry(
+                            file_path=str(file["file_path"]),
+                            media_asset_id=str(file["media_asset_id"]),
+                            mime_type=str(file["mime_type"]),
+                            size_bytes=int(file["size_bytes"]),
+                            content_sha256=str(file["content_sha256"]),
+                            asset_platform_id=str(file.get("asset_platform_id", "")),
+                            asset_tenant_id=str(file.get("asset_tenant_id", "")),
+                            source_mode=str(file.get("source_mode", "LOCAL")),
+                        )
+                        for file in item.get("files", [])
+                        if isinstance(file, dict)
+                    ),
+                )
+                for item in snapshot_data.get("skill_file_packages", [])
+                if isinstance(item, dict)
+            ),
         )
         context_value = _json_load(row[9]) if row[9] is not None else None
         context_snapshot = self._load_context(context_value) if context_value is not None else None

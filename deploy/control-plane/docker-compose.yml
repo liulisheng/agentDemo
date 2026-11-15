@@ -1,0 +1,87 @@
+services:
+  mysql:
+    image: mysql:8.4.10
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-agent_platform}
+      MYSQL_USER: ${MYSQL_USER:-agent_platform}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请先配置 deploy/control-plane/.env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请先配置 deploy/control-plane/.env}
+    ports:
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3309}:3306"
+    volumes:
+      - control_plane_mysql:/var/lib/mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  bootstrap:
+    image: agent-platform/control-plane-api:local
+    build:
+      context: ../..
+      dockerfile: deploy/control-plane/Dockerfile.backend
+    restart: "no"
+    environment: &backend_environment
+      AGENT_PLATFORM_MODE: mysql
+      AGENT_PLATFORM_IDENTITY_PROVIDER: fake
+      AGENT_PLATFORM_DATA_ROOT: /var/lib/agent-platform
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-agent_platform}
+      MYSQL_USER: ${MYSQL_USER:-agent_platform}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请先配置 deploy/control-plane/.env}
+      MYSQL_POOL_SIZE: 8
+    command: ["sh", "-ec", "agent-platform-migration apply && agent-platform-seed-fake-identity"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  backend:
+    image: agent-platform/control-plane-api:local
+    build:
+      context: ../..
+      dockerfile: deploy/control-plane/Dockerfile.backend
+    restart: unless-stopped
+    environment: *backend_environment
+    volumes:
+      - control_plane_objects:/var/lib/agent-platform
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  web:
+    image: agent-platform/control-plane-web:local
+    build:
+      context: ../..
+      dockerfile: deploy/control-plane/Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-8088}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  control_plane_mysql:
+    name: agent-platform-validation-mysql
+  control_plane_objects:
+    name: agent-platform-validation-objects

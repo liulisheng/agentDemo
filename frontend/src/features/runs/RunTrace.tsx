@@ -3,6 +3,7 @@ import { Card, Empty, Space, Tag, Timeline, Typography } from 'antd'
 import { useParams } from 'react-router-dom'
 
 import { getRunTrace } from '../../api/client'
+import { useTenantContext } from '../management/TenantContext'
 
 const { Paragraph, Text, Title } = Typography
 
@@ -18,9 +19,10 @@ const spanLabels: Record<string, string> = {
 
 export function RunTracePage() {
   const { runId } = useParams<{ runId: string }>()
+  const { fakeUser } = useTenantContext()
   const trace = useQuery({
-    queryKey: ['run-trace', runId],
-    queryFn: () => getRunTrace(runId ?? ''),
+    queryKey: ['run-trace', fakeUser, runId],
+    queryFn: () => getRunTrace(runId ?? '', fakeUser),
     enabled: Boolean(runId),
   })
 

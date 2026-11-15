@@ -2,24 +2,42 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from agent_platform.domain.catalog import (
+    AuditEventPage,
+    AuditEventRecord,
     Deployment,
+    DeploymentPage,
     DigitalEmployee,
+    DigitalEmployeePage,
     DigitalEmployeeVersion,
+    DigitalEmployeeVersionPage,
     ExecutionProfile,
     LifecycleStatus,
     SkillType,
     SkillVersion,
     ToolVersion,
 )
-from agent_platform.domain.common import DomainError
+from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import ModelRoute
+from agent_platform.domain.resource_center import (
+    HubImportMode,
+    HubResourceType,
+    HubResourceVersion,
+    TenantImportStatus,
+    TenantResourceImport,
+)
 from agent_platform.ports.catalog_repository import CatalogRepository, DeploymentRepository
+from agent_platform.ports.resource_center import ResourceCenterRepository
 from agent_platform.ports.workspaces import SandboxProfile, WorkspaceProfile
 
 
@@ -43,6 +61,7 @@ class InMemoryCatalogRepository:
         self.workspace_profiles: dict[tuple[str, str, str], object] = {}
         self.sandbox_profiles: dict[tuple[str, str, str], object] = {}
         self.deployments: dict[tuple[str, str, str], Deployment] = {}
+        self.audit_events: list[AuditEventRecord] = []
 
     def _get(self, values: Mapping, key: tuple, resource: str):
         try:
@@ -107,6 +126,35 @@ class InMemoryCatalogRepository:
             if (platform_id, tenant_id) == prefix
         )
 
+    def list_audit_events(
+        self,
+        identity: IdentityContext,
+        *,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 100,
+        before_created_at: datetime | None = None,
+        before_event_id: str | None = None,
+    ) -> tuple[AuditEventRecord, ...]:
+        rows = [
+            event
+            for event in self.audit_events
+            if event.platform_id == identity.platform_id
+            and event.tenant_id == identity.tenant_id
+            and (resource_type is None or event.resource_type == resource_type)
+            and (resource_id is None or event.resource_id == resource_id)
+            and (event_type is None or event.event_type == event_type)
+            and (
+                before_created_at is None
+                or event.created_at < before_created_at
+                or (event.created_at == before_created_at and event.event_id < (before_event_id or ""))
+            )
+        ]
+        return tuple(
+            sorted(rows, key=lambda event: (event.created_at, event.event_id), reverse=True)[:limit]
+        )
+
     def save_tool(self, identity: IdentityContext, value: ToolVersion) -> None:
         self.tools[_key(identity, value.tool_id)] = value
         self.tool_versions[(*_key(identity, value.tool_id), value.version)] = value
@@ -114,6 +162,20 @@ class InMemoryCatalogRepository:
     def save_skill(self, identity: IdentityContext, value: SkillVersion) -> None:
         self.skills[_key(identity, value.skill_id)] = value
         self.skill_versions[(*_key(identity, value.skill_id), value.version)] = value
+
+    def save_skill_if_revision_matches(
+        self,
+        identity: IdentityContext,
+        value: SkillVersion,
+        expected_revision: SkillVersion,
+    ) -> None:
+        """内存实现也校验 DRAFT 修订，模拟 MySQL 的行锁乐观并发边界。"""
+
+        current = self.get_skill_version(identity, value.skill_id, value.version)
+        if current != expected_revision:
+            raise DomainError("IDEMPOTENCY_CONFLICT", "Skill 在 ZIP 预览后已被修改")
+        current.assert_mutable()
+        self.save_skill(identity, value)
 
     def save_employee(self, identity: IdentityContext, value: DigitalEmployee) -> None:
         self.employees[_key(identity, value.employee_id)] = value
@@ -165,7 +227,28 @@ class InMemoryCatalogRepository:
         return self._get(self.sandbox_profiles, (*_key(identity, profile_id), version), "sandbox_profile")
 
     def save_deployment(self, identity: IdentityContext, value: Deployment) -> None:
-        self.deployments[_key(identity, value.deployment_id)] = value
+        key = _key(identity, value.deployment_id)
+        previous = self.deployments.get(key)
+        self.deployments[key] = value
+        if previous is None or previous.employee_version.version != value.employee_version.version:
+            self.audit_events.append(
+                AuditEventRecord(
+                    event_id=generate_database_id(),
+                    platform_id=identity.platform_id,
+                    tenant_id=identity.tenant_id,
+                    actor_type="USER",
+                    actor_user_id=identity.user_id,
+                    event_type="DEPLOYMENT_CREATED" if previous is None else "DEPLOYMENT_ROLLED_BACK",
+                    resource_type="deployment",
+                    resource_id=value.deployment_id,
+                    payload={
+                        "employee_id": value.employee_id,
+                        "previous_version": previous.employee_version.version if previous else None,
+                        "version": value.employee_version.version,
+                    },
+                    created_at=datetime.now(UTC),
+                )
+            )
 
     def delete_tool(self, identity: IdentityContext, tool_id: str) -> None:
         current = self.get_tool(identity, tool_id)
@@ -205,12 +288,38 @@ class CatalogService:
         self,
         repository: CatalogRepository & DeploymentRepository,
         id_factory: Callable[[str], str] | None = None,
+        *,
+        resource_center_repository: ResourceCenterRepository | None = None,
     ) -> None:
         self.repository = repository
         self._id_factory = id_factory or (lambda prefix: f"{prefix}-{uuid4().hex[:10]}")
+        self.resource_center_repository = resource_center_repository
 
     def _new_id(self, prefix: str) -> str:
         return self._id_factory(prefix)
+
+    @staticmethod
+    def _require_employee_admin(identity: IdentityContext) -> None:
+        if "admin" not in identity.roles:
+            raise DomainError("AUTHORIZATION_DENIED", "只有租户管理员可以修改租户目录资源")
+
+    @staticmethod
+    def _encode_page_cursor(value: dict[str, object]) -> str:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return base64.urlsafe_b64encode(serialized.encode("utf-8")).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_page_cursor(cursor: str, expected: dict[str, object]) -> dict[str, object]:
+        try:
+            padded = cursor + "=" * (-len(cursor) % 4)
+            decoded = json.loads(
+                base64.b64decode(padded.encode("ascii"), altchars=b"-_", validate=True)
+            )
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error) as error:
+            raise DomainError("INVALID_ARGUMENT", "分页游标格式非法") from error
+        if not isinstance(decoded, dict) or any(decoded.get(key) != value for key, value in expected.items()):
+            raise DomainError("INVALID_ARGUMENT", "分页游标与当前筛选条件不匹配")
+        return decoded
 
     def _ensure_profile(self, identity: IdentityContext) -> ExecutionProfile:
         try:
@@ -233,25 +342,63 @@ class CatalogService:
         name: str,
         description: str,
         input_schema: Mapping[str, object],
+        *,
+        protocol: str = "builtin",
+        requires_recipient_credentials: bool = False,
+        auth_secret_ref: str | None = None,
     ) -> ToolVersion:
-        value = ToolVersion(self._new_id("tool"), identity.tenant_id, name, description, input_schema)
+        self._require_employee_admin(identity)
+        value = ToolVersion(
+            self._new_id("tool"),
+            identity.tenant_id,
+            name,
+            description,
+            input_schema,
+            protocol=protocol,
+            requires_recipient_credentials=requires_recipient_credentials,
+            auth_secret_ref=auth_secret_ref,
+        )
         self.repository.save_tool(identity, value)
         return value
 
-    def update_tool(self, identity: IdentityContext, tool_id: str, *, description: str | None = None, input_schema: Mapping[str, object] | None = None) -> ToolVersion:
+    def update_tool(
+        self,
+        identity: IdentityContext,
+        tool_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        input_schema: Mapping[str, object] | None = None,
+        auth_secret_ref: str | None = None,
+    ) -> ToolVersion:
+        self._require_employee_admin(identity)
         current = self.repository.get_tool(identity, tool_id)
         current.assert_mutable()
-        updated = replace(current, description=description or current.description, input_schema=input_schema or current.input_schema)
+        updated = replace(
+            current,
+            name=name or current.name,
+            description=description or current.description,
+            input_schema=input_schema or current.input_schema,
+            auth_secret_ref=auth_secret_ref or current.auth_secret_ref,
+        )
         self.repository.save_tool(identity, updated)
         return updated
 
     def delete_tool(self, identity: IdentityContext, tool_id: str) -> None:
+        self._require_employee_admin(identity)
         current = self.repository.get_tool(identity, tool_id)
         current.assert_mutable()
         self.repository.delete_tool(identity, tool_id)
 
     def publish_tool(self, identity: IdentityContext, tool_id: str) -> ToolVersion:
+        self._require_employee_admin(identity)
         current = self.repository.get_tool(identity, tool_id)
+        if current.requires_recipient_credentials and current.auth_secret_ref is None:
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "Tool 需要先绑定当前租户的凭据 SecretRef",
+                {"tool_id": tool_id, "kind": "recipient_credentials"},
+            )
         published = current.publish()
         self.repository.save_tool(identity, published)
         return published
@@ -264,6 +411,7 @@ class CatalogService:
         instruction: str,
         allowed_tool_ids: Iterable[str],
     ) -> SkillVersion:
+        self._require_employee_admin(identity)
         allowed_ids = tuple(allowed_tool_ids)
         value = SkillVersion(
             skill_id=self._new_id("skill"),
@@ -284,6 +432,7 @@ class CatalogService:
         return value
 
     def update_skill(self, identity: IdentityContext, skill_id: str, *, instruction: str | None = None, allowed_tool_ids: Iterable[str] | None = None) -> SkillVersion:
+        self._require_employee_admin(identity)
         current = self.repository.get_skill(identity, skill_id)
         current.assert_mutable()
         updated = replace(current, instruction=instruction or current.instruction, allowed_tool_ids=tuple(allowed_tool_ids) if allowed_tool_ids is not None else current.allowed_tool_ids)
@@ -291,11 +440,13 @@ class CatalogService:
         return updated
 
     def delete_skill(self, identity: IdentityContext, skill_id: str) -> None:
+        self._require_employee_admin(identity)
         current = self.repository.get_skill(identity, skill_id)
         current.assert_mutable()
         self.repository.delete_skill(identity, skill_id)
 
     def publish_skill(self, identity: IdentityContext, skill_id: str) -> SkillVersion:
+        self._require_employee_admin(identity)
         current = self.repository.get_skill(identity, skill_id)
         for tool_id, tool_version in current.allowed_tool_versions:
             tool = self.repository.get_tool_version(identity, tool_id, tool_version)
@@ -309,13 +460,42 @@ class CatalogService:
         self.repository.save_skill(identity, published)
         return published
 
-    def update_employee(self, identity: IdentityContext, employee_id: str, *, name: str | None = None, role_name: str | None = None, description: str | None = None) -> DigitalEmployee:
+    def update_employee(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        *,
+        name: str | None = None,
+        role_name: str | None = None,
+        description: str | None = None,
+    ) -> DigitalEmployee:
         current = self.repository.get_employee(identity, employee_id)
-        updated = replace(current, name=name or current.name, role_name=role_name or current.role_name, description=description or current.description)
+        self._require_employee_admin(identity)
+        if current.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能修改基本信息")
+        updated = replace(
+            current,
+            name=name if name is not None else current.name,
+            role_name=role_name if role_name is not None else current.role_name,
+            description=description if description is not None else current.description,
+        )
         self.repository.save_employee(identity, updated)
         return updated
 
+    def archive_employee(self, identity: IdentityContext, employee_id: str) -> DigitalEmployee:
+        """软归档员工身份；历史版本、Deployment 和 Run 保留。"""
+
+        current = self.repository.get_employee(identity, employee_id)
+        self._require_employee_admin(identity)
+        if current.status is LifecycleStatus.ARCHIVED:
+            return current
+        archived = replace(current, status=LifecycleStatus.ARCHIVED)
+        self.repository.save_employee(identity, archived)
+        return archived
+
     def delete_employee(self, identity: IdentityContext, employee_id: str) -> None:
+        self.repository.get_employee(identity, employee_id)
+        self._require_employee_admin(identity)
         self.repository.delete_employee(identity, employee_id)
 
     def create_profile(
@@ -373,6 +553,7 @@ class CatalogService:
     def create_employee(
         self, identity: IdentityContext, name: str, role_name: str, description: str
     ) -> DigitalEmployee:
+        self._require_employee_admin(identity)
         value = DigitalEmployee(
             self._new_id("employee"), identity.tenant_id, name, role_name, description
         )
@@ -395,7 +576,10 @@ class CatalogService:
         workspace_profile_version: int | None = None,
         sandbox_profile_version: int | None = None,
     ) -> DigitalEmployeeVersion:
+        self._require_employee_admin(identity)
         employee = self.repository.get_employee(identity, employee_id)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能创建新版本")
         versions = self.repository.list_employee_versions(identity, employee.employee_id)
         next_version = max((version.version for version in versions), default=0) + 1
         self._ensure_profile(identity)
@@ -432,10 +616,147 @@ class CatalogService:
         self.repository.save_employee_version(identity, value)
         return value
 
+    def update_employee_version(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        version: int,
+        *,
+        system_prompt: str,
+        skill_version_refs: Iterable[tuple[str, int]],
+        tool_version_refs: Iterable[tuple[str, int]],
+        execution_profile_id: str,
+        execution_profile_version: int,
+        model_route_id: str | None = None,
+        workspace_profile_id: str | None = None,
+        workspace_profile_version: int | None = None,
+        sandbox_profile_id: str | None = None,
+        sandbox_profile_version: int | None = None,
+        approval_policy: str = "none",
+    ) -> DigitalEmployeeVersion:
+        """原子替换指定 DRAFT 版本的内容和精确依赖绑定。"""
+
+        employee = self.repository.get_employee(identity, employee_id)
+        self._require_employee_admin(identity)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能更新版本")
+        current = self.repository.get_employee_version(identity, employee_id, version)
+        current.assert_mutable()
+        skill_refs = tuple((resource_id, resource_version) for resource_id, resource_version in skill_version_refs)
+        tool_refs = tuple((resource_id, resource_version) for resource_id, resource_version in tool_version_refs)
+        if len({resource_id for resource_id, _ in skill_refs}) != len(skill_refs):
+            raise DomainError("INVALID_ARGUMENT", "Skill 绑定不能包含重复资源")
+        if len({resource_id for resource_id, _ in tool_refs}) != len(tool_refs):
+            raise DomainError("INVALID_ARGUMENT", "Tool 绑定不能包含重复资源")
+        updated = replace(
+            current,
+            system_prompt=system_prompt,
+            skill_version_ids=tuple(resource_id for resource_id, _ in skill_refs),
+            tool_version_ids=tuple(resource_id for resource_id, _ in tool_refs),
+            skill_version_refs=skill_refs,
+            tool_version_refs=tool_refs,
+            execution_profile_id=execution_profile_id,
+            execution_profile_version=execution_profile_version,
+            model_route_id=model_route_id,
+            workspace_profile_id=workspace_profile_id,
+            workspace_profile_version=workspace_profile_version,
+            sandbox_profile_id=sandbox_profile_id,
+            sandbox_profile_version=sandbox_profile_version,
+            approval_policy=approval_policy,
+        )
+        self.repository.save_employee_version(identity, updated)
+        return updated
+
+    @staticmethod
+    def _canonical_hub_manifest_digest(package: HubResourceVersion) -> str:
+        canonical = json.dumps(
+            package.manifest.data,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _validate_hub_reference(
+        self,
+        identity: IdentityContext,
+        resource_type: HubResourceType,
+        local_resource_id: str,
+        local_resource_version: int,
+        missing: list[dict[str, str]],
+        *,
+        is_reference_marker: bool,
+    ) -> tuple[TenantResourceImport, HubResourceVersion] | None:
+        """发布预检重新核对引用映射、精确 Grant 和 Hub Manifest 摘要。"""
+
+        repository = self.resource_center_repository
+        if repository is None:
+            if is_reference_marker:
+                missing.append(
+                    {"kind": "hub_resolver", "id": local_resource_id, "reason": "REPOSITORY_NOT_CONFIGURED"}
+                )
+            return None
+        imported = repository.get_import_for_local_resource(
+            identity, resource_type, local_resource_id, local_resource_version
+        )
+        if imported is None:
+            if is_reference_marker:
+                missing.append(
+                    {"kind": "hub_import", "id": local_resource_id, "reason": "IMPORT_MAPPING_MISSING"}
+                )
+            return None
+        if imported.status is not TenantImportStatus.ACTIVE:
+            missing.append(
+                {"kind": "hub_import", "id": local_resource_id, "reason": "IMPORT_NOT_ACTIVE"}
+            )
+            return None
+        if imported.mode is HubImportMode.COPY:
+            return None
+        try:
+            package = repository.get_authorized_version(
+                identity,
+                imported.hub_resource_id,
+                imported.hub_version,
+                HubImportMode.REFERENCE,
+            )
+        except DomainError as error:
+            if error.code != "RESOURCE_NOT_FOUND":
+                raise
+            missing.append(
+                {
+                    "kind": "hub_grant",
+                    "id": local_resource_id,
+                    "hub_resource_id": imported.hub_resource_id,
+                    "reason": "GRANT_REVOKED_OR_EXPIRED",
+                }
+            )
+            return None
+        if (
+            package.source_resource_type is not resource_type
+            or package.manifest.sha256 != imported.manifest_sha256
+            or self._canonical_hub_manifest_digest(package) != imported.manifest_sha256
+        ):
+            missing.append(
+                {
+                    "kind": "hub_manifest",
+                    "id": local_resource_id,
+                    "hub_resource_id": imported.hub_resource_id,
+                    "reason": "MANIFEST_DIGEST_MISMATCH",
+                }
+            )
+            return None
+        return imported, package
+
     def publish_employee_version(
         self, identity: IdentityContext, employee_id: str, version: int
     ) -> DigitalEmployeeVersion:
+        employee = self.repository.get_employee(identity, employee_id)
+        self._require_employee_admin(identity)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能发布新版本")
         current = self.repository.get_employee_version(identity, employee_id, version)
+        current.assert_mutable()
         missing: list[dict[str, str]] = []
         for skill_id, skill_version in current.skill_version_refs:
             try:
@@ -445,6 +766,86 @@ class CatalogService:
             else:
                 if skill.status is not LifecycleStatus.PUBLISHED:
                     missing.append({"kind": "skill", "id": skill_id})
+                reference = self._validate_hub_reference(
+                    identity,
+                    HubResourceType.SKILL,
+                    skill_id,
+                    skill_version,
+                    missing,
+                    is_reference_marker=skill.instruction.startswith("hub-reference://"),
+                )
+                if reference is not None:
+                    imported, package = reference
+                    content = package.manifest.data.get("content")
+                    if (
+                        isinstance(content, dict)
+                        and content.get("content_format") == "FILE_PACKAGE"
+                        and content.get("file_manifest_sha256") != skill.file_manifest_sha256
+                    ):
+                        missing.append(
+                            {
+                                "kind": "hub_manifest",
+                                "id": skill_id,
+                                "hub_resource_id": imported.hub_resource_id,
+                                "reason": "SKILL_FILE_MANIFEST_MISMATCH",
+                            }
+                        )
+                    if imported.mode is HubImportMode.REFERENCE:
+                        expected_tools: list[tuple[str, int]] = []
+                        dependencies = package.manifest.data.get("dependencies", [])
+                        if isinstance(dependencies, list) and self.resource_center_repository is not None:
+                            for dependency in dependencies:
+                                if not isinstance(dependency, dict) or dependency.get("type") != HubResourceType.TOOL.value:
+                                    continue
+                                try:
+                                    child_id = str(dependency["resource_id"])
+                                    child_version = int(dependency["version"])
+                                except (KeyError, TypeError, ValueError):
+                                    missing.append(
+                                        {
+                                            "kind": "hub_dependency",
+                                            "id": skill_id,
+                                            "reason": "DEPENDENCY_REFERENCE_INVALID",
+                                        }
+                                    )
+                                    continue
+                                child_import = self.resource_center_repository.get_import(
+                                    identity, child_id, child_version, HubImportMode.REFERENCE
+                                )
+                                if (
+                                    child_import is None
+                                    or child_import.status is not TenantImportStatus.ACTIVE
+                                    or child_import.local_resource_type is not HubResourceType.TOOL
+                                ):
+                                    missing.append(
+                                        {
+                                            "kind": "hub_grant",
+                                            "id": child_id,
+                                            "hub_resource_id": child_id,
+                                            "reason": "DEPENDENCY_IMPORT_MISSING",
+                                        }
+                                    )
+                                    continue
+                                expected_tools.append(
+                                    (child_import.local_resource_id, child_import.local_resource_version)
+                                )
+                                self._validate_hub_reference(
+                                    identity,
+                                    HubResourceType.TOOL,
+                                    child_import.local_resource_id,
+                                    child_import.local_resource_version,
+                                    missing,
+                                    is_reference_marker=True,
+                                )
+                        if tuple(expected_tools) != skill.allowed_tool_versions:
+                            missing.append(
+                                {
+                                    "kind": "hub_dependency",
+                                    "id": skill_id,
+                                    "hub_resource_id": imported.hub_resource_id,
+                                    "reason": "LOCAL_BINDINGS_MISMATCH",
+                                }
+                            )
         for tool_id, tool_version in current.tool_version_refs:
             try:
                 tool = self.repository.get_tool_version(identity, tool_id, tool_version)
@@ -453,6 +854,22 @@ class CatalogService:
             else:
                 if tool.status is not LifecycleStatus.PUBLISHED:
                     missing.append({"kind": "tool", "id": tool_id})
+                self._validate_hub_reference(
+                    identity,
+                    HubResourceType.TOOL,
+                    tool_id,
+                    tool_version,
+                    missing,
+                    is_reference_marker=tool.handler_name == "hub-reference",
+                )
+                if tool.requires_recipient_credentials and tool.auth_secret_ref is None:
+                    missing.append(
+                        {
+                            "kind": "recipient_credentials",
+                            "id": tool_id,
+                            "reason": "SECRET_REF_MISSING",
+                        }
+                    )
         try:
             profile = self.repository.get_profile_version(
                 identity, current.execution_profile_id, current.execution_profile_version
@@ -489,6 +906,10 @@ class CatalogService:
         return published
 
     def deploy(self, identity: IdentityContext, employee_id: str, version: int) -> Deployment:
+        employee = self.repository.get_employee(identity, employee_id)
+        self._require_employee_admin(identity)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能创建新的部署")
         employee_version = self.repository.get_employee_version(identity, employee_id, version)
         deployment = Deployment(
             deployment_id=self._new_id("deployment"),
@@ -508,13 +929,122 @@ class CatalogService:
     def list_employees(self, identity: IdentityContext) -> tuple[DigitalEmployee, ...]:
         return self.repository.list_employees(identity)
 
+    def get_employee(self, identity: IdentityContext, employee_id: str) -> DigitalEmployee:
+        return self.repository.get_employee(identity, employee_id)
+
+    def get_employee_version(
+        self, identity: IdentityContext, employee_id: str, version: int
+    ) -> DigitalEmployeeVersion:
+        self.repository.get_employee(identity, employee_id)
+        return self.repository.get_employee_version(identity, employee_id, version)
+
+    def list_employees_page(
+        self,
+        identity: IdentityContext,
+        *,
+        keyword: str | None = None,
+        status: LifecycleStatus | str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> DigitalEmployeePage:
+        """在当前租户集合内按名称/ID 稳定排序，并返回与筛选绑定的游标。"""
+
+        if not 1 <= limit <= 200:
+            raise DomainError("INVALID_ARGUMENT", "limit 必须在 1 到 200 之间")
+        selected_status = LifecycleStatus(status).value if status is not None else None
+        normalized_keyword = keyword.strip().casefold() if keyword and keyword.strip() else None
+        cursor_context: dict[str, object] = {
+            "kind": "employee",
+            "keyword": normalized_keyword,
+            "status": selected_status,
+        }
+        after: tuple[str, str] | None = None
+        if cursor:
+            decoded = self._decode_page_cursor(cursor, cursor_context)
+            name, employee_id = decoded.get("name"), decoded.get("employee_id")
+            if not isinstance(name, str) or not isinstance(employee_id, str):
+                raise DomainError("INVALID_ARGUMENT", "员工列表游标内容非法")
+            after = (name.casefold(), employee_id)
+        employees = self.repository.list_employees(identity)
+        if selected_status is not None:
+            employees = tuple(item for item in employees if item.status.value == selected_status)
+        if normalized_keyword is not None:
+            employees = tuple(
+                item
+                for item in employees
+                if normalized_keyword
+                in f"{item.name} {item.role_name} {item.description}".casefold()
+            )
+        ordered = tuple(sorted(employees, key=lambda item: (item.name.casefold(), item.employee_id)))
+        if after is not None:
+            ordered = tuple(
+                item
+                for item in ordered
+                if (item.name.casefold(), item.employee_id) > after
+            )
+        has_more = len(ordered) > limit
+        page_items = ordered[:limit]
+        next_cursor = None
+        if has_more and page_items:
+            last = page_items[-1]
+            next_cursor = self._encode_page_cursor(
+                {**cursor_context, "name": last.name, "employee_id": last.employee_id}
+            )
+        return DigitalEmployeePage(page_items, next_cursor)
+
     def list_employee_versions(
         self, identity: IdentityContext, employee_id: str
     ) -> tuple[DigitalEmployeeVersion, ...]:
         self.repository.get_employee(identity, employee_id)
         return self.repository.list_employee_versions(identity, employee_id)
 
+    def list_employee_versions_page(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        *,
+        status: LifecycleStatus | str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> DigitalEmployeeVersionPage:
+        """按版本号倒序返回单个租户员工的稳定版本游标页。"""
+
+        if not 1 <= limit <= 200:
+            raise DomainError("INVALID_ARGUMENT", "limit 必须在 1 到 200 之间")
+        self.repository.get_employee(identity, employee_id)
+        selected_status = LifecycleStatus(status).value if status is not None else None
+        cursor_context: dict[str, object] = {
+            "kind": "employee_version",
+            "employee_id": employee_id,
+            "status": selected_status,
+        }
+        before_version: int | None = None
+        if cursor:
+            decoded = self._decode_page_cursor(cursor, cursor_context)
+            last_version = decoded.get("version")
+            if not isinstance(last_version, int) or last_version < 1:
+                raise DomainError("INVALID_ARGUMENT", "员工版本游标内容非法")
+            before_version = last_version
+        versions = self.repository.list_employee_versions(identity, employee_id)
+        if selected_status is not None:
+            versions = tuple(item for item in versions if item.status.value == selected_status)
+        ordered = tuple(sorted(versions, key=lambda item: item.version, reverse=True))
+        if before_version is not None:
+            ordered = tuple(item for item in ordered if item.version < before_version)
+        has_more = len(ordered) > limit
+        page_items = ordered[:limit]
+        next_cursor = None
+        if has_more and page_items:
+            next_cursor = self._encode_page_cursor(
+                {**cursor_context, "version": page_items[-1].version}
+            )
+        return DigitalEmployeeVersionPage(page_items, next_cursor)
+
     def rollback(self, identity: IdentityContext, deployment_id: str, employee_id: str, version: int) -> Deployment:
+        self._require_employee_admin(identity)
+        employee = self.repository.get_employee(identity, employee_id)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能回滚部署")
         current = self.repository.get_deployment(identity, deployment_id)
         target = self.repository.get_employee_version(identity, employee_id, version)
         if target.status is not LifecycleStatus.PUBLISHED:
@@ -528,6 +1058,107 @@ class CatalogService:
 
     def list_deployments(self, identity: IdentityContext) -> tuple[Deployment, ...]:
         return self.repository.list_deployments(identity)
+
+    def list_deployments_page(
+        self,
+        identity: IdentityContext,
+        *,
+        employee_id: str | None = None,
+        status: LifecycleStatus | str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> DeploymentPage:
+        """返回当前租户部署列表；稳定排序键为 deployment_id。"""
+
+        if not 1 <= limit <= 200:
+            raise DomainError("INVALID_ARGUMENT", "limit 必须在 1 到 200 之间")
+        selected_status = LifecycleStatus(status).value if status is not None else None
+        context: dict[str, object] = {
+            "kind": "deployment",
+            "employee_id": employee_id,
+            "status": selected_status,
+        }
+        after_id: str | None = None
+        if cursor:
+            decoded = self._decode_page_cursor(cursor, context)
+            after_id = decoded.get("deployment_id")
+            if not isinstance(after_id, str):
+                raise DomainError("INVALID_ARGUMENT", "Deployment 游标内容非法")
+        deployments = self.repository.list_deployments(identity)
+        if employee_id is not None:
+            deployments = tuple(item for item in deployments if item.employee_id == employee_id)
+        if selected_status is not None:
+            deployments = tuple(item for item in deployments if item.status.value == selected_status)
+        ordered = tuple(sorted(deployments, key=lambda item: item.deployment_id))
+        if after_id is not None:
+            ordered = tuple(item for item in ordered if item.deployment_id > after_id)
+        has_more = len(ordered) > limit
+        page_items = ordered[:limit]
+        next_cursor = (
+            self._encode_page_cursor({**context, "deployment_id": page_items[-1].deployment_id})
+            if has_more and page_items
+            else None
+        )
+        return DeploymentPage(page_items, next_cursor)
+
+    def list_audit_events_page(
+        self,
+        identity: IdentityContext,
+        *,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> AuditEventPage:
+        """管理员查询当前租户审计事件，按时间和 event_id 稳定倒序分页。"""
+
+        self._require_employee_admin(identity)
+        if not 1 <= limit <= 200:
+            raise DomainError("INVALID_ARGUMENT", "limit 必须在 1 到 200 之间")
+        context: dict[str, object] = {
+            "kind": "audit_event",
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "event_type": event_type,
+        }
+        before_created_at: datetime | None = None
+        before_event_id: str | None = None
+        if cursor:
+            decoded = self._decode_page_cursor(cursor, context)
+            created_value = decoded.get("created_at")
+            event_id = decoded.get("event_id")
+            if not isinstance(created_value, str) or not isinstance(event_id, str):
+                raise DomainError("INVALID_ARGUMENT", "审计事件游标内容非法")
+            try:
+                before_created_at = datetime.fromisoformat(created_value)
+            except ValueError as error:
+                raise DomainError("INVALID_ARGUMENT", "审计事件游标时间非法") from error
+            if before_created_at.tzinfo is None:
+                raise DomainError("INVALID_ARGUMENT", "审计事件游标时间必须包含时区")
+            before_event_id = event_id
+        events = self.repository.list_audit_events(
+            identity,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            event_type=event_type,
+            limit=limit + 1,
+            before_created_at=before_created_at,
+            before_event_id=before_event_id,
+        )
+        has_more = len(events) > limit
+        page_items = events[:limit]
+        next_cursor = None
+        if has_more and page_items:
+            last = page_items[-1]
+            next_cursor = self._encode_page_cursor(
+                {
+                    **context,
+                    "created_at": last.created_at.isoformat(),
+                    "event_id": last.event_id,
+                }
+            )
+        return AuditEventPage(page_items, next_cursor)
 
     @staticmethod
     def _latest_version(getter: Callable, identity: IdentityContext, resource_id: str, *, default: int) -> int:

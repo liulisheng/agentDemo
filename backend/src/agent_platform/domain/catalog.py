@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from enum import StrEnum
 
 from .common import DomainError
@@ -25,6 +30,78 @@ class SkillType(StrEnum):
     INSTRUCTION = "instruction"
     TOOL_BUNDLE = "tool-bundle"
     WORKFLOW = "workflow"
+
+
+class SkillContentFormat(StrEnum):
+    """Skill 指令以单字段存储，或以文件清单和对象引用存储。"""
+
+    INLINE = "INLINE"
+    FILE_PACKAGE = "FILE_PACKAGE"
+
+
+def normalize_skill_file_path(path: str) -> str:
+    """拒绝非规范相对路径，确保对象文件不会逃出 Skill 包目录。"""
+
+    if (
+        not isinstance(path, str)
+        or not path
+        or len(path) > 512
+        or path != path.strip()
+        or path.startswith("/")
+        or path.endswith("/")
+        or "\\" in path
+        or "\x00" in path
+        or re.match(r"^[a-zA-Z]:", path)
+    ):
+        raise ValueError("Skill file path must be a canonical relative path")
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("Skill file path must not contain traversal or empty segments")
+    return unicodedata.normalize("NFC", path)
+
+
+@dataclass(frozen=True, slots=True)
+class SkillFileEntry:
+    """Skill 文件清单一行；文件字节保存在租户 MediaAsset 中。"""
+
+    file_path: str
+    media_asset_id: str
+    mime_type: str
+    size_bytes: int
+    content_sha256: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "file_path", normalize_skill_file_path(self.file_path))
+        for field_name in ("media_asset_id", "mime_type"):
+            _text(getattr(self, field_name), field_name)
+        if self.size_bytes < 0:
+            raise ValueError("size_bytes must not be negative")
+        digest = self.content_sha256.lower()
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise ValueError("content_sha256 must be a 64-character SHA-256 digest")
+        object.__setattr__(self, "content_sha256", digest)
+
+
+def compute_skill_file_manifest_sha256(entries: tuple[SkillFileEntry, ...] | list[SkillFileEntry]) -> str:
+    """计算与存储提供商无关的规范 Skill 文件清单摘要。"""
+
+    canonical_entries = [
+        {
+            "file_path": entry.file_path,
+            "mime_type": entry.mime_type,
+            "size_bytes": entry.size_bytes,
+            "content_sha256": entry.content_sha256,
+        }
+        for entry in sorted(entries, key=lambda value: value.file_path)
+    ]
+    serialized = json.dumps(
+        {"manifest_schema_version": 1, "files": canonical_entries},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _text(value: str, field_name: str) -> str:
@@ -49,12 +126,20 @@ class ToolVersion:
     version: int = 1
     status: LifecycleStatus = LifecycleStatus.DRAFT
     handler_name: str = "echo"
+    protocol: str = "builtin"
+    requires_recipient_credentials: bool = False
+    auth_secret_ref: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.tool_id, "tool_id")
         _scope(self.tenant_id)
         _text(self.name, "name")
         _text(self.description, "description")
+        if self.protocol not in {"builtin", "api", "mcp", "a2a"}:
+            raise ValueError("protocol must be builtin, api, mcp or a2a")
+        if self.auth_secret_ref is not None:
+            _text(self.auth_secret_ref, "auth_secret_ref")
+            object.__setattr__(self, "requires_recipient_credentials", True)
         if self.version < 1:
             raise ValueError("version must be positive")
         if not isinstance(self.input_schema, Mapping):
@@ -72,6 +157,16 @@ class ToolVersion:
     def assert_mutable(self) -> None:
         if self.status is not LifecycleStatus.DRAFT:
             raise DomainError("IMMUTABLE_VERSION", "已发布或废弃的 Tool 版本不可修改")
+
+    def __repr__(self) -> str:
+        """SecretRef 允许持久化但不允许进入普通日志或调试输出。"""
+
+        return (
+            f"ToolVersion(tool_id={self.tool_id!r}, tenant_id={self.tenant_id!r}, name={self.name!r}, "
+            f"version={self.version!r}, status={self.status!r}, protocol={self.protocol!r}, "
+            f"requires_recipient_credentials={self.requires_recipient_credentials!r}, "
+            "auth_secret_ref=<redacted>)"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,12 +188,54 @@ class SkillVersion:
     version: int = 1
     status: LifecycleStatus = LifecycleStatus.DRAFT
     allowed_tool_versions: tuple[tuple[str, int], ...] = ()
+    content_format: SkillContentFormat | str = SkillContentFormat.INLINE
+    entry_path: str | None = None
+    file_manifest_sha256: str | None = None
+    file_entries: tuple[SkillFileEntry, ...] = ()
 
     def __post_init__(self) -> None:
-        _text(self.skill_id, "skill_id")
+        for field_name in ("skill_id", "name"):
+            _text(getattr(self, field_name), field_name)
         _scope(self.tenant_id)
-        _text(self.name, "name")
-        _text(self.instruction, "instruction")
+        content_format = SkillContentFormat(self.content_format)
+        object.__setattr__(self, "content_format", content_format)
+        if content_format is SkillContentFormat.INLINE:
+            _text(self.instruction, "instruction")
+            if self.entry_path is not None or self.file_manifest_sha256 is not None or self.file_entries:
+                raise ValueError("INLINE Skill cannot contain FILE_PACKAGE metadata")
+        else:
+            is_hub_reference = self.instruction.startswith("hub-reference://")
+            if self.instruction and not is_hub_reference:
+                raise ValueError("FILE_PACKAGE Skill stores its entry content in the file manifest")
+            if self.entry_path != "SKILL.md":
+                raise ValueError("FILE_PACKAGE entry_path must be root SKILL.md")
+            if not self.file_entries and not is_hub_reference:
+                raise ValueError("FILE_PACKAGE Skill requires a file manifest")
+            if self.file_manifest_sha256 is None:
+                raise ValueError("FILE_PACKAGE requires a file manifest digest")
+            if len(self.file_manifest_sha256) != 64 or any(
+                char not in "0123456789abcdefABCDEF" for char in self.file_manifest_sha256
+            ):
+                raise ValueError("file_manifest_sha256 must be a 64-character SHA-256 digest")
+            if is_hub_reference and not self.file_entries:
+                object.__setattr__(self, "file_manifest_sha256", self.file_manifest_sha256.lower())
+            else:
+                canonical_paths = [entry.file_path for entry in self.file_entries]
+                collision_keys = [unicodedata.normalize("NFKC", path).casefold() for path in canonical_paths]
+                if len(collision_keys) != len(set(collision_keys)):
+                    raise ValueError("FILE_PACKAGE contains duplicate normalized paths")
+                skill_entry_names = [
+                    path for path in canonical_paths if path.rsplit("/", 1)[-1].casefold() == "skill.md"
+                ]
+                if skill_entry_names != ["SKILL.md"]:
+                    raise ValueError("FILE_PACKAGE requires root SKILL.md as its only entry file")
+                if canonical_paths.count(self.entry_path) != 1:
+                    raise ValueError("FILE_PACKAGE requires exactly one root SKILL.md entry")
+                expected_digest = compute_skill_file_manifest_sha256(self.file_entries)
+                if self.file_manifest_sha256.lower() != expected_digest:
+                    raise ValueError("Skill file manifest digest does not match the file entries")
+                object.__setattr__(self, "file_manifest_sha256", expected_digest)
+                object.__setattr__(self, "file_entries", tuple(sorted(self.file_entries, key=lambda item: item.file_path)))
         if self.version < 1:
             raise ValueError("version must be positive")
         if not isinstance(self.allowed_tool_ids, tuple):
@@ -145,6 +282,14 @@ class DigitalEmployee:
     def __post_init__(self) -> None:
         for field_name in ("employee_id", "tenant_id", "name", "role_name", "description"):
             _text(getattr(self, field_name), field_name)
+
+
+@dataclass(frozen=True, slots=True)
+class DigitalEmployeePage:
+    """租户员工目录的稳定游标分页结果。"""
+
+    items: tuple[DigitalEmployee, ...]
+    next_cursor: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +429,14 @@ class DigitalEmployeeVersion:
 
 
 @dataclass(frozen=True, slots=True)
+class DigitalEmployeeVersionPage:
+    """单个员工固定版本列表的倒序游标分页结果。"""
+
+    items: tuple[DigitalEmployeeVersion, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class Deployment:
     """把一个已发布员工版本固定到租户范围。"""
 
@@ -308,3 +461,35 @@ class Deployment:
         """创建指向旧发布版本的新绑定，已有 Run 的快照不受影响。"""
 
         return replace(self, employee_version=employee_version)
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentPage:
+    """按租户筛选后的 Deployment 游标分页结果。"""
+
+    items: tuple[Deployment, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AuditEventRecord:
+    """已有 audit_events 的租户范围只读记录。"""
+
+    event_id: str
+    platform_id: str
+    tenant_id: str
+    actor_type: str
+    actor_user_id: str | None
+    event_type: str
+    resource_type: str | None
+    resource_id: str | None
+    payload: Mapping[str, object]
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AuditEventPage:
+    """按创建时间和事件 ID 倒序的审计事件游标页。"""
+
+    items: tuple[AuditEventRecord, ...]
+    next_cursor: str | None

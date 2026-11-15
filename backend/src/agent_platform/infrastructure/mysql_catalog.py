@@ -5,14 +5,18 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from agent_platform.domain.catalog import (
+    AuditEventRecord,
     Deployment,
     DigitalEmployee,
     DigitalEmployeeVersion,
     ExecutionProfile,
     LifecycleStatus,
+    SkillContentFormat,
+    SkillFileEntry,
     SkillType,
     SkillVersion,
     ToolVersion,
@@ -98,13 +102,17 @@ class MySqlCatalogRepository:
             version=int(row[5]),
             status=LifecycleStatus(str(row[6])),
             handler_name=str(row[7] or "echo"),
+            protocol=str(row[8]),
+            requires_recipient_credentials=bool(row[10]),
+            auth_secret_ref=str(row[9]) if row[9] is not None else None,
         )
 
     @staticmethod
     def _tool_select() -> str:
         return (
             "SELECT tool_id, tenant_id, name, description, input_schema_json, "
-            "version, status, handler_name FROM tool_versions"
+            "version, status, handler_name, protocol, auth_secret_ref, "
+            "(requires_recipient_credentials OR auth_secret_ref IS NOT NULL) FROM tool_versions"
         )
 
     def save_tool(self, identity: IdentityContext, value: ToolVersion) -> None:
@@ -112,7 +120,8 @@ class MySqlCatalogRepository:
 
         with self._transaction() as (_, cursor):
             cursor.execute(
-                "SELECT status, name, description, input_schema_json, handler_name "
+                "SELECT status, name, description, input_schema_json, handler_name, protocol, "
+                "auth_secret_ref, requires_recipient_credentials "
                 "FROM tool_versions WHERE platform_id=%s AND tenant_id=%s AND tool_id=%s AND version=%s FOR UPDATE",
                 (identity.platform_id, identity.tenant_id, value.tool_id, value.version),
             )
@@ -124,21 +133,27 @@ class MySqlCatalogRepository:
             cursor.execute(
                 "INSERT INTO tool_versions "
                 "(platform_id, tenant_id, tool_id, version, name, protocol, description, "
-                "input_schema_json, output_schema_json, auth_secret_ref, timeout_ms, retry_policy_json, "
+                "input_schema_json, output_schema_json, auth_secret_ref, requires_recipient_credentials, "
+                "timeout_ms, retry_policy_json, "
                 "risk_policy, handler_name, status) "
-                "VALUES (%s,%s,%s,%s,%s,'builtin',%s,%s,%s,NULL,30000,%s,'low',%s,%s) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,30000,%s,'low',%s,%s) "
                 "ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), "
                 "input_schema_json=VALUES(input_schema_json), output_schema_json=VALUES(output_schema_json), "
-                "retry_policy_json=VALUES(retry_policy_json), handler_name=VALUES(handler_name), status=VALUES(status)",
+                "retry_policy_json=VALUES(retry_policy_json), handler_name=VALUES(handler_name), "
+                "protocol=VALUES(protocol), auth_secret_ref=VALUES(auth_secret_ref), "
+                "requires_recipient_credentials=VALUES(requires_recipient_credentials), status=VALUES(status)",
                 (
                     identity.platform_id,
                     identity.tenant_id,
                     value.tool_id,
                     value.version,
                     value.name,
+                    value.protocol,
                     value.description,
                     _json_dump(dict(value.input_schema)),
                     _json_dump({"type": "object"}),
+                    value.auth_secret_ref,
+                    value.requires_recipient_credentials,
                     _json_dump({"max_retries": 0}),
                     value.handler_name,
                     value.status.value,
@@ -194,7 +209,11 @@ class MySqlCatalogRepository:
                 raise DomainError("INVALID_STATE", "Tool 已变化，不能删除")
 
     @staticmethod
-    def _load_skill(row: tuple[Any, ...], allowed: tuple[tuple[str, int], ...]) -> SkillVersion:
+    def _load_skill(
+        row: tuple[Any, ...],
+        allowed: tuple[tuple[str, int], ...],
+        file_entries: tuple[SkillFileEntry, ...] = (),
+    ) -> SkillVersion:
         policy = _json_load(row[11], {"name": "none"})
         approval = _json_load(row[12], {"name": "none"})
         return SkillVersion(
@@ -213,6 +232,10 @@ class MySqlCatalogRepository:
             version=int(row[9]),
             status=LifecycleStatus(str(row[10])),
             allowed_tool_versions=allowed,
+            content_format=SkillContentFormat(str(row[13])) if len(row) > 13 else SkillContentFormat.INLINE,
+            entry_path=str(row[14]) if len(row) > 14 and row[14] is not None else None,
+            file_manifest_sha256=str(row[15]) if len(row) > 15 and row[15] is not None else None,
+            file_entries=file_entries,
         )
 
     @staticmethod
@@ -220,7 +243,29 @@ class MySqlCatalogRepository:
         return (
             "SELECT skill_id, tenant_id, name, skill_type, instruction, input_schema_json, "
             "output_schema_json, trigger_rule, workflow_steps_json, version, status, "
-            "memory_policy_json, approval_policy_json FROM skill_versions"
+            "memory_policy_json, approval_policy_json, content_format, entry_path, "
+            "file_manifest_sha256 FROM skill_versions"
+        )
+
+    @staticmethod
+    def _skill_file_entries(
+        cursor: Any, identity: IdentityContext, skill_id: str, version: int
+    ) -> tuple[SkillFileEntry, ...]:
+        cursor.execute(
+            "SELECT file_path, media_asset_id, mime_type, size_bytes, content_sha256 "
+            "FROM skill_file_entries WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s "
+            "AND version=%s ORDER BY file_path",
+            (identity.platform_id, identity.tenant_id, skill_id, version),
+        )
+        return tuple(
+            SkillFileEntry(
+                file_path=str(row[0]),
+                media_asset_id=str(row[1]),
+                mime_type=str(row[2]),
+                size_bytes=int(row[3]),
+                content_sha256=str(row[4]),
+            )
+            for row in cursor.fetchall()
         )
 
     def _skill_tool_refs(self, cursor: Any, identity: IdentityContext, skill_id: str, version: int) -> tuple[tuple[str, int], ...]:
@@ -234,13 +279,35 @@ class MySqlCatalogRepository:
     def save_skill(self, identity: IdentityContext, value: SkillVersion) -> None:
         """保存 Skill 内容和其逐版本 Tool allowlist，作为一个数据库事务提交。"""
 
+        self._save_skill(identity, value, expected_revision=None)
+
+    def save_skill_if_revision_matches(
+        self,
+        identity: IdentityContext,
+        value: SkillVersion,
+        expected_revision: SkillVersion,
+    ) -> None:
+        """在行锁内对比完整 DRAFT 修订，防止 ZIP 预览覆盖并发编辑。"""
+
+        self._save_skill(identity, value, expected_revision=expected_revision)
+
+    def _save_skill(
+        self,
+        identity: IdentityContext,
+        value: SkillVersion,
+        *,
+        expected_revision: SkillVersion | None,
+    ) -> None:
         with self._transaction() as (_, cursor):
             cursor.execute(
                 "SELECT status FROM skill_versions WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s AND version=%s FOR UPDATE",
                 (identity.platform_id, identity.tenant_id, value.skill_id, value.version),
             )
             current = cursor.fetchone()
-            if current is not None and current[0] != LifecycleStatus.DRAFT.value:
+            existing: SkillVersion | None = None
+            if expected_revision is not None:
+                if current is None:
+                    raise DomainError("IDEMPOTENCY_CONFLICT", "Skill 在 ZIP 预览后已被删除")
                 cursor.execute(
                     self._skill_select()
                     + " WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s AND version=%s",
@@ -250,20 +317,38 @@ class MySqlCatalogRepository:
                 existing = self._load_skill(
                     row,
                     self._skill_tool_refs(cursor, identity, value.skill_id, value.version),
+                    self._skill_file_entries(cursor, identity, value.skill_id, value.version),
                 )
+                if existing != expected_revision:
+                    raise DomainError("IDEMPOTENCY_CONFLICT", "Skill 在 ZIP 预览后已被修改")
+            if current is not None and current[0] != LifecycleStatus.DRAFT.value:
+                if existing is None:
+                    cursor.execute(
+                        self._skill_select()
+                        + " WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s AND version=%s",
+                        (identity.platform_id, identity.tenant_id, value.skill_id, value.version),
+                    )
+                    row = cursor.fetchone()
+                    existing = self._load_skill(
+                        row,
+                        self._skill_tool_refs(cursor, identity, value.skill_id, value.version),
+                        self._skill_file_entries(cursor, identity, value.skill_id, value.version),
+                    )
                 if self._assert_version_mutable(str(current[0]), existing, value, "Skill"):
                     return
             cursor.execute(
                 "INSERT INTO skill_versions "
                 "(platform_id, tenant_id, skill_id, version, name, skill_type, instruction, "
                 "input_schema_json, output_schema_json, trigger_rule, workflow_steps_json, "
-                "memory_policy_json, approval_policy_json, status) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "memory_policy_json, approval_policy_json, status, content_format, entry_path, file_manifest_sha256) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE name=VALUES(name), skill_type=VALUES(skill_type), "
                 "instruction=VALUES(instruction), input_schema_json=VALUES(input_schema_json), "
                 "output_schema_json=VALUES(output_schema_json), trigger_rule=VALUES(trigger_rule), "
                 "workflow_steps_json=VALUES(workflow_steps_json), memory_policy_json=VALUES(memory_policy_json), "
-                "approval_policy_json=VALUES(approval_policy_json), status=VALUES(status)",
+                "approval_policy_json=VALUES(approval_policy_json), status=VALUES(status), "
+                "content_format=VALUES(content_format), entry_path=VALUES(entry_path), "
+                "file_manifest_sha256=VALUES(file_manifest_sha256)",
                 (
                     identity.platform_id,
                     identity.tenant_id,
@@ -279,12 +364,37 @@ class MySqlCatalogRepository:
                     _json_dump({"name": value.memory_policy}),
                     _json_dump({"name": value.approval_policy}),
                     value.status.value,
+                    value.content_format.value,
+                    value.entry_path,
+                    value.file_manifest_sha256,
                 ),
             )
             cursor.execute(
                 "DELETE FROM skill_tool_declarations WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s AND skill_version=%s",
                 (identity.platform_id, identity.tenant_id, value.skill_id, value.version),
             )
+            cursor.execute(
+                "DELETE FROM skill_file_entries WHERE platform_id=%s AND tenant_id=%s "
+                "AND skill_id=%s AND version=%s",
+                (identity.platform_id, identity.tenant_id, value.skill_id, value.version),
+            )
+            for entry in value.file_entries:
+                cursor.execute(
+                    "INSERT INTO skill_file_entries "
+                    "(platform_id, tenant_id, skill_id, version, file_path, media_asset_id, "
+                    "mime_type, size_bytes, content_sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        identity.platform_id,
+                        identity.tenant_id,
+                        value.skill_id,
+                        value.version,
+                        entry.file_path,
+                        entry.media_asset_id,
+                        entry.mime_type,
+                        entry.size_bytes,
+                        entry.content_sha256,
+                    ),
+                )
             for sequence, (tool_id, tool_version) in enumerate(value.allowed_tool_versions, start=1):
                 cursor.execute(
                     "INSERT INTO skill_tool_declarations "
@@ -312,7 +422,8 @@ class MySqlCatalogRepository:
             if row is None:
                 raise self._not_found("skill")
             allowed = self._skill_tool_refs(cursor, identity, skill_id, version)
-        return self._load_skill(row, allowed)
+            file_entries = self._skill_file_entries(cursor, identity, skill_id, version)
+        return self._load_skill(row, allowed, file_entries)
 
     def get_skill(self, identity: IdentityContext, skill_id: str) -> SkillVersion:
         with self._reader() as (_, cursor):
@@ -325,7 +436,8 @@ class MySqlCatalogRepository:
             if row is None:
                 raise self._not_found("skill")
             allowed = self._skill_tool_refs(cursor, identity, skill_id, int(row[9]))
-        return self._load_skill(row, allowed)
+            file_entries = self._skill_file_entries(cursor, identity, skill_id, int(row[9]))
+        return self._load_skill(row, allowed, file_entries)
 
     def list_skills(self, identity: IdentityContext) -> tuple[SkillVersion, ...]:
         with self._reader() as (_, cursor):
@@ -343,13 +455,24 @@ class MySqlCatalogRepository:
                     continue
                 seen.add(skill_id)
                 allowed = self._skill_tool_refs(cursor, identity, skill_id, int(row[9]))
-                values.append(self._load_skill(row, allowed))
+                files = self._skill_file_entries(cursor, identity, skill_id, int(row[9]))
+                values.append(self._load_skill(row, allowed, files))
         return tuple(values)
 
     def delete_skill(self, identity: IdentityContext, skill_id: str) -> None:
         current = self.get_skill(identity, skill_id)
         current.assert_mutable()
         with self._transaction() as (_, cursor):
+            cursor.execute(
+                "DELETE FROM skill_file_entries WHERE platform_id=%s AND tenant_id=%s "
+                "AND skill_id=%s AND version=%s",
+                (
+                    identity.platform_id,
+                    identity.tenant_id,
+                    skill_id,
+                    current.version,
+                ),
+            )
             cursor.execute(
                 "DELETE FROM skill_versions WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s AND version=%s AND status='DRAFT'",
                 (identity.platform_id, identity.tenant_id, skill_id, current.version),
@@ -958,6 +1081,12 @@ class MySqlCatalogRepository:
         self.get_employee_version(identity, value.employee_id, value.employee_version.version)
         with self._transaction() as (_, cursor):
             cursor.execute(
+                "SELECT employee_id, employee_version, status FROM deployments "
+                "WHERE platform_id=%s AND tenant_id=%s AND deployment_id=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, value.deployment_id),
+            )
+            previous = cursor.fetchone()
+            cursor.execute(
                 "INSERT INTO deployments "
                 "(platform_id, tenant_id, deployment_id, employee_id, employee_version, status, created_by) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
@@ -972,6 +1101,28 @@ class MySqlCatalogRepository:
                     identity.user_id,
                 ),
             )
+            previous_version = int(previous[1]) if previous is not None else None
+            if previous is None or previous_version != value.employee_version.version:
+                cursor.execute(
+                    "INSERT INTO audit_events "
+                    "(platform_id, tenant_id, event_id, actor_type, actor_user_id, event_type, policy_version, "
+                    "resource_type, resource_id, payload_json) VALUES (%s,%s,%s,'USER',%s,%s,'1','deployment',%s,%s)",
+                    (
+                        identity.platform_id,
+                        identity.tenant_id,
+                        generate_database_id(),
+                        identity.user_id,
+                        "DEPLOYMENT_CREATED" if previous is None else "DEPLOYMENT_ROLLED_BACK",
+                        value.deployment_id,
+                        _json_dump(
+                            {
+                                "employee_id": value.employee_id,
+                                "previous_version": previous_version,
+                                "version": value.employee_version.version,
+                            }
+                        ),
+                    ),
+                )
 
     def get_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
         with self._reader() as (_, cursor):
@@ -994,3 +1145,56 @@ class MySqlCatalogRepository:
             )
             ids = tuple(str(row[0]) for row in cursor.fetchall())
         return tuple(self.get_deployment(identity, deployment_id) for deployment_id in ids)
+
+    def list_audit_events(
+        self,
+        identity: IdentityContext,
+        *,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 100,
+        before_created_at: datetime | None = None,
+        before_event_id: str | None = None,
+    ) -> tuple[AuditEventRecord, ...]:
+        if not 1 <= limit <= 201:
+            raise DomainError("INVALID_ARGUMENT", "审计查询 limit 必须在 1 到 201 之间")
+        conditions = ["platform_id=%s", "tenant_id=%s"]
+        parameters: list[object] = [identity.platform_id, identity.tenant_id]
+        for column, value in (
+            ("resource_type", resource_type),
+            ("resource_id", resource_id),
+            ("event_type", event_type),
+        ):
+            if value is not None:
+                conditions.append(f"{column}=%s")
+                parameters.append(value)
+        if before_created_at is not None and before_event_id is not None:
+            conditions.append("(created_at<%s OR (created_at=%s AND event_id<%s))")
+            before_db = before_created_at.astimezone(UTC).replace(tzinfo=None)
+            parameters.extend((before_db, before_db, before_event_id))
+        parameters.append(limit)
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT event_id, platform_id, tenant_id, actor_type, actor_user_id, event_type, "
+                "resource_type, resource_id, payload_json, created_at FROM audit_events WHERE "
+                + " AND ".join(conditions)
+                + " ORDER BY created_at DESC, event_id DESC LIMIT %s",
+                tuple(parameters),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            AuditEventRecord(
+                event_id=str(row[0]),
+                platform_id=str(row[1]),
+                tenant_id=str(row[2]),
+                actor_type=str(row[3]),
+                actor_user_id=str(row[4]) if row[4] is not None else None,
+                event_type=str(row[5]),
+                resource_type=str(row[6]) if row[6] is not None else None,
+                resource_id=str(row[7]) if row[7] is not None else None,
+                payload=_json_load(row[8], {}),
+                created_at=row[9].replace(tzinfo=UTC) if row[9].tzinfo is None else row[9].astimezone(UTC),
+            )
+            for row in rows
+        )

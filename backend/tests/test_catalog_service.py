@@ -44,6 +44,28 @@ def test_publish_requires_same_tenant_published_dependencies() -> None:
     assert published.status is LifecycleStatus.PUBLISHED
 
 
+def test_copied_tool_requires_recipient_secret_before_publish() -> None:
+    service, identity = _service()
+    tool = service.create_tool(
+        identity,
+        "复制的工单工具",
+        "需要接收租户绑定自己的凭据",
+        {"type": "object"},
+        requires_recipient_credentials=True,
+    )
+
+    with pytest.raises(DomainError) as missing_credential:
+        service.publish_tool(identity, tool.tool_id)
+    assert missing_credential.value.code == "DEPENDENCY_VALIDATION_ERROR"
+
+    configured = service.update_tool(
+        identity, tool.tool_id, auth_secret_ref="secret/tenant-b/ticket-api"
+    )
+    assert configured.auth_secret_ref == "secret/tenant-b/ticket-api"
+    published = service.publish_tool(identity, tool.tool_id)
+    assert published.status is LifecycleStatus.PUBLISHED
+
+
 def test_cross_tenant_deployment_is_hidden() -> None:
     service, identity = _service()
     other = FakeIdentityProvider().resolve_identity("admin-other")

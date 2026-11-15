@@ -232,6 +232,19 @@ class MySqlMediaAssetRepository:
             row = cursor.fetchone()
         return self._load_asset(row) if row is not None else None
 
+    def get_asset_by_id(self, asset_id: str, platform_id: str, tenant_id: str) -> MediaAsset | None:
+        """按同平台/租户和 MediaAsset ID 查找，禁止用资产 ID 跨租户探测。"""
+
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT asset_id, object_ref, platform_id, tenant_id, filename, mime_type, size_bytes, "
+                "content_sha256, retention_policy, status, encryption_key_version, retention_expires_at "
+                "FROM media_assets WHERE platform_id=%s AND tenant_id=%s AND asset_id=%s",
+                (platform_id, tenant_id, asset_id),
+            )
+            row = cursor.fetchone()
+        return self._load_asset(row) if row is not None else None
+
     def mark_deleted_and_enqueue(self, object_ref: str, platform_id: str, tenant_id: str) -> None:
         with self._transaction() as (_, cursor):
             cursor.execute(
@@ -326,6 +339,24 @@ class MySqlMediaAssetRepository:
             )
             if cursor.fetchone() is not None:
                 return True
+        cursor.execute(
+            "SELECT 1 FROM skill_file_entries sfe JOIN media_assets ma "
+            "ON ma.platform_id=sfe.platform_id AND ma.tenant_id=sfe.tenant_id "
+            "AND ma.asset_id=sfe.media_asset_id WHERE sfe.platform_id=%s AND sfe.tenant_id=%s "
+            "AND ma.object_ref=%s LIMIT 1",
+            (platform_id, tenant_id, object_ref),
+        )
+        if cursor.fetchone() is not None:
+            return True
+        cursor.execute(
+            "SELECT 1 FROM hub_resource_versions hv JOIN media_assets ma "
+            "ON ma.platform_id=hv.platform_id AND ma.tenant_id=hv.publisher_tenant_id "
+            "AND ma.asset_id=hv.artifact_asset_id WHERE hv.platform_id=%s "
+            "AND hv.publisher_tenant_id=%s AND ma.object_ref=%s LIMIT 1",
+            (platform_id, tenant_id, object_ref),
+        )
+        if cursor.fetchone() is not None:
+            return True
         cursor.execute(
             "SELECT 1 FROM content_upload_intents WHERE platform_id=%s AND tenant_id=%s AND object_ref=%s "
             "AND status='UPLOADING' AND lease_expires_at>CURRENT_TIMESTAMP(6) LIMIT 1",

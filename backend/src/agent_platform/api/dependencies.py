@@ -7,6 +7,8 @@ from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversations import ConversationService
 from agent_platform.application.model_routes import ModelRouteService
+from agent_platform.application.resource_center import ResourceCenterService
+from agent_platform.application.skill_files import SkillFilePackageService
 from agent_platform.domain.identity import IdentityContext
 
 fake_identity_provider = FakeIdentityProvider()
@@ -47,3 +49,25 @@ def model_route_service(request: Request) -> ModelRouteService:
     """读取应用启动时注入的模型路由服务。"""
 
     return request.app.state.model_route_service
+
+
+def resource_center_service(request: Request) -> ResourceCenterService:
+    """读取 app factory 显式注入的 Resource Center 服务。"""
+
+    service = request.app.state.resource_center_service
+    if service is None:
+        from agent_platform.domain.common import DomainError
+
+        raise DomainError("INVALID_STATE", "资源中心需要持久化 Repository 配置")
+    return service
+
+
+def skill_file_package_service(request: Request) -> SkillFilePackageService:
+    """读取应用注入的文件包服务；未配置对象仓储时拒绝文件写入。"""
+
+    service = request.app.state.skill_file_package_service
+    if service is None:
+        from agent_platform.domain.common import DomainError
+
+        raise DomainError("INVALID_STATE", "Skill 文件包需要配置对象存储")
+    return service

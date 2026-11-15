@@ -56,16 +56,16 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
     second = runner.apply()
 
     assert first.action is PreflightAction.APPLY_MIGRATIONS
-    assert first.applied_migrations == ("V001", "V002", "V003")
+    assert first.applied_migrations == ("V001", "V002", "V003", "V004", "V005")
     assert second.action is PreflightAction.UP_TO_DATE
     assert second.applied_migrations == ()
     connection = mysql.connect(**config, database=database)
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 3
+        assert cursor.fetchone()[0] == 5
         cursor.execute("SELECT version FROM schema_migration_history ORDER BY version")
-        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3]
+        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5]
     finally:
         cursor.close()
         connection.close()
@@ -98,7 +98,7 @@ def test_runner_blocks_checksum_mismatch_before_any_write(disposable_mysql_datab
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 3
+        assert cursor.fetchone()[0] == 5
     finally:
         cursor.close()
         connection.close()

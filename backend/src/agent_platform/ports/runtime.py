@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from agent_platform.domain.execution import RuntimeStatus, UsageRecord
+from agent_platform.domain.observability import SkillFilePackageSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,8 @@ class RuntimeRequest:
     workspace_ref: str | None = None
     thread_ref: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    system_prompt: str = ""
+    skill_file_packages: Sequence[SkillFilePackageSnapshot] = ()
 
     def __post_init__(self) -> None:
         for field_name in ("run_id", "prompt"):

@@ -16,6 +16,8 @@ from agent_platform.application.catalog_service import CatalogService, InMemoryC
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversations import ConversationService
 from agent_platform.application.model_routes import InMemoryModelRouteRepository, ModelRouteService
+from agent_platform.application.resource_center import ResourceCenterService
+from agent_platform.application.skill_files import SkillFilePackageService
 from agent_platform.domain.common import DomainError
 from agent_platform.infrastructure.migrations import (
     MigrationPreflight,
@@ -31,6 +33,7 @@ from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepositor
 from agent_platform.ports.catalog_repository import CatalogRepository
 from agent_platform.ports.conversation_repository import ConversationRepository
 from agent_platform.ports.execution_repository import ExecutionRepository
+from agent_platform.ports.resource_center import ResourceCenterRepository
 from agent_platform.ports.storage import LocalObjectStore, ObjectStore, SecretRef
 
 
@@ -39,6 +42,7 @@ def create_app(
     catalog_repository: CatalogRepository | None = None,
     execution_repository: ExecutionRepository | None = None,
     conversation_repository: ConversationRepository | None = None,
+    resource_center_repository: ResourceCenterRepository | None = None,
     object_store: ObjectStore | None = None,
     mode: str | None = None,
     lifecycle_resources: Sequence[object] = (),
@@ -50,7 +54,13 @@ def create_app(
         raise ValueError("AGENT_PLATFORM_MODE must be 'fake' or 'mysql'")
     if resolved_mode == "mysql" and any(
         value is None
-        for value in (catalog_repository, execution_repository, conversation_repository, object_store)
+        for value in (
+            catalog_repository,
+            execution_repository,
+            conversation_repository,
+            resource_center_repository,
+            object_store,
+        )
     ):
         raise ValueError("MySQL 模式必须完整注入目录、执行、Conversation 和对象仓储")
 
@@ -67,18 +77,35 @@ def create_app(
     app = FastAPI(title="Agent Platform API", version="0.1.0", lifespan=lifespan)
     use_fake_gallery = resolved_mode == "fake" and catalog_repository is None
     catalog = CatalogService(
-        catalog_repository if catalog_repository is not None else InMemoryCatalogRepository()
+        catalog_repository if catalog_repository is not None else InMemoryCatalogRepository(),
+        resource_center_repository=resource_center_repository,
     )
     app.state.catalog_service = catalog
     app.state.use_fake_gallery = use_fake_gallery
     app.state.control_plane_service = ControlPlaneService(
-        catalog, FakeRuntimeAdapter(), persistence=execution_repository, object_store=object_store
+        catalog,
+        FakeRuntimeAdapter(),
+        persistence=execution_repository,
+        object_store=object_store,
+        resource_center_repository=resource_center_repository,
     )
     app.state.conversation_service = ConversationService(conversation_repository, object_store)
     model_route_repository = (
         catalog_repository if catalog_repository is not None else InMemoryModelRouteRepository()
     )
     app.state.model_route_service = ModelRouteService(model_route_repository)
+    app.state.resource_center_service = (
+        ResourceCenterService(catalog, resource_center_repository, object_store=object_store)
+        if resource_center_repository is not None
+        else None
+    )
+    app.state.skill_file_package_service = (
+        SkillFilePackageService(
+            catalog, object_store, resource_center_repository=resource_center_repository
+        )
+        if object_store is not None
+        else None
+    )
     app.state.mode = resolved_mode
     app.include_router(router)
 
@@ -181,11 +208,16 @@ def create_app_from_environment() -> FastAPI:
             encryption_key_version=key_version,
             key_provider=key_provider,
         )
+        from agent_platform.infrastructure.mysql_resource_center import (
+            MySqlResourceCenterRepository,
+        )
+
         return create_app(
             mode="mysql",
             catalog_repository=MySqlCatalogRepository(pool.connection),
             execution_repository=MySqlExecutionRepository(pool.connection),
             conversation_repository=MySqlConversationRepository(pool.connection),
+            resource_center_repository=MySqlResourceCenterRepository(pool.connection),
             object_store=object_store,
             lifecycle_resources=(pool,),
         )
