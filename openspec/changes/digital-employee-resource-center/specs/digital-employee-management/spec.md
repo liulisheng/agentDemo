@@ -42,6 +42,26 @@
 - **WHEN** 管理员提交对 PUBLISHED 员工版本的修改
 - **THEN** 系统拒绝修改并返回 `IMMUTABLE_VERSION`
 
+#### Scenario: 基于已发布版本定向添加资源
+- **WHEN** 管理员从已发布版本的 Skills 或 Tools Tab 发起添加操作
+- **THEN** 系统创建完整继承原系统指令、Skills、Tools、运行配置和审批配置的新 DRAFT，再执行对应类型的绑定操作；原版本保持不变
+
+### Requirement: 员工资源绑定按类型独立更新
+
+系统 SHALL 为 Skill 与 Tool 绑定提供类型专属接口；每个接口只能更改 DRAFT 员工版本对应的绑定表和 capability slot，不能覆盖系统指令、另一类型绑定或运行配置。
+
+#### Scenario: 定向更新 Skill 绑定
+- **WHEN** 管理员提交一个 DRAFT 的 Skill 精确版本清单
+- **THEN** 系统只替换该版本的 Skill 绑定和 Skill capability bindings，并保留其 Tool 绑定、系统指令、运行配置及状态
+
+#### Scenario: 定向更新 Tool 绑定
+- **WHEN** 管理员提交一个 DRAFT 的 Tool 精确版本清单
+- **THEN** 系统只替换该版本的 Tool 绑定和 Tool capability bindings，并保留其 Skill 绑定、系统指令、运行配置及状态
+
+#### Scenario: 定向更新角色与版本限制
+- **WHEN** 租户成员写入绑定、跨租户资源被引用或目标员工版本为 PUBLISHED
+- **THEN** 系统分别拒绝为 403、404 或 `IMMUTABLE_VERSION`，且不产生部分绑定
+
 ### Requirement: 员工版本固定 Skill 和 Tool 版本
 
 系统 SHALL 在员工草稿中保存 Skill、Tool 的租户资源标识、精确版本、顺序和来源模式；运行时使用员工允许的 Tool 与 Skill 声明 Tool 的交集。
@@ -62,9 +82,21 @@
 - **WHEN** 管理员在员工详情的 Tool 管理页创建名称、描述和 JSON Schema 有效的 Tool
 - **THEN** 系统创建 DRAFT Tool，允许管理员更新 DRAFT 字段并在确认后发布为不可变版本
 
-#### Scenario: 创建 Skill 并加入员工草稿
-- **WHEN** 管理员从员工 DRAFT 版本向导创建 Skill，并选择已发布 Tool 依赖
-- **THEN** 系统发布精确 Skill 版本并加入当前员工草稿的 Skill 绑定；成员不能执行该写入
+#### Scenario: 从员工 Skills Tab 创建 Skill 草稿
+- **WHEN** 管理员从员工 Skills Tab 创建 Skill 并提交有效的初始信息
+- **THEN** 系统创建独立 Skill DRAFT 并打开该 Skill 文件工作区；发布后管理员再从员工 Skills Tab 绑定精确版本，成员不能执行写入
+
+### Requirement: 员工工作台按资源类型独立分页
+
+系统 SHALL 在员工详情提供概览、每个已启用资源类型的独立 Tab、版本与发布 Tab；Skills、Tools 和未来资源类型分别呈现数量、状态和操作，不把不同类型混入同一个绑定列表或表单。
+
+#### Scenario: 切换 Skill/Tool 资源 Tab
+- **WHEN** 员工版本同时绑定多个 Skill 和 Tool
+- **THEN** 员工详情分别显示 Skills、Tools Tab，各自只显示该类型资源并保持精确版本和对应操作
+
+#### Scenario: 编辑员工版本
+- **WHEN** 管理员打开 DRAFT 员工版本编辑器
+- **THEN** 系统指令、Skills、Tools 和运行配置位于独立、留白充足的配置区；可选高级环境参数默认收起
 
 ### Requirement: 发布前验证员工版本依赖
 

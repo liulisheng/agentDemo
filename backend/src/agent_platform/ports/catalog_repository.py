@@ -41,6 +41,23 @@ class CatalogRepository(Protocol):
         self, identity: IdentityContext, employee_id: str
     ) -> tuple[DigitalEmployeeVersion, ...]: ...
 
+    def fork_employee_version(
+        self, identity: IdentityContext, employee_id: str, source_version: int
+    ) -> DigitalEmployeeVersion: ...
+
+    def replace_employee_resource_bindings(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        version: int,
+        slot: str,
+        refs: tuple[tuple[str, int], ...],
+    ) -> None: ...
+
+    def fork_skill_version(
+        self, identity: IdentityContext, skill_id: str, source_version: int
+    ) -> SkillVersion: ...
+
     def save_skill(self, identity: IdentityContext, value: SkillVersion) -> None: ...
 
     def save_skill_if_revision_matches(
@@ -55,6 +72,8 @@ class CatalogRepository(Protocol):
     ) -> SkillVersion: ...
 
     def get_skill(self, identity: IdentityContext, skill_id: str) -> SkillVersion: ...
+
+    def list_skill_versions(self, identity: IdentityContext, skill_id: str) -> tuple[SkillVersion, ...]: ...
 
     def list_skills(self, identity: IdentityContext) -> tuple[SkillVersion, ...]: ...
 

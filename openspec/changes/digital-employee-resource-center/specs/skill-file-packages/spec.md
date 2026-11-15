@@ -30,6 +30,18 @@
 - **WHEN** 用户尝试修改已发布 Skill 或 Hub REFERENCE 文件
 - **THEN** 系统拒绝修改并提示复制或创建新版本
 
+#### Scenario: 从已发布 Skill 创建草稿版本
+- **WHEN** 管理员对本租户 PUBLISHED Skill 版本发起“基于此版本创建 Skill 草稿”
+- **THEN** 系统创建同一 Skill 的下一 DRAFT 版本，复制其元数据、Tool 依赖和不可变文件对象引用，已发布版本与文件清单保持不变
+
+#### Scenario: 对 Hub REFERENCE 创建 Skill 草稿
+- **WHEN** 管理员尝试直接从 Hub REFERENCE Skill 创建可编辑草稿
+- **THEN** 系统拒绝该操作并要求先 COPY 到本租户
+
+#### Scenario: 发布 Skill DRAFT 文件版本
+- **WHEN** 管理员发布一个有效的 DRAFT Skill 精确版本
+- **THEN** 系统校验其依赖与唯一根目录 `SKILL.md`，并仅将该版本标记为 PUBLISHED
+
 ### Requirement: ZIP 导入必须安全且原子
 
 系统 SHALL 在导入 ZIP 前校验压缩大小、展开大小、文件数量、路径规范、重复路径、符号链接和入口文件；任何致命错误不得部分更新文件清单。

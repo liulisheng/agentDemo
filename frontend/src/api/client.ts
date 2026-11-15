@@ -75,6 +75,9 @@ export interface SkillSummary {
   allowed_tool_versions: { tool_id: string; version: number }[]
   version: number
   status: string
+  content_format?: 'INLINE' | 'FILE_PACKAGE'
+  entry_path?: string | null
+  file_manifest_sha256?: string | null
 }
 
 export interface ToolSummary {
@@ -218,6 +221,8 @@ export interface SkillFileTree {
   file_manifest_sha256: string | null
   status: string
   read_only: boolean
+  source_mode?: 'LOCAL' | 'REFERENCE'
+  fork_allowed?: boolean
   files: SkillFileSummary[]
 }
 
@@ -349,6 +354,18 @@ export async function getEmployeeVersion(
   )
 }
 
+export async function forkEmployeeVersion(
+  employeeId: string,
+  sourceVersion: number,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<EmployeeVersion> {
+  return request(
+    `/api/v1/digital-employees/${encodeURIComponent(employeeId)}/versions/${sourceVersion}/fork`,
+    fakeUser,
+    { method: 'POST' },
+  )
+}
+
 export async function createEmployeeVersion(
   employeeId: string,
   input: {
@@ -397,6 +414,32 @@ export async function updateEmployeeVersion(
   )
 }
 
+export async function replaceEmployeeSkillBindings(
+  employeeId: string,
+  version: number,
+  skillVersionRefs: { resource_id: string; version: number }[],
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<EmployeeVersion> {
+  return request(
+    `/api/v1/digital-employees/${encodeURIComponent(employeeId)}/versions/${version}/skill-bindings`,
+    fakeUser,
+    { method: 'PUT', body: jsonBody({ skill_version_refs: skillVersionRefs }) },
+  )
+}
+
+export async function replaceEmployeeToolBindings(
+  employeeId: string,
+  version: number,
+  toolVersionRefs: { resource_id: string; version: number }[],
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<EmployeeVersion> {
+  return request(
+    `/api/v1/digital-employees/${encodeURIComponent(employeeId)}/versions/${version}/tool-bindings`,
+    fakeUser,
+    { method: 'PUT', body: jsonBody({ tool_version_refs: toolVersionRefs }) },
+  )
+}
+
 export async function publishEmployeeVersion(
   employeeId: string,
   version: number,
@@ -427,8 +470,11 @@ export async function testEmployeeVersion(
   )
 }
 
-export async function listSkills(fakeUser = DEFAULT_FAKE_USER): Promise<Page<SkillSummary>> {
-  return request('/api/v1/skills', fakeUser)
+export async function listSkills(
+  fakeUser = DEFAULT_FAKE_USER,
+  includeVersions = false,
+): Promise<Page<SkillSummary>> {
+  return request(`/api/v1/skills${queryString({ include_versions: includeVersions ? 'true' : undefined })}`, fakeUser)
 }
 
 export async function createSkill(
@@ -462,6 +508,26 @@ export async function updateTool(
 
 export async function publishSkill(skillId: string, fakeUser = DEFAULT_FAKE_USER): Promise<SkillSummary> {
   return request(`/api/v1/skills/${encodeURIComponent(skillId)}/publish`, fakeUser, { method: 'POST' })
+}
+
+export async function forkSkillVersion(
+  skillId: string,
+  version: number,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<SkillSummary> {
+  return request(`/api/v1/skills/${encodeURIComponent(skillId)}/versions/${version}/fork`, fakeUser, {
+    method: 'POST',
+  })
+}
+
+export async function publishSkillVersion(
+  skillId: string,
+  version: number,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<SkillSummary> {
+  return request(`/api/v1/skills/${encodeURIComponent(skillId)}/versions/${version}/publish`, fakeUser, {
+    method: 'POST',
+  })
 }
 
 export async function publishTool(toolId: string, fakeUser = DEFAULT_FAKE_USER): Promise<ToolSummary> {

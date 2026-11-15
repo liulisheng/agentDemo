@@ -439,6 +439,75 @@ class MySqlCatalogRepository:
             file_entries = self._skill_file_entries(cursor, identity, skill_id, int(row[9]))
         return self._load_skill(row, allowed, file_entries)
 
+    def list_skill_versions(self, identity: IdentityContext, skill_id: str) -> tuple[SkillVersion, ...]:
+        """读取同一租户 Skill 的所有精确版本，供版本历史和 fork 使用。"""
+
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT version FROM skill_versions WHERE platform_id=%s AND tenant_id=%s "
+                "AND skill_id=%s ORDER BY version",
+                (identity.platform_id, identity.tenant_id, skill_id),
+            )
+            versions = tuple(int(row[0]) for row in cursor.fetchall())
+        if not versions:
+            raise self._not_found("skill")
+        return tuple(self.get_skill_version(identity, skill_id, version) for version in versions)
+
+    def fork_skill_version(
+        self, identity: IdentityContext, skill_id: str, source_version: int
+    ) -> SkillVersion:
+        """在事务中分配新版本并复制文件/Tool 清单引用，避免并发 fork 覆盖草稿。"""
+
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "SELECT status FROM skill_versions WHERE platform_id=%s AND tenant_id=%s "
+                "AND skill_id=%s AND version=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, skill_id, source_version),
+            )
+            source = cursor.fetchone()
+            if source is None:
+                raise self._not_found("skill")
+            if str(source[0]) != LifecycleStatus.PUBLISHED.value:
+                raise DomainError("INVALID_STATE", "只能基于已发布 Skill 版本创建草稿")
+            cursor.execute(
+                "SELECT version FROM skill_versions WHERE platform_id=%s AND tenant_id=%s "
+                "AND skill_id=%s ORDER BY version DESC LIMIT 1 FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, skill_id),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM skill_versions "
+                "WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s",
+                (identity.platform_id, identity.tenant_id, skill_id),
+            )
+            next_version = int(cursor.fetchone()[0])
+            cursor.execute(
+                "INSERT INTO skill_versions "
+                "(platform_id, tenant_id, skill_id, version, name, skill_type, instruction, "
+                "input_schema_json, output_schema_json, trigger_rule, workflow_steps_json, "
+                "memory_policy_json, approval_policy_json, status, content_format, entry_path, file_manifest_sha256) "
+                "SELECT platform_id, tenant_id, skill_id, %s, name, skill_type, instruction, "
+                "input_schema_json, output_schema_json, trigger_rule, workflow_steps_json, "
+                "memory_policy_json, approval_policy_json, 'DRAFT', content_format, entry_path, file_manifest_sha256 "
+                "FROM skill_versions WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s AND version=%s",
+                (next_version, identity.platform_id, identity.tenant_id, skill_id, source_version),
+            )
+            cursor.execute(
+                "INSERT INTO skill_tool_declarations "
+                "(platform_id, tenant_id, skill_id, skill_version, tool_id, tool_version, sequence_no) "
+                "SELECT platform_id, tenant_id, skill_id, %s, tool_id, tool_version, sequence_no "
+                "FROM skill_tool_declarations WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s AND skill_version=%s",
+                (next_version, identity.platform_id, identity.tenant_id, skill_id, source_version),
+            )
+            cursor.execute(
+                "INSERT INTO skill_file_entries "
+                "(platform_id, tenant_id, skill_id, version, file_path, media_asset_id, mime_type, size_bytes, content_sha256) "
+                "SELECT platform_id, tenant_id, skill_id, %s, file_path, media_asset_id, mime_type, size_bytes, content_sha256 "
+                "FROM skill_file_entries WHERE platform_id=%s AND tenant_id=%s AND skill_id=%s AND version=%s",
+                (next_version, identity.platform_id, identity.tenant_id, skill_id, source_version),
+            )
+        return self.get_skill_version(identity, skill_id, next_version)
+
     def list_skills(self, identity: IdentityContext) -> tuple[SkillVersion, ...]:
         with self._reader() as (_, cursor):
             cursor.execute(
@@ -767,6 +836,175 @@ class MySqlCatalogRepository:
         return tuple(
             self.get_employee_version(identity, employee_id, version) for version in versions
         )
+
+    def fork_employee_version(
+        self, identity: IdentityContext, employee_id: str, source_version: int
+    ) -> DigitalEmployeeVersion:
+        """锁定员工聚合根后复制版本和全部绑定，序列化并发版本号分配。"""
+
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "SELECT employee_id FROM digital_employees WHERE platform_id=%s AND tenant_id=%s "
+                "AND employee_id=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, employee_id),
+            )
+            if cursor.fetchone() is None:
+                raise self._not_found("digital_employee")
+            cursor.execute(
+                "SELECT status FROM digital_employee_versions WHERE platform_id=%s AND tenant_id=%s "
+                "AND employee_id=%s AND version=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, employee_id, source_version),
+            )
+            source = cursor.fetchone()
+            if source is None:
+                raise self._not_found("digital_employee_version")
+            if str(source[0]) != LifecycleStatus.PUBLISHED.value:
+                raise DomainError("INVALID_STATE", "只能基于已发布员工版本创建草稿")
+            cursor.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM digital_employee_versions "
+                "WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s",
+                (identity.platform_id, identity.tenant_id, employee_id),
+            )
+            next_version = int(cursor.fetchone()[0])
+            cursor.execute(
+                "INSERT INTO digital_employee_versions "
+                "(platform_id, tenant_id, employee_id, version, system_prompt, execution_profile_id, "
+                "execution_profile_version, model_route_id, workspace_profile_id, workspace_profile_version, "
+                "sandbox_profile_id, sandbox_profile_version, approval_policy_json, status) "
+                "SELECT platform_id, tenant_id, employee_id, %s, system_prompt, execution_profile_id, "
+                "execution_profile_version, model_route_id, workspace_profile_id, workspace_profile_version, "
+                "sandbox_profile_id, sandbox_profile_version, approval_policy_json, 'DRAFT' "
+                "FROM digital_employee_versions WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND version=%s",
+                (next_version, identity.platform_id, identity.tenant_id, employee_id, source_version),
+            )
+            cursor.execute(
+                "INSERT INTO employee_skill_bindings "
+                "(platform_id, tenant_id, employee_id, employee_version, skill_id, skill_version, sequence_no, input_mapping_json, output_policy_json) "
+                "SELECT platform_id, tenant_id, employee_id, %s, skill_id, skill_version, sequence_no, input_mapping_json, output_policy_json "
+                "FROM employee_skill_bindings WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND employee_version=%s",
+                (next_version, identity.platform_id, identity.tenant_id, employee_id, source_version),
+            )
+            cursor.execute(
+                "INSERT INTO employee_tool_bindings "
+                "(platform_id, tenant_id, employee_id, employee_version, tool_id, tool_version, sequence_no, config_json) "
+                "SELECT platform_id, tenant_id, employee_id, %s, tool_id, tool_version, sequence_no, config_json "
+                "FROM employee_tool_bindings WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND employee_version=%s",
+                (next_version, identity.platform_id, identity.tenant_id, employee_id, source_version),
+            )
+            cursor.execute(
+                "SELECT slot, module_id, module_version, config_revision, resource_ref, config_json "
+                "FROM capability_bindings WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND employee_version=%s",
+                (identity.platform_id, identity.tenant_id, employee_id, source_version),
+            )
+            capability_rows = cursor.fetchall()
+            for row in capability_rows:
+                cursor.execute(
+                    "INSERT INTO capability_bindings "
+                    "(platform_id, tenant_id, binding_id, employee_id, employee_version, slot, module_id, module_version, config_revision, resource_ref, config_json) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        identity.platform_id,
+                        identity.tenant_id,
+                        generate_database_id(),
+                        employee_id,
+                        next_version,
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5],
+                    ),
+                )
+        return self.get_employee_version(identity, employee_id, next_version)
+
+    def replace_employee_resource_bindings(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        version: int,
+        slot: str,
+        refs: tuple[tuple[str, int], ...],
+    ) -> None:
+        """仅在同一事务内替换指定资源槽位，保留另一槽位及员工配置列。"""
+
+        if slot == "skill":
+            binding_table = "employee_skill_bindings"
+        elif slot == "tool":
+            binding_table = "employee_tool_bindings"
+        else:
+            raise ValueError("slot must be skill or tool")
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "SELECT status FROM digital_employee_versions WHERE platform_id=%s AND tenant_id=%s "
+                "AND employee_id=%s AND version=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, employee_id, version),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise self._not_found("digital_employee_version")
+            if str(row[0]) != LifecycleStatus.DRAFT.value:
+                raise DomainError("IMMUTABLE_VERSION", "已发布员工版本不可修改")
+            cursor.execute(
+                f"DELETE FROM {binding_table} WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND employee_version=%s",
+                (identity.platform_id, identity.tenant_id, employee_id, version),
+            )
+            cursor.execute(
+                "DELETE FROM capability_bindings WHERE platform_id=%s AND tenant_id=%s "
+                "AND employee_id=%s AND employee_version=%s AND slot=%s",
+                (identity.platform_id, identity.tenant_id, employee_id, version, slot),
+            )
+            for sequence, (resource_id, resource_version) in enumerate(refs, start=1):
+                if slot == "skill":
+                    cursor.execute(
+                        "INSERT INTO employee_skill_bindings "
+                        "(platform_id, tenant_id, employee_id, employee_version, skill_id, skill_version, sequence_no, input_mapping_json, output_policy_json) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            identity.platform_id,
+                            identity.tenant_id,
+                            employee_id,
+                            version,
+                            resource_id,
+                            resource_version,
+                            sequence,
+                            _json_dump({}),
+                            _json_dump({}),
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO employee_tool_bindings "
+                        "(platform_id, tenant_id, employee_id, employee_version, tool_id, tool_version, sequence_no, config_json) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            identity.platform_id,
+                            identity.tenant_id,
+                            employee_id,
+                            version,
+                            resource_id,
+                            resource_version,
+                            sequence,
+                            _json_dump({}),
+                        ),
+                    )
+                cursor.execute(
+                    "INSERT INTO capability_bindings "
+                    "(platform_id, tenant_id, binding_id, employee_id, employee_version, slot, module_id, module_version, config_revision, resource_ref, config_json) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s)",
+                    (
+                        identity.platform_id,
+                        identity.tenant_id,
+                        generate_database_id(),
+                        employee_id,
+                        version,
+                        slot,
+                        resource_id,
+                        resource_version,
+                        f"{slot}:{resource_id}:v{resource_version}",
+                        _json_dump({}),
+                    ),
+                )
 
     def _load_profile(self, row: tuple[Any, ...]) -> ExecutionProfile:
         approval = _json_load(row[12], {"name": "none"})

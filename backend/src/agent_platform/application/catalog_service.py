@@ -81,6 +81,14 @@ class InMemoryCatalogRepository:
     def get_skill_version(self, identity: IdentityContext, skill_id: str, version: int) -> SkillVersion:
         return self._get(self.skill_versions, (*_key(identity, skill_id), version), "skill")
 
+    def list_skill_versions(self, identity: IdentityContext, skill_id: str) -> tuple[SkillVersion, ...]:
+        prefix = _key(identity, skill_id)
+        return tuple(
+            value
+            for key, value in sorted(self.skill_versions.items(), key=lambda item: item[0][3])
+            if key[:3] == prefix
+        )
+
     def get_employee(self, identity: IdentityContext, employee_id: str) -> DigitalEmployee:
         return self._get(self.employees, _key(identity, employee_id), "digital_employee")
 
@@ -177,6 +185,22 @@ class InMemoryCatalogRepository:
         current.assert_mutable()
         self.save_skill(identity, value)
 
+    def fork_skill_version(
+        self, identity: IdentityContext, skill_id: str, source_version: int
+    ) -> SkillVersion:
+        """复制已发布 Skill 元数据和不可变文件引用，生成新的 DRAFT 版本。"""
+
+        current = self.get_skill_version(identity, skill_id, source_version)
+        if current.status is not LifecycleStatus.PUBLISHED:
+            raise DomainError("INVALID_STATE", "只能基于已发布 Skill 版本创建草稿")
+        latest = max(
+            (value.version for value in self.list_skill_versions(identity, skill_id)),
+            default=0,
+        )
+        forked = replace(current, version=latest + 1, status=LifecycleStatus.DRAFT)
+        self.save_skill(identity, forked)
+        return forked
+
     def save_employee(self, identity: IdentityContext, value: DigitalEmployee) -> None:
         self.employees[_key(identity, value.employee_id)] = value
 
@@ -185,6 +209,50 @@ class InMemoryCatalogRepository:
 
     def save_employee_version(self, identity: IdentityContext, value: DigitalEmployeeVersion) -> None:
         self.save_version(identity, value)
+
+    def fork_employee_version(
+        self, identity: IdentityContext, employee_id: str, source_version: int
+    ) -> DigitalEmployeeVersion:
+        """复制员工版本完整快照；内存仓储用单次替换保持操作原子。"""
+
+        source = self.get_employee_version(identity, employee_id, source_version)
+        if source.status is not LifecycleStatus.PUBLISHED:
+            raise DomainError("INVALID_STATE", "只能基于已发布员工版本创建草稿")
+        next_version = max(
+            (value.version for value in self.list_employee_versions(identity, employee_id)),
+            default=0,
+        ) + 1
+        forked = replace(source, version=next_version, status=LifecycleStatus.DRAFT)
+        self.save_employee_version(identity, forked)
+        return forked
+
+    def replace_employee_resource_bindings(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        version: int,
+        slot: str,
+        refs: tuple[tuple[str, int], ...],
+    ) -> None:
+        """只替换同类型绑定；该实现不触碰版本其余字段。"""
+
+        current = self.get_employee_version(identity, employee_id, version)
+        current.assert_mutable()
+        if slot == "skill":
+            updated = replace(
+                current,
+                skill_version_ids=tuple(resource_id for resource_id, _ in refs),
+                skill_version_refs=refs,
+            )
+        elif slot == "tool":
+            updated = replace(
+                current,
+                tool_version_ids=tuple(resource_id for resource_id, _ in refs),
+                tool_version_refs=refs,
+            )
+        else:
+            raise ValueError("slot must be skill or tool")
+        self.save_employee_version(identity, updated)
 
     def save_profile(self, identity: IdentityContext, value: ExecutionProfile) -> None:
         self.profiles[_key(identity, value.profile_id)] = value
@@ -446,8 +514,18 @@ class CatalogService:
         self.repository.delete_skill(identity, skill_id)
 
     def publish_skill(self, identity: IdentityContext, skill_id: str) -> SkillVersion:
-        self._require_employee_admin(identity)
         current = self.repository.get_skill(identity, skill_id)
+        return self.publish_skill_version(identity, skill_id, current.version)
+
+    def publish_skill_version(
+        self, identity: IdentityContext, skill_id: str, version: int
+    ) -> SkillVersion:
+        """校验并发布指定 Skill 版本，避免“发布”意外作用于最新版本。"""
+
+        self._require_employee_admin(identity)
+        current = self.repository.get_skill_version(identity, skill_id, version)
+        if current.instruction.startswith("hub-reference://"):
+            raise DomainError("DEPENDENCY_VALIDATION_ERROR", "Hub REFERENCE Skill 不支持租户侧发布")
         for tool_id, tool_version in current.allowed_tool_versions:
             tool = self.repository.get_tool_version(identity, tool_id, tool_version)
             if tool.status is not LifecycleStatus.PUBLISHED:
@@ -459,6 +537,108 @@ class CatalogService:
         published = current.publish()
         self.repository.save_skill(identity, published)
         return published
+
+    def fork_skill_version(
+        self, identity: IdentityContext, skill_id: str, source_version: int
+    ) -> SkillVersion:
+        """为本地已发布 Skill 创建新草稿；REFERENCE 需先 COPY 到租户。"""
+
+        self._require_employee_admin(identity)
+        source = self.repository.get_skill_version(identity, skill_id, source_version)
+        if source.status is not LifecycleStatus.PUBLISHED:
+            raise DomainError("INVALID_STATE", "只能基于已发布 Skill 版本创建草稿")
+        if source.instruction.startswith("hub-reference://"):
+            raise DomainError("DEPENDENCY_VALIDATION_ERROR", "请先将 Hub REFERENCE Skill COPY 到本租户")
+        if self.resource_center_repository is not None:
+            imported = self.resource_center_repository.get_import_for_local_resource(
+                identity, HubResourceType.SKILL, skill_id, source_version
+            )
+            if imported is not None and imported.mode is HubImportMode.REFERENCE:
+                raise DomainError("DEPENDENCY_VALIDATION_ERROR", "请先将 Hub REFERENCE Skill COPY 到本租户")
+        return self.repository.fork_skill_version(identity, skill_id, source_version)
+
+    def replace_employee_skill_bindings(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        version: int,
+        skill_version_refs: Iterable[tuple[str, int]],
+    ) -> DigitalEmployeeVersion:
+        """只替换 DRAFT 的 Skill 清单，并校验租户、发布状态和 REFERENCE 授权。"""
+
+        return self._replace_employee_resource_bindings(
+            identity, employee_id, version, "skill", skill_version_refs
+        )
+
+    def replace_employee_tool_bindings(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        version: int,
+        tool_version_refs: Iterable[tuple[str, int]],
+    ) -> DigitalEmployeeVersion:
+        """只替换 DRAFT 的 Tool 清单，并校验租户、发布状态和 REFERENCE 授权。"""
+
+        return self._replace_employee_resource_bindings(
+            identity, employee_id, version, "tool", tool_version_refs
+        )
+
+    def _replace_employee_resource_bindings(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        version: int,
+        slot: str,
+        refs: Iterable[tuple[str, int]],
+    ) -> DigitalEmployeeVersion:
+        employee = self.repository.get_employee(identity, employee_id)
+        self._require_employee_admin(identity)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能修改资源绑定")
+        current = self.repository.get_employee_version(identity, employee_id, version)
+        current.assert_mutable()
+        normalized_refs = tuple((resource_id, resource_version) for resource_id, resource_version in refs)
+        if len({resource_id for resource_id, _ in normalized_refs}) != len(normalized_refs):
+            raise DomainError("INVALID_ARGUMENT", f"{slot} 绑定不能包含重复资源")
+
+        missing: list[dict[str, str]] = []
+        for resource_id, resource_version in normalized_refs:
+            if slot == "skill":
+                resource = self.repository.get_skill_version(identity, resource_id, resource_version)
+                if resource.status is not LifecycleStatus.PUBLISHED:
+                    raise DomainError(
+                        "DEPENDENCY_VALIDATION_ERROR", "只能绑定已发布 Skill 版本", {"skill_id": resource_id}
+                    )
+                self._validate_hub_reference(
+                    identity,
+                    HubResourceType.SKILL,
+                    resource_id,
+                    resource_version,
+                    missing,
+                    is_reference_marker=resource.instruction.startswith("hub-reference://"),
+                )
+            else:
+                resource = self.repository.get_tool_version(identity, resource_id, resource_version)
+                if resource.status is not LifecycleStatus.PUBLISHED:
+                    raise DomainError(
+                        "DEPENDENCY_VALIDATION_ERROR", "只能绑定已发布 Tool 版本", {"tool_id": resource_id}
+                    )
+                self._validate_hub_reference(
+                    identity,
+                    HubResourceType.TOOL,
+                    resource_id,
+                    resource_version,
+                    missing,
+                    is_reference_marker=resource.handler_name == "hub-reference",
+                )
+        if missing:
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR", "资源中心引用未授权或摘要已变化", {"missing": missing}
+            )
+        self.repository.replace_employee_resource_bindings(
+            identity, employee_id, version, slot, normalized_refs
+        )
+        return self.repository.get_employee_version(identity, employee_id, version)
 
     def update_employee(
         self,
@@ -666,6 +846,20 @@ class CatalogService:
         )
         self.repository.save_employee_version(identity, updated)
         return updated
+
+    def fork_employee_version(
+        self, identity: IdentityContext, employee_id: str, source_version: int
+    ) -> DigitalEmployeeVersion:
+        """复制 PUBLISHED 员工版本的完整配置到新的 DRAFT。"""
+
+        employee = self.repository.get_employee(identity, employee_id)
+        self._require_employee_admin(identity)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能创建新版本")
+        source = self.repository.get_employee_version(identity, employee_id, source_version)
+        if source.status is not LifecycleStatus.PUBLISHED:
+            raise DomainError("INVALID_STATE", "只能基于已发布员工版本创建草稿")
+        return self.repository.fork_employee_version(identity, employee_id, source_version)
 
     @staticmethod
     def _canonical_hub_manifest_digest(package: HubResourceVersion) -> str:
@@ -925,6 +1119,16 @@ class CatalogService:
 
     def list_skills(self, identity: IdentityContext) -> tuple[SkillVersion, ...]:
         return self.repository.list_skills(identity)
+
+    def list_all_skill_versions(self, identity: IdentityContext) -> tuple[SkillVersion, ...]:
+        """返回租户内全部精确 Skill 版本，供绑定选择器找到历史已发布版本。"""
+
+        versions = [
+            version
+            for latest in self.repository.list_skills(identity)
+            for version in self.repository.list_skill_versions(identity, latest.skill_id)
+        ]
+        return tuple(sorted(versions, key=lambda item: (item.name.casefold(), item.skill_id, item.version)))
 
     def list_employees(self, identity: IdentityContext) -> tuple[DigitalEmployee, ...]:
         return self.repository.list_employees(identity)

@@ -5,6 +5,7 @@ import { EmployeeDetailPage } from './features/digital-employees/EmployeeDetailP
 import { EmployeeListPage } from './features/digital-employees/EmployeeListPage'
 import { EmployeeVersionEditorPage } from './features/digital-employees/EmployeeVersionEditorPage'
 import { SkillFileWorkspacePage } from './features/digital-employees/SkillFileWorkspacePage'
+import { SkillCreationPage } from './features/digital-employees/SkillCreationPage'
 import { ToolManagementPage } from './features/digital-employees/ToolManagementPage'
 import { DeploymentListPage } from './features/deployments/DeploymentListPage'
 import { ResourceCenterPage } from './features/resources/ResourceCenterPage'
@@ -31,6 +32,7 @@ export function App() {
             <Route path="employees" element={<EmployeeListPage />} />
             <Route path="employees/:employeeId" element={<EmployeeDetailPage />} />
             <Route path="employees/:employeeId/versions/:version" element={<EmployeeVersionEditorPage />} />
+            <Route path="employees/:employeeId/skills/new" element={<SkillCreationPage />} />
             <Route path="employees/:employeeId/skills/:skillId/versions/:version/files" element={<SkillFileWorkspacePage />} />
             <Route path="employees/:employeeId/tools/:toolId" element={<ToolManagementPage />} />
             <Route path="resources" element={<ResourceCenterPage />} />

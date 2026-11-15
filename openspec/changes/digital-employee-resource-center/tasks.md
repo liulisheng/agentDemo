@@ -42,14 +42,25 @@
 - [x] 5.6 实现资源中心“发现资源 / 我发布的 / 我导入的”页面、详情、权限/依赖展示、发布设置、COPY/REFERENCE 导入和显式升级；验证未授权资源不可操作，REFERENCE 无编辑按钮。
 - [x] 5.7 更新前端 API 类型、Query Cache key 和状态提示，保证租户切换时不复用其他租户缓存；验证组件测试、`npm test`、`npm run build`，并更新中文前端交互原型文档。
 - [x] 5.8 补齐员工上下文 Tool 管理页：管理员创建/编辑 DRAFT、查看 Schema 并发布，成员只读；验证 Tool API 权限和前端创建/发布测试。
-- [x] 5.9 在员工 DRAFT 版本向导增加 Skill 创建/发布入口，并在保存员工绑定后进入 Skill 文件工作区；验证创建、绑定和租户缓存更新。
+- [x] 5.9 在员工 Skills Tab 提供独立 Skill DRAFT 创建入口，创建后进入 Skill 文件工作区，发布与员工绑定分开完成；验证创建和租户缓存更新。
 - [x] 5.10 将旧 Gallery 与根路径重定向到新管理台/资源中心，移除“开放广场平台”旧页面入口；验证旧 URL、新首页和 Nginx Docker 路由。
+- [x] 5.11 将员工详情改为概览、Skills、Tools、版本与发布独立 Tab；扩展版本编辑器留白并收起高级配置；验证类型隔离、响应式布局和现有管理交互。
+- [x] 5.12 将 FastAPI handler 按员工/Catalog、部署执行、资源中心、Skill 文件和 Conversation 分模块；保持 `/api/v1` URL、method、Schema 和权限不变，验证路径清单及 MySQL/离线测试。
 
 ## 6. 端到端验收与交付记录
 
 - [x] 6.1 增加 MySQL + LocalObjectStore API E2E：租户 A 发布 Skill ZIP/Tool/员工包，租户 B COPY 和 REFERENCE，创建员工版本、发布、部署、Run 并读取 Trace；验证 Run 固定来源模式/版本/摘要。
 - [x] 6.2 增加安全与失败集成测试：Hub 无授权、Grant 撤销、ZIP 恶意路径、上传失败回滚、SecretRef 脱敏、租户隔离、引用只读和 GC 保护；验证所有 MySQL 表/字段中文 COMMENT。
 - [x] 6.3 运行 backend MySQL/离线全量测试、Ruff、compileall、frontend test/build 和 OpenSpec strict validation；记录 MySQL 版本、migration checksum、命令、通过/跳过/未验证项和日志路径。
+
+## 7. 类型定向编辑与不可变版本分叉
+
+- [x] 7.1 增加员工版本 fork API，完整复制来源 PUBLISHED 版本的系统指令、精确 Skill/Tool 绑定、ExecutionProfile/ModelRoute、Workspace/Sandbox 和审批策略；覆盖租户隔离、成员拒绝、源版本不可编辑和并发版本号冲突。
+- [x] 7.2 增加 Skill/Tool 类型专属绑定 API 和仓储事务，仅替换目标类型绑定表及同类型 capability slot；覆盖保留另一类型绑定、系统指令、运行配置、PUBLISHED 只读、成员 403、跨租户 404 和重复引用校验。
+- [x] 7.3 增加本地 PUBLISHED Skill 版本 fork 与精确版本 publish API；新版本复制 Skill 元数据、Tool 依赖和不可变 MediaAsset 文件引用，Hub REFERENCE 必须拒绝直接 fork；覆盖 `SKILL.md`/manifest 摘要和旧版本不变。
+- [x] 7.4 员工 Skills/Tools Tab 增加类型专属选择抽屉与移除交互；Skills 抽屉可独立创建 Skill DRAFT 并进入 Skill 文件工作区；PUBLISHED 员工选择资源时先 fork 完整 DRAFT，操作后留在原 Tab，前端只调用相应绑定 API，不跳进全量版本编辑器。
+- [x] 7.5 Skill 文件工作区对 PUBLISHED 本地 Skill 显示创建草稿版本入口，对 DRAFT 显示精确版本发布入口；COPY/REFERENCE 只读边界、入口文件和发布失败信息可见。
+- [x] 7.6 更新中文 API、数据流程和状态文档，运行后端/前端测试、Ruff、build、OpenSpec strict validation，并在 Docker 验证从资源添加到新员工草稿及 Skill 文件发布的闭环。
 
 ## Workflow follow-up
 

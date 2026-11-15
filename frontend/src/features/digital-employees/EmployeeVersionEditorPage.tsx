@@ -3,12 +3,11 @@ import {
   Alert,
   Button,
   Card,
-  Col,
+  Collapse,
   Form,
   Input,
   InputNumber,
   Modal,
-  Row,
   Select,
   Space,
   Tag,
@@ -19,7 +18,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import {
-  createSkill,
   getDigitalEmployee,
   getEmployeeVersion,
   listExecutionProfiles,
@@ -27,7 +25,6 @@ import {
   listSkills,
   listTools,
   publishEmployeeVersion,
-  publishSkill,
   testEmployeeVersion,
   updateEmployeeVersion,
 } from '../../api/client'
@@ -53,13 +50,6 @@ interface VersionFormValues {
   sandbox_profile_id?: string
   sandbox_profile_version?: number
   approval_policy: string
-}
-
-interface SkillCreateFormValues {
-  name: string
-  skill_type: string
-  instruction: string
-  allowed_tool_ids: string[]
 }
 
 const refKey = (resourceId: string, version: number) => `${resourceId}::${version}`
@@ -94,9 +84,7 @@ export function EmployeeVersionEditorPage() {
   const [testPrompt, setTestPrompt] = useState('请按当前版本配置处理这个请求。')
   const [testResult, setTestResult] = useState<{ result: string; status: string } | null>(null)
   const [publishOpen, setPublishOpen] = useState(false)
-  const [skillCreateOpen, setSkillCreateOpen] = useState(false)
   const initializedKey = useRef('')
-  const [skillCreateForm] = Form.useForm<SkillCreateFormValues>()
 
   const employee = useQuery({
     queryKey: ['digital-employee', fakeUser, employeeId],
@@ -110,7 +98,7 @@ export function EmployeeVersionEditorPage() {
   })
   const skills = useQuery({
     queryKey: ['skills', fakeUser],
-    queryFn: () => listSkills(fakeUser),
+    queryFn: () => listSkills(fakeUser, true),
   })
   const tools = useQuery({
     queryKey: ['tools', fakeUser],
@@ -248,31 +236,6 @@ export function EmployeeVersionEditorPage() {
     },
   })
 
-  const createSkillMutation = useMutation({
-    mutationFn: async (values: SkillCreateFormValues) => {
-      const draft = await createSkill({
-        name: values.name,
-        skill_type: values.skill_type,
-        instruction: values.instruction,
-        allowed_tool_ids: values.allowed_tool_ids,
-      }, fakeUser)
-      return publishSkill(draft.id, fakeUser)
-    },
-    onSuccess: async (skill) => {
-      await queryClient.invalidateQueries({ queryKey: ['skills', fakeUser] })
-      const key = refKey(skill.id, skill.version)
-      const selected = form.getFieldValue('skill_keys') ?? []
-      form.setFieldValue('skill_keys', [...new Set([...selected, key])])
-      setDirty(true)
-      setSkillCreateOpen(false)
-      skillCreateForm.resetFields()
-      message.success(`Skill「${skill.name}」已发布并加入当前员工草稿`)
-    },
-    onError: () => {
-      void queryClient.invalidateQueries({ queryKey: ['skills', fakeUser] })
-    },
-  })
-
   const testMutation = useMutation({
     mutationFn: () => testEmployeeVersion(employeeId, versionNumber, testPrompt, fakeUser),
     onSuccess: (result) => {
@@ -322,7 +285,7 @@ export function EmployeeVersionEditorPage() {
   const currentVersion = version.data
   return (
     <section className="management-page" aria-label="员工版本编辑器">
-      <div className="management-page-header">
+      <div className="management-page-header employee-editor-header">
         <div>
           <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}`}>
             ← 返回员工详情
@@ -336,11 +299,12 @@ export function EmployeeVersionEditorPage() {
         </div>
         {admin && !readOnly && (
           <Space>
-            <Button onClick={() => {
-              skillCreateForm.resetFields()
-              skillCreateForm.setFieldsValue({ skill_type: 'instruction', allowed_tool_ids: [] })
-              setSkillCreateOpen(true)
-            }}>新建 Skill</Button>
+            <Link
+              className="ant-btn ant-btn-default"
+              to={`/enterprise/employees/${encodeURIComponent(employeeId)}/skills/new`}
+            >
+              新建 Skill 草稿
+            </Link>
             <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`}>管理 Tool</Link>
             <Button onClick={() => setTestOpen(true)}>测试版本</Button>
             <Button type="primary" loading={saveMutation.isPending} onClick={() => form.submit()}>保存草稿</Button>
@@ -370,30 +334,58 @@ export function EmployeeVersionEditorPage() {
         onValuesChange={() => setDirty(true)}
         onFinish={(values) => saveMutation.mutate(values)}
       >
-        <Row gutter={[16, 16]}>
-          <Col xs={24} xl={15}>
-            <Card className="management-card" title="系统指令与能力">
-              <Form.Item name="system_prompt" label="系统指令" rules={[{ required: true, message: '请输入系统指令' }]}>
-                <Input.TextArea rows={8} maxLength={65535} placeholder="定义角色职责、流程边界和输出要求" />
+        <div className="employee-version-editor-sections">
+          <Card className="management-card employee-editor-card" title="角色指令" aria-label="角色指令">
+            <Paragraph type="secondary">描述员工职责、边界和回答要求。</Paragraph>
+            <Form.Item name="system_prompt" label="系统指令" rules={[{ required: true, message: '请输入系统指令' }]}>
+              <Input.TextArea rows={7} maxLength={65535} placeholder="定义角色职责、流程边界和输出要求" />
+            </Form.Item>
+          </Card>
+
+          <section className="employee-editor-resource-section" aria-label="Skill 绑定">
+            <Card className="management-card employee-editor-card" title="Skills">
+              <div className="employee-editor-section-intro">
+                <div>
+                  <Text strong>这个版本使用的 Skills</Text>
+                  <Paragraph type="secondary">每个 Skill 独立选择并固定版本；Tool 选择在下一块单独管理。</Paragraph>
+                </div>
+                <span className="employee-editor-count">{selectedValues?.skill_keys?.length ?? 0}</span>
+              </div>
+              <Form.Item name="skill_keys" label="选择 Skill 版本" rules={[{ required: true, message: '至少选择一个 Skill' }]}>
+                <Select mode="multiple" options={skillOptions} placeholder="选择已发布的 Skill" />
               </Form.Item>
-              <Form.Item name="skill_keys" label="Skill 版本" rules={[{ required: true, message: '至少选择一个 Skill' }]}>
-                <Select mode="multiple" options={skillOptions} placeholder="选择已发布 Skill 版本" />
-              </Form.Item>
-              <Form.Item name="tool_keys" label="员工声明的 Tool 版本">
-                <Select mode="multiple" options={toolOptions} placeholder="选择员工允许使用的 Tool" />
-              </Form.Item>
-              <Card size="small" title="有效 Tool 交集预览">
-                <Paragraph type="secondary">只有同时被所选 Skill、员工版本和 ExecutionProfile 策略允许的 Tool 才会进入 Runtime。</Paragraph>
-                <Space wrap>
-                  {effectiveTools.map((tool) => <Tag key={tool.id} color="green">有效 · {tool.name}</Tag>)}
-                  {excludedTools.map((tool) => <Tag key={tool.id} color="orange">未进入交集 · {tool.name}</Tag>)}
-                  {selectedTools.length === 0 && <Text type="secondary">尚未选择 Tool</Text>}
-                </Space>
-              </Card>
+              <Text type="secondary">这里只绑定已发布的精确版本；创建、编辑和发布 Skill 请从员工 Skills 页进入独立文件工作区。</Text>
             </Card>
-          </Col>
-          <Col xs={24} xl={9}>
-            <Card className="management-card" title="执行配置">
+          </section>
+
+          <section className="employee-editor-resource-section" aria-label="Tool 绑定">
+            <Card className="management-card employee-editor-card" title="Tools">
+              <div className="employee-editor-section-intro">
+                <div>
+                  <Text strong>这个版本允许使用的 Tools</Text>
+                  <Paragraph type="secondary">Tool 与 Skill 分开选择；最终可用范围会显示在下面。</Paragraph>
+                </div>
+                <span className="employee-editor-count">{selectedValues?.tool_keys?.length ?? 0}</span>
+              </div>
+              <Form.Item name="tool_keys" label="选择 Tool 版本">
+                <Select mode="multiple" options={toolOptions} placeholder="选择已发布的 Tool" />
+              </Form.Item>
+              <div className="employee-tool-policy-panel">
+                <Text strong>当前版本可用范围</Text>
+                <Paragraph type="secondary">运行时会同时检查员工选择、Skill 声明范围和执行策略。</Paragraph>
+                <Space wrap>
+                  {effectiveTools.map((tool) => <Tag key={tool.id} color="green">可用 · {tool.name}</Tag>)}
+                  {excludedTools.map((tool) => <Tag key={tool.id} color="orange">被策略排除 · {tool.name}</Tag>)}
+                  {selectedTools.length === 0 && <Text type="secondary">选择 Skill 和 Tool 后显示结果</Text>}
+                </Space>
+              </div>
+              <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`}>打开 Tool 管理</Link>
+            </Card>
+          </section>
+
+          <Card className="management-card employee-editor-card" title="运行配置">
+            <Paragraph type="secondary">先设置模型与审批策略；可选执行环境默认收起。</Paragraph>
+            <div className="employee-runtime-primary-fields">
               <Form.Item name="execution_profile_id" label="ExecutionProfile" rules={[{ required: true, message: '请选择执行配置' }]}>
                 <Select
                   options={(profiles.data?.items ?? []).map((profile: ExecutionProfileSummary) => ({
@@ -414,26 +406,6 @@ export function EmployeeVersionEditorPage() {
                   placeholder="使用执行配置默认路由"
                 />
               </Form.Item>
-              <Form.Item label="Workspace Profile">
-                <Space.Compact block>
-                  <Form.Item name="workspace_profile_id" noStyle>
-                    <Input placeholder="Profile ID（可选）" />
-                  </Form.Item>
-                  <Form.Item name="workspace_profile_version" noStyle>
-                    <InputNumber min={1} placeholder="版本" />
-                  </Form.Item>
-                </Space.Compact>
-              </Form.Item>
-              <Form.Item label="Sandbox Profile">
-                <Space.Compact block>
-                  <Form.Item name="sandbox_profile_id" noStyle>
-                    <Input placeholder="Profile ID（可选）" />
-                  </Form.Item>
-                  <Form.Item name="sandbox_profile_version" noStyle>
-                    <InputNumber min={1} placeholder="版本" />
-                  </Form.Item>
-                </Space.Compact>
-              </Form.Item>
               <Form.Item name="approval_policy" label="审批策略">
                 <Select options={[
                   { value: 'none', label: '无需审批' },
@@ -441,12 +413,43 @@ export function EmployeeVersionEditorPage() {
                   { value: 'always', label: '所有操作需审批' },
                 ]} />
               </Form.Item>
-              <Text type="secondary">
-                Profile 工具策略：{selectedProfile?.tool_policy?.join('、') || '不额外限制'}
-              </Text>
-            </Card>
-          </Col>
-        </Row>
+            </div>
+            <Collapse
+              className="employee-runtime-advanced"
+              items={[{
+                key: 'advanced',
+                label: '高级环境参数（可选）',
+                children: (
+                  <div className="employee-runtime-advanced-fields">
+                    <Form.Item label="Workspace Profile">
+                      <Space.Compact block>
+                        <Form.Item name="workspace_profile_id" noStyle>
+                          <Input placeholder="Profile ID" />
+                        </Form.Item>
+                        <Form.Item name="workspace_profile_version" noStyle>
+                          <InputNumber min={1} placeholder="版本" />
+                        </Form.Item>
+                      </Space.Compact>
+                    </Form.Item>
+                    <Form.Item label="Sandbox Profile">
+                      <Space.Compact block>
+                        <Form.Item name="sandbox_profile_id" noStyle>
+                          <Input placeholder="Profile ID" />
+                        </Form.Item>
+                        <Form.Item name="sandbox_profile_version" noStyle>
+                          <InputNumber min={1} placeholder="版本" />
+                        </Form.Item>
+                      </Space.Compact>
+                    </Form.Item>
+                  </div>
+                ),
+              }]}
+            />
+            <Paragraph className="employee-profile-policy" type="secondary">
+              Profile 工具策略：{selectedProfile?.tool_policy?.join('、') || '不额外限制'}
+            </Paragraph>
+          </Card>
+        </div>
       </Form>
 
       {testResult && (
@@ -454,58 +457,6 @@ export function EmployeeVersionEditorPage() {
           <pre className="prompt-preview">{testResult.result}</pre>
         </Card>
       )}
-
-      {createSkillMutation.isError && (
-        <Alert type="error" showIcon message="Skill 创建或发布失败" description={(createSkillMutation.error as Error).message} />
-      )}
-
-      <Modal
-        title="创建并发布 Skill"
-        open={skillCreateOpen}
-        onCancel={() => setSkillCreateOpen(false)}
-        onOk={() => skillCreateForm.submit()}
-        okText="创建并加入草稿"
-        cancelText="取消"
-        confirmLoading={createSkillMutation.isPending}
-        destroyOnHidden
-      >
-        <Form
-          form={skillCreateForm}
-          layout="vertical"
-          initialValues={{ skill_type: 'instruction', allowed_tool_ids: [] }}
-          onFinish={(values) => createSkillMutation.mutate(values)}
-        >
-          <Form.Item name="name" label="Skill 名称" rules={[{ required: true, message: '请输入 Skill 名称' }]}>
-            <Input maxLength={128} />
-          </Form.Item>
-          <Form.Item name="skill_type" label="Skill 类型" rules={[{ required: true }]}>
-            <Select options={[
-              { value: 'instruction', label: '指令型 Skill' },
-              { value: 'tool-bundle', label: '工具组合 Skill' },
-              { value: 'workflow', label: '流程型 Skill' },
-            ]} />
-          </Form.Item>
-          <Form.Item name="instruction" label="入口指令" rules={[{ required: true, message: '请输入 Skill 指令' }]}>
-            <Input.TextArea rows={6} maxLength={65535} />
-          </Form.Item>
-          <Form.Item name="allowed_tool_ids" label="允许调用的已发布 Tool">
-            <Select
-              mode="multiple"
-              options={(tools.data?.items ?? []).map((tool: ToolSummary) => ({
-                value: tool.id,
-                label: `${tool.name} · v${tool.version}`,
-                disabled: tool.status !== 'PUBLISHED',
-              }))}
-              placeholder="可选；先在 Tool 管理中创建并发布 Tool"
-            />
-          </Form.Item>
-          <Alert
-            type="info"
-            showIcon
-            message="Skill 创建后会发布固定版本并加入当前员工草稿；保存后可从员工详情进入文件工作区上传 ZIP 或编辑文件。"
-          />
-        </Form>
-      </Modal>
 
       <Modal
         title="测试当前草稿版本"

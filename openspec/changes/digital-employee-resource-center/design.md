@@ -123,6 +123,12 @@ ZIP 解包在临时区完成并全部校验后再原子提交清单；建议初�
 | `GET /digital-employees/{id}/versions` | 读取版本历史 |
 | `GET /digital-employees/{id}/versions/{version}` | 返回绑定精确版本和 Hub 来源 |
 | `PUT /digital-employees/{id}/versions/{version}` | 更新 DRAFT 员工版本；PUBLISHED 返回 409 |
+| `POST /digital-employees/{id}/versions/{source_version}/fork` | 克隆 PUBLISHED 员工完整配置到下一 DRAFT |
+| `PUT /digital-employees/{id}/versions/{version}/skill-bindings` | 仅替换 DRAFT Skill 绑定 |
+| `PUT /digital-employees/{id}/versions/{version}/tool-bindings` | 仅替换 DRAFT Tool 绑定 |
+| `GET /skills?include_versions=true` | 为资源选择器读取全部精确 Skill 版本 |
+| `POST /skills/{id}/versions/{version}/fork` | 从本地 PUBLISHED Skill 创建 DRAFT |
+| `POST /skills/{id}/versions/{version}/publish` | 校验并发布精确 Skill DRAFT 版本 |
 | `GET /skills/{id}/versions/{version}/files` | 读取文件清单、入口、摘要和只读状态 |
 | `POST /skills/{id}/versions/{version}/files` | 在 DRAFT 创建文本文件 |
 | `PUT /skills/{id}/versions/{version}/files/{file_id}` | 更新 DRAFT 文件，要求 `expected_sha256` |
@@ -137,6 +143,34 @@ ZIP 解包在临时区完成并全部校验后再原子提交清单；建议初�
 | `POST /hub/imports/{id}/refresh` | 显式生成新的本地版本/引用代理 |
 
 成功响应带本地资源 ID、版本、状态和 `source_ref`；REFERENCE 文件操作返回只读标记。越权资源返回 404，权限缺失返回 403，依赖/摘要冲突和不可变版本返回 409，非法 ZIP/路径返回 422。Hub 资源撤销、导入、升级写入 `audit_events`。
+
+### 6. Skill/Tool 定向编辑只写资源绑定，已发布内容先分叉
+
+员工详情的 Skills 与 Tools Tab 各自打开类型专属抽屉。租户目录只展示已发布的精确资源版本；资源中心抽屉先按类型过滤目录，展示授权方式、版本和依赖信息。COPY/REFERENCE 导入成功后只把返回的租户代理 ID/版本追加到当前 DRAFT。
+
+若当前选择的是员工 PUBLISHED 版本，前端先调用员工 fork API；MySQL 锁定员工聚合行，在一个事务内按单调版本号创建 DRAFT 并复制系统指令、Skill/Tool 绑定、Capability slot、执行配置和审批策略。并发 fork 串行分配版本号。之后抽屉操作新 DRAFT；原版本及 Deployment/RunSnapshot 不变。
+
+Skill/Tool 定向绑定分别在事务中替换 `employee_skill_bindings` 或 `employee_tool_bindings`，并只重建同类型的 `capability_bindings.slot`。完整 `PUT /digital-employees/{id}/versions/{version}` 仍服务于版本配置页。类型绑定 API 不接收系统指令或运行配置字段，以结构边界避免误覆盖。
+
+Skill 文件工作区提供精确版本分叉和发布。分叉 Skill 的新版本复制依赖与不可变 MediaAsset 引用，不复制或覆盖对象字节；Hub REFERENCE 的 fork 按 409 拒绝并要求先 COPY。DRAFT 文件包发布时由 Domain 校验唯一根 `SKILL.md`、依赖和摘要；旧版本保持 PUBLISHED。
+
+```mermaid
+sequenceDiagram
+    participant UI as 员工 Skills/Tools Tab
+    participant API as Catalog API
+    participant App as CatalogService
+    participant DB as MySQL Catalog
+    UI->>API: POST employee-version fork（源版本已发布时）
+    API->>App: 校验管理员、员工租户和源状态
+    App->>DB: 锁员工行，克隆完整版本及绑定到下一 DRAFT
+    DB-->>UI: 新 DRAFT 精确快照
+    UI->>API: PUT skill-bindings 或 tool-bindings
+    API->>App: 校验 DRAFT、精确资源状态和 Hub Grant
+    App->>DB: 只替换对应绑定表和 capability slot
+    DB-->>UI: 完整版本响应；页面仍停留在原类型 Tab
+```
+
+数据库仅使用 V003 已存在的版本和绑定表；本次不新增 migration。`GET /skills?include_versions=true` 为绑定选择器提供历史精确版本，默认 Skill 目录仍返回每个 Skill 的最新版本。
 
 ## 数据库结构设计
 

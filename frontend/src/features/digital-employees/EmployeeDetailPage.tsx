@@ -9,39 +9,51 @@ import {
   Input,
   Modal,
   Popconfirm,
+  Select,
   Space,
   Spin,
-  Table,
+  Tabs,
   Tag,
   Typography,
   message,
 } from 'antd'
-import type { ColumnsType } from 'antd/es/table'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import {
   archiveDigitalEmployee,
   createEmployeeVersion,
+  forkEmployeeVersion,
   getDigitalEmployee,
   listEmployeeVersions,
+  listSkills,
+  listTools,
   patchDigitalEmployee,
+  replaceEmployeeSkillBindings,
+  replaceEmployeeToolBindings,
 } from '../../api/client'
-import type { DigitalEmployeeDetail, EmployeeVersion } from '../../api/client'
+import type { DigitalEmployeeDetail, EmployeeVersion, SkillSummary, ToolSummary } from '../../api/client'
 import { useTenantContext } from '../management/TenantContext'
+import { EmployeeResourcePickerDrawer } from './EmployeeResourcePickerDrawer'
 
 const { Title, Text, Paragraph } = Typography
 
-/** 员工基本资料、版本时间线和精确 Skill/Tool 引用的详情入口。 */
+type WorkspaceTab = 'overview' | 'skills' | 'tools' | 'versions'
+
+/** 员工工作台：概览、按类型分区的能力资源、版本发布。 */
 export function EmployeeDetailPage() {
   const { employeeId = '' } = useParams()
   const { fakeUser, currentIdentity } = useTenantContext()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const canEdit = currentIdentity.roleName === '管理员'
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('overview')
   const [editOpen, setEditOpen] = useState(false)
   const [createVersionOpen, setCreateVersionOpen] = useState(false)
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null)
+  const [resourcePickerKind, setResourcePickerKind] = useState<'skill' | 'tool'>()
+  const [resourcePickerVersion, setResourcePickerVersion] = useState<number | null>(null)
+  const [forkKind, setForkKind] = useState<'skill' | 'tool'>()
   const [editForm] = Form.useForm<Pick<DigitalEmployeeDetail, 'name' | 'role_name' | 'description'>>()
   const [versionForm] = Form.useForm<{ system_prompt: string }>()
 
@@ -54,6 +66,16 @@ export function EmployeeDetailPage() {
     queryKey: ['employee-versions', fakeUser, employeeId, 'all'],
     queryFn: () => listEmployeeVersions(employeeId, { limit: 100 }, fakeUser),
     enabled: Boolean(employeeId),
+  })
+  const skills = useQuery({
+    queryKey: ['skills', fakeUser],
+    queryFn: () => listSkills(fakeUser, true),
+    enabled: activeTab === 'skills',
+  })
+  const tools = useQuery({
+    queryKey: ['tools', fakeUser],
+    queryFn: () => listTools(fakeUser),
+    enabled: activeTab === 'tools',
   })
 
   useEffect(() => {
@@ -103,8 +125,41 @@ export function EmployeeDetailPage() {
       await invalidateEmployee()
       setCreateVersionOpen(false)
       versionForm.resetFields()
-      setSelectedVersion(created.version)
       message.success(`草稿版本 v${created.version} 已创建`)
+      navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/versions/${created.version}`)
+    },
+  })
+
+  const forkVersionMutation = useMutation({
+    mutationFn: (input: { sourceVersion: number; kind: 'skill' | 'tool' }) =>
+      forkEmployeeVersion(employeeId, input.sourceVersion, fakeUser),
+    onSuccess: async (created, input) => {
+      await invalidateEmployee()
+      setSelectedVersion(created.version)
+      setResourcePickerVersion(created.version)
+      setResourcePickerKind(input.kind)
+      setForkKind(undefined)
+      message.success(`已从 v${input.sourceVersion} 创建完整继承配置的草稿 v${created.version}`)
+    },
+    onError: (error) => {
+      setForkKind(undefined)
+      message.error((error as Error).message)
+    },
+  })
+
+  const replaceBindingsMutation = useMutation({
+    mutationFn: async (input: {
+      kind: 'skill' | 'tool'
+      version: number
+      refs: { resource_id: string; version: number }[]
+    }) => input.kind === 'skill'
+      ? replaceEmployeeSkillBindings(employeeId, input.version, input.refs, fakeUser)
+      : replaceEmployeeToolBindings(employeeId, input.version, input.refs, fakeUser),
+    onSuccess: async (_, input) => {
+      await invalidateEmployee()
+      setResourcePickerKind(undefined)
+      setResourcePickerVersion(null)
+      message.success(input.kind === 'skill' ? 'Skill 绑定已更新' : 'Tool 绑定已更新')
     },
   })
 
@@ -112,39 +167,65 @@ export function EmployeeDetailPage() {
     () => [...(versions.data?.items ?? [])].sort((left, right) => right.version - left.version),
     [versions.data?.items],
   )
-  const selected = orderedVersions.find((item) => item.version === selectedVersion)
-    ?? orderedVersions[0]
-  const versionColumns = useMemo<ColumnsType<EmployeeVersion>>(() => [
-    {
-      title: '版本',
-      dataIndex: 'version',
-      key: 'version',
-      width: 90,
-      render: (value: number) => <Button type="link" onClick={() => setSelectedVersion(value)}>v{value}</Button>,
-    },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      key: 'status',
-      width: 130,
-      render: (value: string) => <Tag color={value === 'PUBLISHED' ? 'green' : value === 'DRAFT' ? 'blue' : 'default'}>{value}</Tag>,
-    },
-    {
-      title: 'Skill / Tool',
-      key: 'dependencies',
-      render: (_: unknown, item) => `${item.skill_version_refs.length} Skill / ${item.tool_version_refs.length} Tool`,
-    },
-    {
-      title: '',
-      key: 'actions',
-      width: 120,
-      render: (_: unknown, item) => (
-        item.status === 'DRAFT'
-          ? <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/versions/${item.version}`}>编辑草稿</Link>
-          : <Button type="link" onClick={() => setSelectedVersion(item.version)}>查看快照</Button>
-      ),
-    },
-  ], [employeeId])
+  const selected = orderedVersions.find((item) => item.version === selectedVersion) ?? orderedVersions[0]
+  const employeeIsArchived = employee.data?.status === 'ARCHIVED'
+  const canConfigure = canEdit && !employeeIsArchived
+  const openEditor = (version: number) => {
+    navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/versions/${version}`)
+  }
+  const openResourcePicker = (kind: 'skill' | 'tool') => {
+    if (!selected) return
+    if (selected.status === 'DRAFT') {
+      setResourcePickerVersion(selected.version)
+      setResourcePickerKind(kind)
+      return
+    }
+    if (selected.status === 'PUBLISHED') {
+      setForkKind(kind)
+      forkVersionMutation.mutate({ sourceVersion: selected.version, kind })
+      return
+    }
+    message.warning('此版本不能直接编辑；请从已发布版本创建新的员工草稿。')
+  }
+
+  const saveResourceBindings = async (
+    kind: 'skill' | 'tool',
+    version: number,
+    addedRefs: { resource_id: string; version: number }[],
+  ) => {
+    const sourceVersion = orderedVersions.find((item) => item.version === version)
+    const existingRefs = kind === 'skill'
+      ? sourceVersion?.skill_version_refs ?? []
+      : sourceVersion?.tool_version_refs ?? []
+    const refs = [
+      ...existingRefs.map((item) => ({
+        resource_id: item.skill_id ?? item.tool_id ?? item.resource_id ?? '',
+        version: item.version,
+      })),
+      ...addedRefs,
+    ].filter((item) => item.resource_id)
+    await replaceBindingsMutation.mutateAsync({ kind, version, refs })
+  }
+
+  const removeResourceBinding = (kind: 'skill' | 'tool', resourceId: string, resourceVersion: number) => {
+    if (!selected || selected.status !== 'DRAFT') return
+    const refs = (kind === 'skill' ? selected.skill_version_refs : selected.tool_version_refs)
+      .filter((item) => (item.skill_id ?? item.tool_id ?? item.resource_id) !== resourceId || item.version !== resourceVersion)
+      .map((item) => ({
+        resource_id: item.skill_id ?? item.tool_id ?? item.resource_id ?? '',
+        version: item.version,
+      }))
+      .filter((item) => item.resource_id)
+    replaceBindingsMutation.mutate({ kind, version: selected.version, refs })
+  }
+  const skillForRef = (ref: EmployeeVersion['skill_version_refs'][number]) => (
+    (skills.data?.items ?? []).find((item: SkillSummary) => item.id === (ref.skill_id ?? ref.resource_id) && item.version === ref.version)
+  )
+  const toolForRef = (ref: EmployeeVersion['tool_version_refs'][number]) => (
+    (tools.data?.items ?? []).find((item: ToolSummary) => item.id === (ref.tool_id ?? ref.resource_id) && item.version === ref.version)
+  )
+  const submitEdit = () => editForm.submit()
+  const submitVersion = () => versionForm.submit()
 
   if (employee.isLoading) {
     return <div className="management-loading"><Spin /> 正在加载员工详情…</div>
@@ -162,28 +243,25 @@ export function EmployeeDetailPage() {
   }
 
   const data = employee.data
-  const employeeIsArchived = data.status === 'ARCHIVED'
-  const submitEdit = () => editForm.submit()
-  const submitVersion = () => versionForm.submit()
 
   return (
-    <section className="management-page" aria-label="员工详情">
-      <div className="management-page-header">
-        <div>
-          <Link to="/enterprise/employees">← 返回员工列表</Link>
-          <Text className="management-eyebrow">员工管理 / 员工详情</Text>
-          <Space align="center" size={12}>
-            <Title level={2} className="employee-detail-title">{data.name}</Title>
+    <section className="management-page employee-workspace" aria-label="数字员工工作台">
+      <div className="employee-workspace-header">
+        <div className="employee-workspace-identity">
+          <Link to="/enterprise/employees" className="employee-back-link">← 数字员工</Link>
+          <Space align="center" size={12} wrap>
+            <Title level={2} className="employee-workspace-title">{data.name}</Title>
             <Tag color={data.status === 'ARCHIVED' ? 'red' : data.status === 'ACTIVE' ? 'green' : 'blue'}>
               {data.status}
             </Tag>
           </Space>
-          <Paragraph type="secondary">{data.role_name} · {data.description}</Paragraph>
+          <Paragraph type="secondary" className="employee-workspace-subtitle">
+            {data.role_name}<span className="employee-subtitle-separator">·</span>{data.description}
+          </Paragraph>
         </div>
-        {canEdit && !employeeIsArchived && (
-          <Space>
-            <Button onClick={() => navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`)}>Tool 管理</Button>
-            <Button onClick={() => setEditOpen(true)}>编辑基本信息</Button>
+        {canConfigure && (
+          <Space wrap>
+            <Button onClick={() => setEditOpen(true)}>编辑资料</Button>
             <Popconfirm
               title="归档这个数字员工？"
               description="归档后不能新建版本或部署，历史版本和运行记录保留。"
@@ -191,99 +269,237 @@ export function EmployeeDetailPage() {
               cancelText="取消"
               onConfirm={() => archiveMutation.mutate()}
             >
-              <Button danger loading={archiveMutation.isPending}>归档员工</Button>
+              <Button danger loading={archiveMutation.isPending}>归档</Button>
             </Popconfirm>
           </Space>
         )}
       </div>
 
-      <div className="management-two-column">
-        <Card className="management-card" title="员工基本信息">
-          <Descriptions column={1} size="small">
-            <Descriptions.Item label="员工名称">{data.name}</Descriptions.Item>
-            <Descriptions.Item label="员工类型">{data.role_name}</Descriptions.Item>
-            <Descriptions.Item label="员工描述">{data.description}</Descriptions.Item>
-            <Descriptions.Item label="员工 ID"><Text copyable>{data.id}</Text></Descriptions.Item>
-            <Descriptions.Item label="版本数量">{data.version_count}</Descriptions.Item>
-            <Descriptions.Item label="最新发布版本">
-              {data.latest_published_version ? `v${data.latest_published_version.version}` : '尚未发布'}
-            </Descriptions.Item>
-          </Descriptions>
-        </Card>
-
-        <Card className="management-card" title="员工版本">
-          {canEdit && !employeeIsArchived && (
-            <Button type="primary" block onClick={() => setCreateVersionOpen(true)}>
-              新建草稿版本
-            </Button>
-          )}
-          {versions.isLoading && <div className="management-loading">正在加载版本…</div>}
-          {versions.isError && <Alert type="error" message={(versions.error as Error).message} />}
-          {versions.isSuccess && orderedVersions.length === 0 && (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有员工版本" />
-          )}
-          {orderedVersions.length > 0 && (
-            <Table<EmployeeVersion>
-              className="employee-version-table"
-              rowKey="version"
-              size="small"
-              pagination={false}
-              columns={versionColumns}
-              dataSource={orderedVersions}
-              onRow={(item) => ({ onClick: () => setSelectedVersion(item.version) })}
-            />
-          )}
-        </Card>
-      </div>
-
-      {selected && (
-        <Card className="management-card" title={`版本 v${selected.version} 快照`}>
-          <div className="version-snapshot-grid">
-            <div>
-              <Text type="secondary">系统指令</Text>
-              <pre className="prompt-preview">{selected.system_prompt}</pre>
-            </div>
-            <div>
-              <div className="management-section-heading">
-                <Text strong>Skill 与 Tool 绑定</Text>
-                <Text type="secondary">固定在 v{selected.version}</Text>
+      <Tabs
+        className="employee-workspace-tabs"
+        activeKey={activeTab}
+        onChange={(key) => setActiveTab(key as WorkspaceTab)}
+        items={[
+          {
+            key: 'overview',
+            label: '概览',
+            children: (
+              <div className="employee-overview-layout">
+                <Card className="management-card employee-overview-card" title="员工概览">
+                  <Descriptions column={2} size="middle">
+                    <Descriptions.Item label="员工名称">{data.name}</Descriptions.Item>
+                    <Descriptions.Item label="员工类型">{data.role_name}</Descriptions.Item>
+                    <Descriptions.Item label="员工 ID"><Text copyable>{data.id}</Text></Descriptions.Item>
+                    <Descriptions.Item label="状态">
+                      <Tag color={data.status === 'ARCHIVED' ? 'red' : data.status === 'ACTIVE' ? 'green' : 'blue'}>{data.status}</Tag>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="用途说明" span={2}>{data.description}</Descriptions.Item>
+                  </Descriptions>
+                  <div className="employee-overview-footer">
+                    <span><Text type="secondary">版本数量</Text><strong>{data.version_count}</strong></span>
+                    <span><Text type="secondary">最新发布版本</Text><strong>{data.latest_published_version ? `v${data.latest_published_version.version}` : '尚未发布'}</strong></span>
+                    <span><Text type="secondary">当前草稿</Text><strong>{selected?.status === 'DRAFT' ? `v${selected.version}` : '无'}</strong></span>
+                  </div>
+                </Card>
               </div>
-              <div className="resource-ref-list">
-                {selected.skill_version_refs.length === 0 && <Text type="secondary">未绑定 Skill</Text>}
-                {selected.skill_version_refs.map((ref) => {
-                  const skillId = ref.skill_id ?? ref.resource_id ?? ''
-                  return (
-                    <div className="resource-ref-row" key={`${skillId}:${ref.version}`}>
-                      <Space direction="vertical" size={0}>
-                        <Text>Skill · v{ref.version}</Text>
-                        <Text type="secondary" copyable>{skillId}</Text>
-                      </Space>
-                      <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/skills/${encodeURIComponent(skillId)}/versions/${ref.version}/files`}>
-                        文件工作区
-                      </Link>
-                    </div>
-                  )
-                })}
-                {selected.tool_version_refs.length === 0 && <Text type="secondary">未绑定 Tool</Text>}
-                {selected.tool_version_refs.map((ref) => {
-                  const toolId = ref.tool_id ?? ref.resource_id ?? ''
-                  return (
-                    <div className="resource-ref-row" key={`${toolId}:${ref.version}`}>
-                      <Space direction="vertical" size={0}>
-                        <Text>Tool · v{ref.version}</Text>
-                        <Text type="secondary" copyable>{toolId}</Text>
-                      </Space>
-                      <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/${encodeURIComponent(toolId)}`}>
-                        工具配置
-                      </Link>
-                    </div>
-                  )
-                })}
+            ),
+          },
+          {
+            key: 'skills',
+            label: `Skills${selected ? ` (${selected.skill_version_refs.length})` : ''}`,
+            children: (
+              <div className="employee-resource-tab">
+                <div className="employee-resource-toolbar">
+                  <div>
+                    <Title level={3}>Skills</Title>
+                    <Text type="secondary">只展示当前员工版本绑定的 Skills；每项使用精确版本。</Text>
+                  </div>
+                  <Space wrap>
+                    {orderedVersions.length > 0 && (
+                      <Select
+                        aria-label="Skill 所属员工版本"
+                        value={selected?.version}
+                        onChange={setSelectedVersion}
+                        options={orderedVersions.map((item) => ({ value: item.version, label: `v${item.version} · ${item.status}` }))}
+                        style={{ minWidth: 190 }}
+                      />
+                    )}
+                    {canConfigure && selected && selected.status !== 'DEPRECATED' && (
+                      <Button type="primary" loading={forkVersionMutation.isPending && forkKind === 'skill'} onClick={() => openResourcePicker('skill')}>
+                        添加 Skill
+                      </Button>
+                    )}
+                  </Space>
+                </div>
+                {!selected && (
+                  <Card className="management-card employee-empty-workspace">
+                    <Empty description="先创建员工草稿版本，再添加 Skills。">
+                      {canConfigure && <Button type="primary" onClick={() => setCreateVersionOpen(true)}>新建草稿版本</Button>}
+                    </Empty>
+                  </Card>
+                )}
+                {selected && (
+                  <section className="employee-resource-section" aria-label="Skills">
+                    <Card className="management-card employee-resource-card" title={`Skills · v${selected.version}`}>
+                      {selected.skill_version_refs.length === 0
+                        ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此版本还没有绑定 Skill" />
+                        : <div className="employee-resource-list">
+                          {selected.skill_version_refs.map((ref) => {
+                            const id = ref.skill_id ?? ref.resource_id ?? ''
+                            const skill = skillForRef(ref)
+                            return (
+                              <article className="employee-resource-item" key={`${id}:${ref.version}`}>
+                                <div className="employee-resource-item-main">
+                                  <span className="employee-resource-type-icon skill-icon">S</span>
+                                  <div>
+                                    <Text strong>{skill?.name ?? `Skill ${id.slice(0, 8)}`}</Text>
+                                    <div className="employee-resource-meta">v{ref.version}<span>·</span>{skill?.status ?? '固定引用'}</div>
+                                  </div>
+                                </div>
+                                <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/skills/${encodeURIComponent(id)}/versions/${ref.version}/files`}>打开文件工作区</Link>
+                                {canConfigure && selected.status === 'DRAFT' && (
+                                  <Popconfirm
+                                    title="从当前员工版本移除这个 Skill？"
+                                    description="只修改此 DRAFT 的 Skill 绑定，不会删除 Skill 资源。"
+                                    okText="确认移除"
+                                    cancelText="取消"
+                                    onConfirm={() => removeResourceBinding('skill', id, ref.version)}
+                                  >
+                                    <Button type="link" danger loading={replaceBindingsMutation.isPending}>移除</Button>
+                                  </Popconfirm>
+                                )}
+                              </article>
+                            )
+                          })}
+                        </div>}
+                    </Card>
+                  </section>
+                )}
+                {skills.isError && <Alert type="error" showIcon message="Skill 目录读取失败" description={(skills.error as Error).message} />}
               </div>
-            </div>
-          </div>
-        </Card>
-      )}
+            ),
+          },
+          {
+            key: 'tools',
+            label: `Tools${selected ? ` (${selected.tool_version_refs.length})` : ''}`,
+            children: (
+              <div className="employee-resource-tab">
+                <div className="employee-resource-toolbar">
+                  <div>
+                    <Title level={3}>Tools</Title>
+                    <Text type="secondary">只展示当前员工版本允许使用的 Tools；有效范围仍受 Skill 和执行策略约束。</Text>
+                  </div>
+                  <Space wrap>
+                    {orderedVersions.length > 0 && (
+                      <Select
+                        aria-label="Tool 所属员工版本"
+                        value={selected?.version}
+                        onChange={setSelectedVersion}
+                        options={orderedVersions.map((item) => ({ value: item.version, label: `v${item.version} · ${item.status}` }))}
+                        style={{ minWidth: 190 }}
+                      />
+                    )}
+                    <Button onClick={() => navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`)}>管理 Tools</Button>
+                    {canConfigure && selected && selected.status !== 'DEPRECATED' && (
+                      <Button type="primary" loading={forkVersionMutation.isPending && forkKind === 'tool'} onClick={() => openResourcePicker('tool')}>
+                        绑定 Tool
+                      </Button>
+                    )}
+                  </Space>
+                </div>
+                {!selected && (
+                  <Card className="management-card employee-empty-workspace">
+                    <Empty description="先创建员工草稿版本，再绑定 Tools。">
+                      {canConfigure && <Button type="primary" onClick={() => setCreateVersionOpen(true)}>新建草稿版本</Button>}
+                    </Empty>
+                  </Card>
+                )}
+                {selected && (
+                  <section className="employee-resource-section" aria-label="Tools">
+                    <Card className="management-card employee-resource-card" title={`Tools · v${selected.version}`}>
+                      {selected.tool_version_refs.length === 0
+                        ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此版本还没有绑定 Tool" />
+                        : <div className="employee-resource-list">
+                          {selected.tool_version_refs.map((ref) => {
+                            const id = ref.tool_id ?? ref.resource_id ?? ''
+                            const tool = toolForRef(ref)
+                            return (
+                              <article className="employee-resource-item" key={`${id}:${ref.version}`}>
+                                <div className="employee-resource-item-main">
+                                  <span className="employee-resource-type-icon tool-icon">T</span>
+                                  <div>
+                                    <Text strong>{tool?.name ?? `Tool ${id.slice(0, 8)}`}</Text>
+                                    <div className="employee-resource-meta">v{ref.version}<span>·</span>{tool?.status ?? '固定引用'}</div>
+                                  </div>
+                                </div>
+                                <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/${encodeURIComponent(id)}`}>Tool 详情</Link>
+                                {canConfigure && selected.status === 'DRAFT' && (
+                                  <Popconfirm
+                                    title="从当前员工版本移除这个 Tool？"
+                                    description="只修改此 DRAFT 的 Tool 绑定，不会删除 Tool 资源。"
+                                    okText="确认移除"
+                                    cancelText="取消"
+                                    onConfirm={() => removeResourceBinding('tool', id, ref.version)}
+                                  >
+                                    <Button type="link" danger loading={replaceBindingsMutation.isPending}>移除</Button>
+                                  </Popconfirm>
+                                )}
+                              </article>
+                            )
+                          })}
+                        </div>}
+                    </Card>
+                  </section>
+                )}
+                {tools.isError && <Alert type="error" showIcon message="Tool 目录读取失败" description={(tools.error as Error).message} />}
+              </div>
+            ),
+          },
+          {
+            key: 'versions',
+            label: '版本与发布',
+            children: (
+              <div className="employee-version-workspace">
+                <div className="employee-version-workspace-header">
+                  <div>
+                    <Title level={3}>版本与发布</Title>
+                    <Paragraph type="secondary">每个版本固定自己的 Skills、Tools 和运行配置。</Paragraph>
+                  </div>
+                  {canConfigure && <Button type="primary" onClick={() => setCreateVersionOpen(true)}>新建草稿版本</Button>}
+                </div>
+                {versions.isLoading && <div className="management-loading"><Spin /> 正在加载版本…</div>}
+                {versions.isError && <Alert type="error" showIcon message={(versions.error as Error).message} />}
+                {versions.isSuccess && orderedVersions.length === 0 && <Empty description="还没有版本；创建 DRAFT 开始配置。" />}
+                <div className="employee-version-card-list">
+                  {orderedVersions.map((item) => (
+                    <Card className="management-card employee-version-card" key={item.version}>
+                      <div className="employee-version-card-header">
+                        <Space size={12} wrap>
+                          <Title level={4}>版本 v{item.version}</Title>
+                          <Tag color={item.status === 'PUBLISHED' ? 'green' : item.status === 'DRAFT' ? 'blue' : 'default'}>{item.status}</Tag>
+                        </Space>
+                        <Space wrap>
+                          <Button type="link" onClick={() => { setSelectedVersion(item.version); setActiveTab('skills') }}>查看 Skills</Button>
+                          <Button type="link" onClick={() => { setSelectedVersion(item.version); setActiveTab('tools') }}>查看 Tools</Button>
+                          {item.status === 'DRAFT'
+                            ? <Button type="primary" onClick={() => openEditor(item.version)}>继续配置</Button>
+                            : <Text type="secondary">固定版本</Text>}
+                        </Space>
+                      </div>
+                      <div className="employee-version-summary">
+                        <span>{item.skill_version_refs.length} Skills</span>
+                        <span>{item.tool_version_refs.length} Tools</span>
+                        <span>{item.execution_profile_id} · v{item.execution_profile_version}</span>
+                        <span>{item.model_route_id ? `ModelRoute ${item.model_route_id}` : '默认模型路由'}</span>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              </div>
+            ),
+          },
+        ]}
+      />
 
       <Modal
         title="编辑员工基本信息"
@@ -314,12 +530,12 @@ export function EmployeeDetailPage() {
         open={createVersionOpen}
         onCancel={() => setCreateVersionOpen(false)}
         onOk={submitVersion}
-        okText="创建版本"
+        okText="创建并配置"
         cancelText="取消"
         confirmLoading={createVersionMutation.isPending}
         destroyOnHidden
       >
-        <Paragraph type="secondary">版本创建后，在员工详情中打开草稿编辑器补充 Skill、Tool 与执行配置。</Paragraph>
+        <Paragraph type="secondary">创建后立即进入版本配置，可分别设置 Skills、Tools 和运行环境。</Paragraph>
         <Form form={versionForm} layout="vertical" onFinish={(values) => createVersionMutation.mutate(values.system_prompt)}>
           <Form.Item name="system_prompt" label="系统指令" rules={[{ required: true, message: '请输入系统指令' }]}>
             <Input.TextArea rows={5} maxLength={65535} placeholder="定义员工的职责、边界和回答要求" />
@@ -327,6 +543,24 @@ export function EmployeeDetailPage() {
           {createVersionMutation.isError && <Alert type="error" message={(createVersionMutation.error as Error).message} />}
         </Form>
       </Modal>
+
+      {resourcePickerKind && resourcePickerVersion !== null && selected && (
+        <EmployeeResourcePickerDrawer
+          open
+          kind={resourcePickerKind}
+          employeeName={data.name}
+          version={resourcePickerVersion}
+          fakeUser={fakeUser}
+          boundRefs={resourcePickerKind === 'skill' ? selected.skill_version_refs : selected.tool_version_refs}
+          saving={replaceBindingsMutation.isPending}
+          onCancel={() => {
+            setResourcePickerKind(undefined)
+            setResourcePickerVersion(null)
+          }}
+          onCreate={() => navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/skills/new`)}
+          onConfirm={(refs) => saveResourceBindings(resourcePickerKind, resourcePickerVersion, refs)}
+        />
+      )}
     </section>
   )
 }

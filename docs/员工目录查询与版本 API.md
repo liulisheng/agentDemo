@@ -45,6 +45,32 @@ sequenceDiagram
 
 以下路径均以 `/api/v1` 为前缀。身份通过 `X-Fake-User` 解析；请求租户范围始终来自身份上下文。
 
+后端路由按功能拆分，`backend/src/agent_platform/api/routes.py` 只负责装配 `/api/v1` 聚合 Router：
+
+| 路由模块 | 职责 |
+|---|---|
+| `api/route_modules/catalog.py` | 员工、Skill、Tool、ExecutionProfile、ModelRoute |
+| `api/route_modules/deployments.py` | Deployment、审计、Session、Run、Trace、Usage |
+| `api/route_modules/resource_center.py` | Hub 目录、发布、Grant、COPY/REFERENCE 导入 |
+| `api/route_modules/skill_files.py` | Skill 文件树、在线编辑、ZIP Preview/Commit |
+| `api/route_modules/conversations.py` | Conversation、消息、路由和投递 |
+| `api/route_modules/common.py` / `serializers.py` | 身份/租户依赖与共享响应序列化 |
+
+拆分只改变代码组织；路径、HTTP method、请求/响应和权限契约不变，应用入口仍使用 `from agent_platform.api.routes import router`。
+
+后端路由按功能组织，`backend/src/agent_platform/api/routes.py` 只负责创建 `/api/v1` 聚合 Router：
+
+| 模块 | 接口职责 |
+|---|---|
+| `api/route_modules/catalog.py` | 员工、Skill、Tool、ExecutionProfile、ModelRoute |
+| `api/route_modules/deployments.py` | Deployment、审计、Session、Run、Trace、Usage |
+| `api/route_modules/resource_center.py` | Hub 目录、发布、Grant、COPY/REFERENCE 导入 |
+| `api/route_modules/skill_files.py` | Skill 文件树、在线编辑、ZIP Preview/Commit |
+| `api/route_modules/conversations.py` | Conversation、消息、路由和投递 |
+| `api/route_modules/common.py` / `serializers.py` | 身份/租户依赖与跨模块响应序列化 |
+
+拆分只改变代码组织；`app.py` 仍从 `agent_platform.api.routes` 挂载聚合 Router，HTTP 路径、method 和响应契约保持稳定。
+
 | 方法与路径 | 查询/请求 | 返回 |
 |---|---|---|
 | `GET /digital-employees` | `keyword`、`status`、`limit`（1–200，默认 50）、`cursor` | `{items, next_cursor}`，条目保留旧字段并含最新发布版本资源计数 |
@@ -63,8 +89,36 @@ sequenceDiagram
 | `PATCH /tools/{tool_id}` | DRAFT 的 `name`、`description`、`input_schema` 部分字段 | 管理员更新 DRAFT Tool；PUBLISHED 返回 `409 IMMUTABLE_VERSION` |
 | `POST /tools/{tool_id}/publish` | 无 | 管理员发布 Tool；需要凭据的 Tool 必须先配置 SecretRef |
 | `GET /skills` | 无 | 当前租户 Skill 清单和精确版本 |
+| `GET /skills?include_versions=true` | 无 | 返回所有精确 Skill 版本，供绑定选择器保留历史 PUBLISHED 版本 |
 | `POST /skills` | `name`、`skill_type`、`instruction`、`allowed_tool_ids` | 管理员创建 DRAFT Skill |
 | `POST /skills/{skill_id}/publish` | 无 | 管理员发布 Skill；其声明的 Tool 必须已发布 |
+| `POST /skills/{skill_id}/versions/{version}/fork` | 无 | 从本地 PUBLISHED Skill 创建下一 DRAFT，复制 Tool 声明和文件清单引用；Hub REFERENCE 返回 409 |
+| `POST /skills/{skill_id}/versions/{version}/publish` | 无 | 校验并发布精确 Skill DRAFT 版本 |
+| `POST /digital-employees/{employee_id}/versions/{source_version}/fork` | 无 | 从 PUBLISHED 员工版本克隆完整配置和绑定到下一 DRAFT |
+| `PUT /digital-employees/{employee_id}/versions/{version}/skill-bindings` | `{ "skill_version_refs": [{"resource_id":"skill-1","version":2}] }` | 仅替换 DRAFT Skill 绑定与 Skill capability slot |
+| `PUT /digital-employees/{employee_id}/versions/{version}/tool-bindings` | `{ "tool_version_refs": [{"resource_id":"tool-1","version":1}] }` | 仅替换 DRAFT Tool 绑定与 Tool capability slot |
+
+### 类型定向编辑流程
+
+```mermaid
+sequenceDiagram
+    participant UI as 员工 Skills/Tools Tab
+    participant API as Catalog API
+    participant App as CatalogService
+    participant DB as MySQL Catalog
+    UI->>API: PUBLISHED 源版本时 POST fork
+    API->>App: 校验管理员、租户和源版本状态
+    App->>DB: 锁员工行，克隆完整配置和绑定
+    DB-->>UI: 新 DRAFT 精确快照
+    UI->>API: PUT skill-bindings 或 tool-bindings
+    API->>App: 校验 DRAFT 和精确已发布资源
+    App->>DB: 单事务替换对应绑定表及同类型 capability slot
+    DB-->>UI: 当前完整版本；前端仍显示原类型 Tab
+```
+
+员工 fork 复制 `system_prompt`、精确 Skill/Tool refs、ExecutionProfile/ModelRoute、Workspace/Sandbox 和审批策略。Skill/Tool 绑定 API 的请求体没有这些字段，只能替换对应类型的绑定行；PUBLISHED 目标版本 409、成员写入 403、跨租户资源 404。Skill 文件工作区的 fork/publish API 按精确版本操作；新版本复用同租户不可变 MediaAsset ID 与 manifest 摘要，REFERENCE 必须先 COPY。此变更复用 V003 的 `digital_employee_versions`、`employee_skill_bindings`、`employee_tool_bindings`、`capability_bindings` 和 V005 的 Skill 文件表，不新增 migration。
+
+`GET /skills/{skill_id}/versions/{version}/files` 响应包含 `source_mode` 和 `fork_allowed`：本地 PUBLISHED 版本可 fork，Hub REFERENCE 显示只读及“先 COPY”说明；成员即使读取到 DRAFT 文件清单，界面也只显示只读视图。
 
 DRAFT 版本 PUT 请求示例：
 
@@ -166,6 +220,9 @@ sequenceDiagram
 | Skill 文件清单/内容读取 | 允许 | 允许 | 精确 Skill 版本与租户作用域查询 |
 | Skill 文件在线编辑、ZIP 预览/提交 | 拒绝 | 允许 | DRAFT、预期 SHA/staging ID、入口和文件大小限制 |
 | Tool/Skill 创建、DRAFT Tool 编辑和发布 | 拒绝 | 允许 | Tool/Skill 资源与员工版本均按当前租户隔离 |
+| Skill/Tool 定向绑定 | 拒绝 | 仅 DRAFT 可写 | 两个 API 各自只更新本类型绑定表和 Capability slot |
+| PUBLISHED 员工版本 fork | 拒绝 | 允许 | 复制完整执行快照到新 DRAFT；原版本不可变 |
+| PUBLISHED Skill fork / DRAFT Skill publish | 拒绝 | 允许 | 精确版本操作；Hub REFERENCE 不允许直接 fork |
 | 版本 Fake Runtime 测试 | 拒绝 | 允许 | 仅执行已保存 DRAFT，不写 Deployment/Session/Run/Trace |
 
 接口错误结构为 `{ "code": "...", "message": "...", "request_id": "...", "details": {} }`。常见状态码：`404 RESOURCE_NOT_FOUND`（跨租户或隐藏资源）、`403 AUTHORIZATION_DENIED`（成员写入/租户身份不匹配）、`409 IMMUTABLE_VERSION`（写已发布版本）、`409 DEPENDENCY_VALIDATION_ERROR`（发布预检失败并含 `details.missing[]`）、`409 IDEMPOTENCY_CONFLICT`（文件 SHA 或 ZIP staging 修订冲突）、`422 INVALID_ARGUMENT`（筛选、游标、路径或请求体不合法）。Hub 权限与 COPY/REFERENCE 的细分矩阵见[资源中心模型与授权](资源中心模型与授权.md)。
@@ -174,13 +231,23 @@ sequenceDiagram
 
 ```bash
 cd backend
-python -m pytest tests/test_employee_management_api.py -q
-AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE=1 \
-MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 MYSQL_USER=<一次性账号> MYSQL_PASSWORD=<一次性密码> \
-python -m pytest tests/integration/test_mysql_catalog_api.py::test_mysql_employee_search_cursor_and_version_detail_are_tenant_scoped tests/integration/test_mysql_catalog_api.py::test_mysql_employee_patch_draft_put_archive_and_admin_write_scope -q
+set -a
+. ../deploy/control-plane/.env
+set +a
+export MYSQL_HOST=127.0.0.1 MYSQL_PORT=3309 MYSQL_USER=root MYSQL_PASSWORD="$MYSQL_ROOT_PASSWORD"
+export AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE=1
+python -m pytest -q
 python -m ruff check src tests
+python -m compileall -q src tests
+
+cd ../frontend
+npm test
+npm run build
+
+cd ..
+openspec validate digital-employee-resource-center --strict
 ```
 
-已验证：重复名称时稳定按 ID 断页、keyword/status 过滤、跨页无重复、版本号倒序分页、版本精确详情和跨租户 404；成员写操作拒绝、管理员 PATCH/DRAFT PUT/归档和 PUBLISHED 版本不可变；MySQL 8.4.10 Catalog API 集成测试通过。Tool API 覆盖管理员 DRAFT 新建/编辑/发布和成员拒绝；Skill API 覆盖管理员创建、依赖有效 Tool 发布和成员拒绝。发布预检覆盖 Grant 撤销、Hub Manifest/Skill 文件摘要不匹配及 Tool 接收方 SecretRef 缺失；DRAFT 版本及绑定通过 Catalog 事务保存。
+本轮已验证：后端全量 221 passed、0 skipped（MySQL 8.4.10）；额外覆盖员工 fork 并发版本分配、类型绑定的 MySQL 事务、Skill FILE_PACKAGE fork 的不可变对象引用。Ruff、compileall、OpenSpec strict 通过。前端 11 个测试文件、35 个用例通过，TypeScript/Vite 构建通过。Docker 栈健康；浏览器中确认 Skills 抽屉完成绑定后留在当前 Tab，并能从已发布 Skill 文件页创建新版本；资源中心抽屉显示授权依赖、COPY 后只绑定本地代理；Docker API 将样例 Skill v2 发布为 PUBLISHED。
 
-未验证：MySQL + LocalObjectStore 下从租户 A 发布、租户 B COPY/REFERENCE，到员工发布部署、创建 Run 并读取 Trace 的完整闭环（任务 6.1）；生产身份中心与云对象存储在当前 Change 范围外。
+未验证：生产身份中心、云对象存储和真实 Runtime；它们不在本 Change 范围内。

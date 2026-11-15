@@ -388,6 +388,56 @@ def test_mysql_zip_commit_uses_local_object_store_and_gc_protects_referenced_fil
         connection.close()
 
 
+def test_mysql_skill_fork_reuses_immutable_file_assets_and_manifest(
+    migrated_v005_database, tmp_path: Path
+) -> None:
+    from agent_platform.adapters.identity.fake import FakeIdentityProvider
+    from agent_platform.application.catalog_service import CatalogService
+    from agent_platform.application.skill_files import SkillFilePackageService
+    from agent_platform.domain.catalog import SkillType
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+    from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
+    from agent_platform.ports.storage import LocalObjectStore
+
+    database, config, _ = migrated_v005_database
+    connection_factory = lambda: mysql.connect(**config, database=database)
+    identity = FakeIdentityProvider().resolve_identity("admin-local")
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO platforms (platform_id, code, name, status) VALUES (%s,%s,%s,%s)",
+            (identity.platform_id, "local", "本地平台", "ACTIVE"),
+        )
+        cursor.execute(
+            "INSERT INTO tenants (platform_id, tenant_id, code, name, status) VALUES (%s,%s,%s,%s,%s)",
+            (identity.platform_id, identity.tenant_id, identity.tenant_id, "Skill fork 测试租户", "ACTIVE"),
+        )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
+
+    catalog = CatalogService(MySqlCatalogRepository(connection_factory))
+    skill = catalog.create_skill(identity, "可分叉文件包", SkillType.INSTRUCTION, "初始正文", ())
+    metadata = MySqlMediaAssetRepository(connection_factory)
+    storage = LocalObjectStore(tmp_path / "objects", metadata_repository=metadata)
+    files = SkillFilePackageService(catalog, storage)
+    files.create_file(identity, skill.skill_id, 1, "SKILL.md", b"# Entry\nKeep source immutable.")
+    files.create_file(identity, skill.skill_id, 1, "references/guide.md", b"Guide")
+    published = catalog.publish_skill_version(identity, skill.skill_id, 1)
+
+    forked = catalog.fork_skill_version(identity, skill.skill_id, published.version)
+    loaded = catalog.repository.get_skill_version(identity, skill.skill_id, forked.version)
+
+    assert forked.version == 2
+    assert loaded.status.value == "DRAFT"
+    assert loaded.file_manifest_sha256 == published.file_manifest_sha256
+    assert loaded.file_entries == published.file_entries
+    assert files.read_file(identity, skill.skill_id, 2, "SKILL.md") == b"# Entry\nKeep source immutable."
+    assert catalog.repository.get_skill_version(identity, skill.skill_id, 1) == published
+
+
 def test_mysql_zip_commit_rolls_back_manifest_when_file_asset_fk_fails(
     migrated_v005_database, tmp_path: Path
 ) -> None:

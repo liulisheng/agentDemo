@@ -21,15 +21,17 @@ import {
 } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import {
   commitSkillZip,
   createSkillFile,
   deleteSkillFile,
+  forkSkillVersion,
   getSkillFileContent,
   getSkillFileTree,
   previewSkillZip,
+  publishSkillVersion,
   renameSkillFile,
   updateSkillFile,
 } from '../../api/client'
@@ -83,8 +85,10 @@ function buildTree(files: SkillFileSummary[]): FileTreeNode[] {
 export function SkillFileWorkspacePage() {
   const { employeeId = '', skillId = '', version: versionParam = '1' } = useParams()
   const version = Number(versionParam)
-  const { fakeUser } = useTenantContext()
+  const { fakeUser, currentIdentity } = useTenantContext()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const canEdit = currentIdentity.roleName === '管理员'
   const [selectedPath, setSelectedPath] = useState<string>()
   const [content, setContent] = useState<FileContent>()
   const [draftText, setDraftText] = useState('')
@@ -111,7 +115,7 @@ export function SkillFileWorkspacePage() {
   const tree = treeQuery.data
   const files = tree?.files ?? []
   const nodes = useMemo(() => buildTree(files), [files])
-  const readOnly = Boolean(tree?.read_only)
+  const readOnly = Boolean(tree?.read_only) || !canEdit
   const archiveInputId = 'skill-package-zip-input'
 
   useEffect(() => {
@@ -209,6 +213,24 @@ export function SkillFileWorkspacePage() {
     },
   })
 
+  const forkMutation = useMutation({
+    mutationFn: () => forkSkillVersion(skillId, version, fakeUser),
+    onSuccess: async (created) => {
+      await queryClient.invalidateQueries({ queryKey: ['skill-files', fakeUser, skillId] })
+      message.success(`已创建 Skill 草稿 v${created.version}`)
+      navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/skills/${encodeURIComponent(skillId)}/versions/${created.version}/files`)
+    },
+  })
+
+  const publishMutation = useMutation({
+    mutationFn: () => publishSkillVersion(skillId, version, fakeUser),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['skill-files', fakeUser, skillId, version] })
+      await queryClient.invalidateQueries({ queryKey: ['skills', fakeUser] })
+      message.success(`Skill v${version} 已发布`)
+    },
+  })
+
   const onSelectFile = (path: string) => {
     if (dirty && !window.confirm('当前文件有未保存修改，切换文件会放弃这些修改。继续吗？')) return
     setDirty(false)
@@ -299,6 +321,15 @@ export function SkillFileWorkspacePage() {
         </div>
         {!readOnly && (
           <Space wrap>
+            <Popconfirm
+              title={`发布 Skill v${version}？`}
+              description="发布后该版本及其文件清单不可修改。"
+              okText="确认发布"
+              cancelText="取消"
+              onConfirm={() => publishMutation.mutate()}
+            >
+              <Button type="primary" loading={publishMutation.isPending}>发布 Skill</Button>
+            </Popconfirm>
             <Button onClick={() => setCreateOpen(true)}>新建文件</Button>
             <label className="zip-upload-button" htmlFor={archiveInputId}>上传 ZIP</label>
             <input
@@ -322,8 +353,23 @@ export function SkillFileWorkspacePage() {
             />
           </Space>
         )}
+        {canEdit && tree.status === 'PUBLISHED' && tree.fork_allowed && (
+          <Button loading={forkMutation.isPending} onClick={() => forkMutation.mutate()}>
+            基于此版本创建 Skill 草稿
+          </Button>
+        )}
       </div>
-      {readOnly && <Alert className="file-readonly-alert" type="info" showIcon message="该 Skill 版本或 Hub REFERENCE 只读" />}
+      {readOnly && <Alert className="file-readonly-alert" type="info" showIcon message={
+        !canEdit
+          ? '当前身份只能查看 Skill 文件'
+          : tree.status === 'PUBLISHED' && tree.fork_allowed
+            ? '已发布 Skill 版本只读；需要修改时请创建新草稿版本。'
+            : tree.source_mode === 'REFERENCE'
+              ? 'Hub REFERENCE Skill 只读；修改前请先 COPY 到本租户。'
+              : '此 Skill 版本只读。'
+      } />}
+      {forkMutation.isError && <Alert type="error" showIcon message="创建 Skill 草稿失败" description={(forkMutation.error as Error).message} />}
+      {publishMutation.isError && <Alert type="error" showIcon message="发布 Skill 失败" description={(publishMutation.error as Error).message} />}
       {previewMutation.isError && <Alert type="error" message={(previewMutation.error as Error | null)?.message ?? 'ZIP 预览失败'} />}
       {previewMutation.isPending && <Alert type="info" message="正在校验 ZIP 并生成文件树预览…" />}
 

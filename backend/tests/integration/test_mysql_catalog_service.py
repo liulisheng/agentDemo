@@ -151,3 +151,76 @@ def test_catalog_service_publishes_deploys_rolls_back_and_scopes_tenant(mysql_ca
         "DEPLOYMENT_ROLLED_BACK",
     }
     assert all(event.tenant_id == identity.tenant_id for event in audit_page.items)
+
+
+def test_mysql_employee_fork_and_type_specific_bindings_preserve_other_configuration(
+    mysql_catalog_service_database,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_platform.adapters.identity.fake import FakeIdentityProvider
+    from agent_platform.application.catalog_service import CatalogService
+    from agent_platform.domain.catalog import SkillType
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+
+    database, config = mysql_catalog_service_database
+    identity = FakeIdentityProvider().resolve_identity("admin-local")
+    service = CatalogService(MySqlCatalogRepository(lambda: mysql.connect(**config, database=database)))
+    first_skill = service.create_skill(identity, "Skill 一", SkillType.INSTRUCTION, "一号指令", ())
+    second_skill = service.create_skill(identity, "Skill 二", SkillType.INSTRUCTION, "二号指令", ())
+    first_tool = service.create_tool(identity, "Tool 一", "一号工具", {"type": "object"})
+    second_tool = service.create_tool(identity, "Tool 二", "二号工具", {"type": "object"})
+    for skill in (first_skill, second_skill):
+        service.publish_skill(identity, skill.skill_id)
+    for tool in (first_tool, second_tool):
+        service.publish_tool(identity, tool.tool_id)
+    employee = service.create_employee(identity, "定向绑定员工", "助理", "MySQL 部分更新")
+    published = service.create_employee_version(
+        identity,
+        employee.employee_id,
+        "保持系统指令",
+        [first_skill.skill_id],
+        [first_tool.tool_id],
+        approval_policy="required",
+    )
+    published = service.publish_employee_version(identity, employee.employee_id, published.version)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        forks = tuple(
+            executor.map(
+                lambda _: service.fork_employee_version(identity, employee.employee_id, published.version),
+                range(2),
+            )
+        )
+    assert sorted(item.version for item in forks) == [2, 3]
+    draft = next(item for item in forks if item.version == 2)
+    assert draft.version == 2
+    assert draft.skill_version_refs == ((first_skill.skill_id, 1),)
+    assert draft.tool_version_refs == ((first_tool.tool_id, 1),)
+    assert draft.system_prompt == "保持系统指令"
+    assert draft.approval_policy == "required"
+    assert {(item.slot, item.module_id, item.module_version) for item in service.repository.list_capability_bindings(
+        identity, employee.employee_id, draft.version
+    )} == {
+        ("skill", first_skill.skill_id, 1),
+        ("tool", first_tool.tool_id, 1),
+    }
+
+    changed_skills = service.replace_employee_skill_bindings(
+        identity, employee.employee_id, draft.version, ((second_skill.skill_id, 1),)
+    )
+    assert changed_skills.skill_version_refs == ((second_skill.skill_id, 1),)
+    assert changed_skills.tool_version_refs == ((first_tool.tool_id, 1),)
+    assert changed_skills.system_prompt == "保持系统指令"
+    assert changed_skills.approval_policy == "required"
+    assert {(item.slot, item.module_id) for item in service.repository.list_capability_bindings(
+        identity, employee.employee_id, draft.version
+    )} == {("skill", second_skill.skill_id), ("tool", first_tool.tool_id)}
+
+    changed_tools = service.replace_employee_tool_bindings(
+        identity, employee.employee_id, draft.version, ((second_tool.tool_id, 1),)
+    )
+    assert changed_tools.skill_version_refs == ((second_skill.skill_id, 1),)
+    assert changed_tools.tool_version_refs == ((second_tool.tool_id, 1),)
+    assert changed_tools.system_prompt == "保持系统指令"
+    assert service.repository.get_employee_version(identity, employee.employee_id, 1) == published

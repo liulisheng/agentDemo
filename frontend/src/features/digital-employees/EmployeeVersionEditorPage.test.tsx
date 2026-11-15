@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, expect, test, vi } from 'vitest'
@@ -38,7 +38,7 @@ beforeEach(() => {
     version_count: 1, latest_published_version: null,
   }
   responses['GET /api/v1/digital-employees/employee-1/versions/3'] = version
-  responses['GET /api/v1/skills'] = {
+  responses['GET /api/v1/skills?include_versions=true'] = {
     items: [{
       id: 'skill-1', tenant_id: 'tenant-a', name: '工单处理', skill_type: 'instruction',
       instruction: '按流程处理', allowed_tool_ids: ['tool-1'],
@@ -96,26 +96,6 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const key = `${init?.method ?? 'GET'} ${url}`
-    if (key === 'POST /api/v1/skills') {
-      const createdSkill = {
-        id: 'skill-created', tenant_id: 'tenant-a', name: '新建 Skill', skill_type: 'instruction',
-        instruction: '按验收流程处理', allowed_tool_ids: [], allowed_tool_versions: [], version: 1, status: 'DRAFT',
-      }
-      const currentSkills = responses['GET /api/v1/skills'] as { items: Record<string, unknown>[] }
-      responses['GET /api/v1/skills'] = { items: [...currentSkills.items, createdSkill] }
-      return { ok: true, json: async () => createdSkill }
-    }
-    if (key === 'POST /api/v1/skills/skill-created/publish') {
-      const currentSkills = responses['GET /api/v1/skills'] as { items: Record<string, unknown>[] }
-      const publishedSkills = currentSkills.items.map((skill) => (
-        skill.id === 'skill-created' ? { ...skill, status: 'PUBLISHED' } : skill
-      ))
-      responses['GET /api/v1/skills'] = { items: publishedSkills }
-      return {
-        ok: true,
-        json: async () => publishedSkills.find((skill) => skill.id === 'skill-created'),
-      }
-    }
     if (responses[key] !== undefined) {
       return { ok: true, json: async () => responses[key] }
     }
@@ -128,7 +108,7 @@ test('version editor shows exact refs, saves draft bindings and previews the fak
   renderEditor()
 
   expect(await screen.findByRole('heading', { name: '员工版本配置' })).toBeInTheDocument()
-  expect(screen.getByText('有效 · 读取工单')).toBeInTheDocument()
+  expect(screen.getByText('可用 · 读取工单')).toBeInTheDocument()
   const systemPrompt = screen.getByLabelText('系统指令')
   await user.clear(systemPrompt)
   await user.type(systemPrompt, '更新后的指令')
@@ -166,23 +146,25 @@ test('version editor warns before an in-app navigation with unsaved changes', as
   expect(screen.queryByText('员工详情目标页')).not.toBeInTheDocument()
 })
 
-test('version editor creates and publishes a Skill then binds it to the employee draft', async () => {
-  const user = userEvent.setup()
+test('version editor keeps Skill and Tool selectors in separate resource sections', async () => {
   renderEditor()
 
   expect(await screen.findByRole('heading', { name: '员工版本配置' })).toBeInTheDocument()
-  await user.click(screen.getByRole('button', { name: '新建 Skill' }))
-  await user.type(screen.getByLabelText('Skill 名称'), '新建 Skill')
-  await user.type(screen.getByLabelText('入口指令'), '按验收流程处理')
-  await user.click(screen.getByRole('button', { name: '创建并加入草稿' }))
+  const skillSection = screen.getByRole('region', { name: 'Skill 绑定' })
+  const toolSection = screen.getByRole('region', { name: 'Tool 绑定' })
+  expect(within(skillSection).getByLabelText('选择 Skill 版本')).toBeInTheDocument()
+  expect(within(toolSection).getByLabelText('选择 Tool 版本')).toBeInTheDocument()
+  expect(within(skillSection).queryByLabelText('选择 Tool 版本')).not.toBeInTheDocument()
+  expect(within(toolSection).queryByLabelText('选择 Skill 版本')).not.toBeInTheDocument()
+})
 
-  await waitFor(() => {
-    expect(vi.mocked(fetch).mock.calls.some(([input, init]) => (
-      String(input) === '/api/v1/skills' && init?.method === 'POST'
-    ))).toBe(true)
-    expect(vi.mocked(fetch).mock.calls.some(([input, init]) => (
-      String(input) === '/api/v1/skills/skill-created/publish' && init?.method === 'POST'
-    ))).toBe(true)
-  })
-  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-}, 15000)
+test('version editor sends Skill creation to its dedicated workspace', async () => {
+  renderEditor()
+
+  expect(await screen.findByRole('heading', { name: '员工版本配置' })).toBeInTheDocument()
+  const createLink = screen.getByRole('link', { name: '新建 Skill 草稿' })
+  expect(createLink).toHaveAttribute('href', '/enterprise/employees/employee-1/skills/new')
+  expect(vi.mocked(fetch).mock.calls.some(([input, init]) => (
+    String(input) === '/api/v1/skills' && init?.method === 'POST'
+  ))).toBe(false)
+})

@@ -80,6 +80,14 @@ class EmployeeVersionUpdateRequest(TenantAwareRequest):
     approval_policy: str = Field(default="none", max_length=64)
 
 
+class EmployeeSkillBindingsUpdateRequest(TenantAwareRequest):
+    skill_version_refs: list[ResourceVersionRefRequest] = Field(default_factory=list)
+
+
+class EmployeeToolBindingsUpdateRequest(TenantAwareRequest):
+    tool_version_refs: list[ResourceVersionRefRequest] = Field(default_factory=list)
+
+
 class EmployeeVersionTestRequest(TenantAwareRequest):
     prompt: str = Field(min_length=1, max_length=8192)
 

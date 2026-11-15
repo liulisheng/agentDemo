@@ -8,21 +8,26 @@ import { SkillFileWorkspacePage } from './SkillFileWorkspacePage'
 import { TenantProvider } from '../management/TenantContext'
 
 let readOnly = false
+let forkAllowed = false
 let requestCalls: { url: string; init?: RequestInit }[] = []
 
 beforeEach(() => {
   window.localStorage.clear()
   readOnly = false
+  forkAllowed = false
   requestCalls = []
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     requestCalls.push({ url, init })
-    if (url === '/api/v1/skills/skill-1/versions/2/files') {
+    if (url === '/api/v1/skills/skill-1/versions/2/files' || url === '/api/v1/skills/skill-1/versions/3/files') {
+      const version = url.includes('/3/') ? 3 : 2
       return {
         ok: true,
         json: async () => ({
-          skill_id: 'skill-1', version: 2, content_format: 'FILE_PACKAGE', entry_path: 'SKILL.md',
+          skill_id: 'skill-1', version, content_format: 'FILE_PACKAGE', entry_path: 'SKILL.md',
           file_manifest_sha256: 'a'.repeat(64), status: readOnly ? 'PUBLISHED' : 'DRAFT', read_only: readOnly,
+          fork_allowed: forkAllowed,
+          source_mode: forkAllowed ? 'LOCAL' : readOnly ? 'REFERENCE' : 'LOCAL',
           files: [
             { path: 'SKILL.md', mime_type: 'text/markdown', size_bytes: 11, sha256: 'b'.repeat(64) },
             { path: 'references/guide.md', mime_type: 'text/markdown', size_bytes: 9, sha256: 'c'.repeat(64) },
@@ -61,6 +66,14 @@ beforeEach(() => {
     }
     if (url.endsWith('/files/zip/commit/stage-1')) {
       return { ok: true, json: async () => ({ skill_id: 'skill-1', version: 2, file_count: 1 }) }
+    }
+    if (url === '/api/v1/skills/skill-1/versions/2/fork' && init?.method === 'POST') {
+      return { ok: true, json: async () => ({ id: 'skill-1', version: 3, status: 'DRAFT' }) }
+    }
+    if (url === '/api/v1/skills/skill-1/versions/2/publish' && init?.method === 'POST') {
+      readOnly = true
+      forkAllowed = true
+      return { ok: true, json: async () => ({ id: 'skill-1', version: 2, status: 'PUBLISHED' }) }
     }
     return { ok: true, json: async () => ({}) }
   }))
@@ -150,8 +163,35 @@ test('file workspace creates, renames and deletes an auxiliary file', async () =
 test('Hub reference file workspace exposes read-only source without edit actions', async () => {
   readOnly = true
   renderWorkspace()
-  expect(await screen.findByText('该 Skill 版本或 Hub REFERENCE 只读')).toBeInTheDocument()
+  expect(await screen.findByText('Hub REFERENCE Skill 只读；修改前请先 COPY 到本租户。')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '新建文件' })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '上传 ZIP' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '基于此版本创建 Skill 草稿' })).not.toBeInTheDocument()
   expect(await screen.findByLabelText('文件正文')).toHaveAttribute('readonly')
+}, 15000)
+
+test('published local Skill creates a new draft version from its file workspace', async () => {
+  readOnly = true
+  forkAllowed = true
+  const user = userEvent.setup()
+  renderWorkspace()
+
+  await user.click(await screen.findByRole('button', { name: '基于此版本创建 Skill 草稿' }))
+  await waitFor(() => expect(requestCalls.some(({ url, init }) => (
+    url === '/api/v1/skills/skill-1/versions/2/fork' && init?.method === 'POST'
+  ))).toBe(true))
+  expect(await screen.findByText('员工 Skill / v3')).toBeInTheDocument()
+}, 15000)
+
+test('DRAFT Skill file workspace publishes the exact Skill version', async () => {
+  const user = userEvent.setup()
+  renderWorkspace()
+
+  await user.click(await screen.findByRole('button', { name: '发布 Skill' }))
+  await user.click(await screen.findByRole('button', { name: '确认发布' }))
+
+  await waitFor(() => expect(requestCalls.some(({ url, init }) => (
+    url === '/api/v1/skills/skill-1/versions/2/publish' && init?.method === 'POST'
+  ))).toBe(true))
+  expect(await screen.findByText('已发布 Skill 版本只读；需要修改时请创建新草稿版本。')).toBeInTheDocument()
 }, 15000)
