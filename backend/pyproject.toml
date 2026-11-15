@@ -11,6 +11,7 @@ dependencies = [
   "fastapi>=0.115,<1",
   "pydantic>=2.9,<3",
   "uvicorn[standard]>=0.30,<1",
+  "cryptography>=43,<51",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +21,12 @@ dev = [
   "pytest-cov>=5,<6",
   "ruff>=0.8,<1",
 ]
+mysql = ["mysql-connector-python==9.7.0"]
+
+[project.scripts]
+agent-platform-migration = "agent_platform.infrastructure.migrations:main"
+agent-platform-seed-fake-identity = "agent_platform.infrastructure.seed_fake_identity:main"
+agent-platform-object-gc = "agent_platform.infrastructure.object_gc:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

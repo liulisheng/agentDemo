@@ -60,3 +60,11 @@ Commit body 必须说明：
 - 验证命令
 
 OpenSpec CLI 固定的 `proposal.md`、`design.md`、`tasks.md` 和 `spec.md` 文件名保持不变。
+
+## SQL Schema 约定
+
+- 所有可执行 MySQL schema 和 migration SQL 统一放在 `docs/migrations/`，不得另建重复的 SQL 来源目录。
+- 新建或变更的表必须有中文表级 `COMMENT`；新建或变更的每个字段必须有准确的中文字段 `COMMENT`，说明该字段存储什么以及必要的边界。
+- 已应用的历史 migration 不得为补注释而改写；需要通过新的向前 migration 更新 schema 元数据，并保持原 migration 校验和。
+- MySQL 集成测试必须通过 `information_schema.TABLES` 和 `information_schema.COLUMNS` 验证本次新增或变更对象的中文注释。
+- 表名、字段名、索引名和 SQL 标识符使用稳定的工程命名；中文说明写入 COMMENT，不用中文标识符替代。

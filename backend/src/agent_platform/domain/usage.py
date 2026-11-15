@@ -33,6 +33,7 @@ class ModelCallRecord:
     duration_ms: int = 0
     project_id: str | None = None
     channel: str | None = None
+    model_route_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

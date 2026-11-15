@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-from uuid import uuid4
 
 from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.context import BusinessContextAssembler
 from agent_platform.application.resolvers import AgentResolver
-from agent_platform.domain.common import DomainError
+from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.context import BusinessContextPolicy
 from agent_platform.domain.execution import RuntimeReference, RuntimeStatus, UsageRecord
 from agent_platform.domain.identity import IdentityContext
@@ -19,16 +18,25 @@ from agent_platform.domain.observability import (
     SpanType,
     TraceSpan,
 )
+from agent_platform.ports.execution_repository import ExecutionRepository
 from agent_platform.ports.runtime import RuntimeAdapter, RuntimeEvent, RuntimeRequest
+from agent_platform.ports.storage import ObjectStore, UploadRequest
 
 
 class ControlPlaneService:
     """同步执行本地 Fake Runtime，并保存可查询的租户级 Trace。"""
 
-    def __init__(self, catalog: CatalogService, runtime: RuntimeAdapter, persistence: object | None = None) -> None:
+    def __init__(
+        self,
+        catalog: CatalogService,
+        runtime: RuntimeAdapter,
+        persistence: ExecutionRepository | None = None,
+        object_store: ObjectStore | None = None,
+    ) -> None:
         self.catalog = catalog
         self.runtime = runtime
         self.persistence = persistence
+        self.object_store = object_store
         self.agent_resolver = AgentResolver(catalog)
         self.context_assembler = BusinessContextAssembler(BusinessContextPolicy())
         self._sessions: dict[tuple[str, str, str], SessionRecord] = {}
@@ -43,7 +51,8 @@ class ControlPlaneService:
 
     @staticmethod
     def _new_id(prefix: str) -> str:
-        return f"{prefix}-{uuid4().hex}"
+        del prefix  # 存储主键不编码资源类型，保持与 V001/V002 CHAR(26) 兼容。
+        return generate_database_id()
 
     def _get_session(self, identity: IdentityContext, session_id: str) -> SessionRecord:
         try:
@@ -83,6 +92,11 @@ class ControlPlaneService:
 
     def create_session(self, identity: IdentityContext, deployment_id: str) -> SessionRecord:
         deployment = self.catalog.resolve_deployment(identity, deployment_id)
+        profile = self.catalog.repository.get_profile_version(
+            identity,
+            deployment.employee_version.execution_profile_id,
+            deployment.employee_version.execution_profile_version,
+        )
         session_id = self._new_id("session")
         trace_id = self._new_id("trace")
         session = SessionRecord(
@@ -92,6 +106,10 @@ class ControlPlaneService:
             deployment_id=deployment.deployment_id,
             trace_id=trace_id,
             employee_version=deployment.employee_version.version,
+            employee_id=deployment.employee_version.employee_id,
+            execution_profile_id=deployment.employee_version.execution_profile_id,
+            execution_profile_version=deployment.employee_version.execution_profile_version,
+            model_route_id=deployment.employee_version.model_route_id or profile.model_route_id,
         )
         session_span = self._append_span(
             trace_id,
@@ -107,7 +125,9 @@ class ControlPlaneService:
         )
         session.span_id = session_span.span_id
         self._sessions[self._scope(identity, session_id)] = session
-        if self.persistence is not None and hasattr(self.persistence, "register_session"):
+        if self.persistence is not None and hasattr(self.persistence, "save_session"):
+            self.persistence.save_session(identity, session, engine_name=profile.engine_name)
+        elif self.persistence is not None and hasattr(self.persistence, "register_session"):
             self.persistence.register_session(identity, session_id, deployment_id, trace_id)
         return session
 
@@ -170,7 +190,7 @@ class ControlPlaneService:
     ) -> RunRecord:
         if not prompt.strip():
             raise DomainError("INVALID_ARGUMENT", "prompt 不能为空")
-        session = self._get_session(identity, session_id)
+        session = self.get_session(identity, session_id)
         if session.status != "ACTIVE":
             raise DomainError("INVALID_STATE", "Session 不是 ACTIVE 状态")
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -195,25 +215,7 @@ class ControlPlaneService:
             snapshot=snapshot,
             status=RuntimeStatus.UNKNOWN,
         )
-        run_span = self._append_span(
-            session.trace_id,
-            run_id=run.run_id,
-            span_type=SpanType.RUN,
-            status="running",
-            parent_span_id=session.span_id,
-            attributes={"employee_version": snapshot.employee_version},
-        )
-        run.span_id = run_span.span_id
         skill_instructions, allowed_tools = self._selected_tools(identity, employee_version)
-        for skill_id in snapshot.skill_version_ids:
-            self._append_span(
-                session.trace_id,
-                run_id=run.run_id,
-                span_type=SpanType.SKILL,
-                status="selected",
-                parent_span_id=run.span_id,
-                attributes={"skill_id": skill_id},
-            )
         context_snapshot = self.context_assembler.assemble(
             run_id=run.run_id,
             trace_id=session.trace_id,
@@ -224,6 +226,44 @@ class ControlPlaneService:
             tool_result_refs=(),
         )
         run.context_snapshot = context_snapshot
+        persistent_key = idempotency_key or run.run_id
+        fencing_token: int | None = None
+        persistent_submission = self.persistence is not None and hasattr(self.persistence, "submit_run")
+        if persistent_submission:
+            existing_run, created = self.persistence.submit_run(identity, run, persistent_key)
+            if not created:
+                self._load_result(identity, existing_run)
+                self._runs[self._scope(identity, existing_run.run_id)] = existing_run
+                if idempotency_key:
+                    self._idempotency[(*self._scope(identity, session_id), idempotency_key)] = (
+                        prompt_digest,
+                        existing_run.run_id,
+                    )
+                return existing_run
+            fencing_token = self.persistence.acquire_lease(
+                identity, run.run_id, generate_database_id(), lease_seconds=30
+            )
+            if fencing_token is None:
+                return self.persistence.get_run(identity, run.run_id)
+
+        run_span = self._append_span(
+            session.trace_id,
+            run_id=run.run_id,
+            span_type=SpanType.RUN,
+            status="running",
+            parent_span_id=session.span_id,
+            attributes={"employee_version": snapshot.employee_version},
+        )
+        run.span_id = run_span.span_id
+        for skill_id in snapshot.skill_version_ids:
+            self._append_span(
+                session.trace_id,
+                run_id=run.run_id,
+                span_type=SpanType.SKILL,
+                status="selected",
+                parent_span_id=run.span_id,
+                attributes={"skill_id": skill_id},
+            )
         self._append_span(
             session.trace_id,
             run_id=run.run_id,
@@ -232,33 +272,46 @@ class ControlPlaneService:
             parent_span_id=run.span_id,
             attributes={"snapshot_id": context_snapshot.snapshot_id, "total_tokens": context_snapshot.total_tokens},
         )
-        result = self.runtime.run(
-            RuntimeRequest(
-                run_id=run.run_id,
-                session_ref=session.runtime_session_ref,
-                prompt=prompt,
-                skill_instructions=skill_instructions,
-                allowed_tools=allowed_tools,
+        try:
+            result = self.runtime.run(
+                RuntimeRequest(
+                    run_id=run.run_id,
+                    session_ref=session.runtime_session_ref,
+                    prompt=prompt,
+                    skill_instructions=skill_instructions,
+                    allowed_tools=allowed_tools,
+                )
             )
-        )
+        except Exception:
+            run.status = RuntimeStatus.UNKNOWN
+            run.error_category = "RUNTIME_RESULT_UNKNOWN"
+            self._runs[self._scope(identity, run.run_id)] = run
+            if fencing_token is not None and hasattr(self.persistence, "mark_unknown"):
+                self.persistence.mark_unknown(identity, run.run_id, fencing_token)
+            raise
         session.runtime_session_ref = result.runtime_session_ref
         run.status = result.status
         run.result_text = result.text
+        if self.object_store is not None and result.text:
+            result_bytes = result.text.encode("utf-8")
+            upload = self.object_store.create_upload_intent(
+                UploadRequest(
+                    platform_id=identity.platform_id,
+                    tenant_id=identity.tenant_id,
+                    filename=f"run-{run.run_id}.txt",
+                    mime_type="text/plain; charset=utf-8",
+                    size_bytes=len(result_bytes),
+                    retention_policy="session",
+                    expected_sha256=hashlib.sha256(result_bytes).hexdigest(),
+                )
+            )
+            result_asset = self.object_store.complete_upload(upload.upload_id, result_bytes)
+            run.result_ref = result_asset.object_ref
         run.runtime_reference = RuntimeReference(
             engine_name="fake",
             runtime_session_ref=result.runtime_session_ref,
             runtime_result_ref=result.runtime_result_ref,
         )
-        if self.persistence is not None and hasattr(self.persistence, "acquire_lease") and hasattr(self.persistence, "save_run"):
-            lease = self.persistence.acquire_lease(identity, session.session_id)
-            self.persistence.save_run(
-                identity,
-                session.session_id,
-                run.run_id,
-                lease.fencing_token,
-                {"employee_version": snapshot.employee_version, "execution_profile_id": snapshot.execution_profile_id, "trace_id": run.trace_id},
-                {"runtime_session_ref": result.runtime_session_ref, "result_ref": result.runtime_result_ref},
-            )
         run.error_category = next(
             (
                 str(event.payload["error_category"])
@@ -291,6 +344,58 @@ class ControlPlaneService:
         )
         self._runs[self._scope(identity, run.run_id)] = run
         self._usage[run.run_id] = result.usage
+        if persistent_submission and fencing_token is not None:
+            run_spans = tuple(
+                span
+                for span in self._spans.get(run.trace_id, [])
+                if span.run_id in {"", run.run_id}
+            )
+            if hasattr(self.persistence, "complete_run"):
+                committed = self.persistence.complete_run(
+                    identity, run, fencing_token, run_spans, result.usage
+                )
+            else:
+                committed = self.persistence.finish_run(identity, run, fencing_token)
+            if not committed:
+                persisted = self.persistence.get_run(identity, run.run_id)
+                self._runs[self._scope(identity, run.run_id)] = persisted
+                return persisted
+            if hasattr(self.persistence, "save_session_runtime_refs"):
+                self.persistence.save_session_runtime_refs(
+                    identity,
+                    session.session_id,
+                    runtime_session_ref=result.runtime_session_ref,
+                    runtime_result_ref=result.runtime_result_ref,
+                )
+        elif self.persistence is not None and hasattr(self.persistence, "save_run"):
+            if hasattr(self.persistence, "register_session") and hasattr(self.persistence, "acquire_lease"):
+                lease = self.persistence.acquire_lease(identity, session.session_id)
+                self.persistence.save_run(
+                    identity,
+                    session.session_id,
+                    run.run_id,
+                    lease.fencing_token,
+                    {
+                        "employee_version": snapshot.employee_version,
+                        "execution_profile_id": snapshot.execution_profile_id,
+                        "execution_profile_version": snapshot.execution_profile_version,
+                        "model_route_id": snapshot.model_route_id,
+                        "trace_id": run.trace_id,
+                    },
+                    {
+                        "runtime_session_ref": result.runtime_session_ref,
+                        "result_ref": result.runtime_result_ref,
+                    },
+                )
+            else:
+                self.persistence.save_run(identity, run, idempotency_key or run.run_id)
+            if hasattr(self.persistence, "save_session_runtime_refs"):
+                self.persistence.save_session_runtime_refs(
+                    identity,
+                    session.session_id,
+                    runtime_session_ref=result.runtime_session_ref,
+                    runtime_result_ref=result.runtime_result_ref,
+                )
         if idempotency_key:
             self._idempotency[(*self._scope(identity, session_id), idempotency_key)] = (
                 prompt_digest,
@@ -299,10 +404,43 @@ class ControlPlaneService:
         return run
 
     def get_run(self, identity: IdentityContext, run_id: str) -> RunRecord:
-        return self._get_run(identity, run_id)
+        try:
+            run = self._get_run(identity, run_id)
+        except DomainError as error:
+            if error.code != "RESOURCE_NOT_FOUND" or self.persistence is None or not hasattr(self.persistence, "get_run"):
+                raise
+            run = self.persistence.get_run(identity, run_id)
+        return self._load_result(identity, run)
+
+    def _load_result(self, identity: IdentityContext, run: RunRecord) -> RunRecord:
+        """通過租户授权对象仓储恢复 Run 正文，数据库只保留引用和摘要。"""
+
+        if run.result_ref is not None and self.object_store is not None:
+            try:
+                run.result_text = self.object_store.read(
+                    run.result_ref, identity.platform_id, identity.tenant_id
+                ).decode("utf-8")
+            except (PermissionError, UnicodeDecodeError) as error:
+                raise DomainError("RESOURCE_NOT_FOUND", "Run 结果不存在") from error
+        return run
+
+    def get_session(self, identity: IdentityContext, session_id: str) -> SessionRecord:
+        try:
+            return self._get_session(identity, session_id)
+        except DomainError as error:
+            if error.code != "RESOURCE_NOT_FOUND" or self.persistence is None or not hasattr(self.persistence, "get_session"):
+                raise
+            return self.persistence.get_session(identity, session_id)
 
     def get_trace(self, identity: IdentityContext, run_id: str) -> RunTimeline:
-        run = self._get_run(identity, run_id)
+        try:
+            run = self._get_run(identity, run_id)
+        except DomainError as error:
+            if error.code != "RESOURCE_NOT_FOUND" or self.persistence is None or not hasattr(self.persistence, "get_trace"):
+                raise
+            timeline = self.persistence.get_trace(identity, run_id)
+            self._load_result(identity, timeline.run)
+            return timeline
         spans = tuple(
             span
             for span in self._spans.get(run.trace_id, [])
@@ -316,5 +454,10 @@ class ControlPlaneService:
         )
 
     def get_session_trace(self, identity: IdentityContext, session_id: str) -> tuple[TraceSpan, ...]:
-        session = self._get_session(identity, session_id)
+        try:
+            session = self._get_session(identity, session_id)
+        except DomainError as error:
+            if error.code != "RESOURCE_NOT_FOUND" or self.persistence is None or not hasattr(self.persistence, "list_session_trace"):
+                raise
+            return self.persistence.list_session_trace(identity, session_id)
         return tuple(self._spans.get(session.trace_id, []))

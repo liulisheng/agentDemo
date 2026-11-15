@@ -1,4 +1,4 @@
-from collections.abc import Protocol
+from typing import Protocol
 
 from agent_platform.domain.identity import IdentityContext
 

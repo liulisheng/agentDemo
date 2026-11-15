@@ -1,26 +1,85 @@
+from __future__ import annotations
+
+import os
+from collections.abc import Sequence
+from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
+from agent_platform.adapters.secrets import EnvironmentSecretProvider
 from agent_platform.api.routes import router
 from agent_platform.application.catalog_service import CatalogService, InMemoryCatalogRepository
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversations import ConversationService
 from agent_platform.application.model_routes import InMemoryModelRouteRepository, ModelRouteService
 from agent_platform.domain.common import DomainError
+from agent_platform.infrastructure.migrations import (
+    MigrationPreflight,
+    MySqlMigrationStateReader,
+    PreflightAction,
+    load_migration_checksums,
+)
+from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+from agent_platform.infrastructure.mysql_conversations import MySqlConversationRepository
+from agent_platform.infrastructure.mysql_database import MySqlConfig, MySqlConnectionPool
+from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
+from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
+from agent_platform.ports.catalog_repository import CatalogRepository
+from agent_platform.ports.conversation_repository import ConversationRepository
+from agent_platform.ports.execution_repository import ExecutionRepository
+from agent_platform.ports.storage import LocalObjectStore, ObjectStore, SecretRef
 
 
-def create_app() -> FastAPI:
-    """创建控制面应用并注入一组隔离的内存服务。"""
+def create_app(
+    *,
+    catalog_repository: CatalogRepository | None = None,
+    execution_repository: ExecutionRepository | None = None,
+    conversation_repository: ConversationRepository | None = None,
+    object_store: ObjectStore | None = None,
+    mode: str | None = None,
+    lifecycle_resources: Sequence[object] = (),
+) -> FastAPI:
+    """建立应用依赖图；无仓储时只构造 Fake 测试/演示模式。"""
 
-    app = FastAPI(title="Agent Platform API", version="0.1.0")
-    catalog = CatalogService(InMemoryCatalogRepository())
+    resolved_mode = mode or ("mysql" if catalog_repository is not None else "fake")
+    if resolved_mode not in {"fake", "mysql"}:
+        raise ValueError("AGENT_PLATFORM_MODE must be 'fake' or 'mysql'")
+    if resolved_mode == "mysql" and any(
+        value is None
+        for value in (catalog_repository, execution_repository, conversation_repository, object_store)
+    ):
+        raise ValueError("MySQL 模式必须完整注入目录、执行、Conversation 和对象仓储")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            for resource in reversed(tuple(lifecycle_resources)):
+                close = getattr(resource, "close", None)
+                if close is not None:
+                    close()
+
+    app = FastAPI(title="Agent Platform API", version="0.1.0", lifespan=lifespan)
+    use_fake_gallery = resolved_mode == "fake" and catalog_repository is None
+    catalog = CatalogService(
+        catalog_repository if catalog_repository is not None else InMemoryCatalogRepository()
+    )
     app.state.catalog_service = catalog
-    app.state.control_plane_service = ControlPlaneService(catalog, FakeRuntimeAdapter())
-    app.state.conversation_service = ConversationService()
-    app.state.model_route_service = ModelRouteService(InMemoryModelRouteRepository())
+    app.state.use_fake_gallery = use_fake_gallery
+    app.state.control_plane_service = ControlPlaneService(
+        catalog, FakeRuntimeAdapter(), persistence=execution_repository, object_store=object_store
+    )
+    app.state.conversation_service = ConversationService(conversation_repository, object_store)
+    model_route_repository = (
+        catalog_repository if catalog_repository is not None else InMemoryModelRouteRepository()
+    )
+    app.state.model_route_service = ModelRouteService(model_route_repository)
+    app.state.mode = resolved_mode
     app.include_router(router)
 
     @app.exception_handler(DomainError)
@@ -50,3 +109,86 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     return app
+
+
+def create_app_from_environment() -> FastAPI:
+    """生产入口只接受显式 Fake 或完整 MySQL 配置，启动只读检查 schema。"""
+
+    mode = os.environ.get("AGENT_PLATFORM_MODE")
+    if mode == "fake":
+        return create_app(mode="fake")
+    if mode != "mysql":
+        raise RuntimeError("必须显式设置 AGENT_PLATFORM_MODE=mysql 或 AGENT_PLATFORM_MODE=fake")
+    if os.environ.get("AGENT_PLATFORM_IDENTITY_PROVIDER") != "fake":
+        raise RuntimeError(
+            "本地控制面只实现 Fake identity；设置 AGENT_PLATFORM_IDENTITY_PROVIDER=fake 并显式运行 seed 命令"
+        )
+
+    required = ("MYSQL_HOST", "MYSQL_DATABASE", "MYSQL_USER", "MYSQL_PASSWORD")
+    missing = [name for name in required if name not in os.environ]
+    if missing:
+        raise RuntimeError("MySQL 模式缺少环境变量：" + ", ".join(missing))
+    config = MySqlConfig(
+        host=os.environ["MYSQL_HOST"],
+        port=int(os.environ.get("MYSQL_PORT", "3306")),
+        database=os.environ["MYSQL_DATABASE"],
+        user=os.environ["MYSQL_USER"],
+        password=os.environ["MYSQL_PASSWORD"],
+        pool_size=int(os.environ.get("MYSQL_POOL_SIZE", "8")),
+    )
+    pool = MySqlConnectionPool(config)
+    try:
+        root = Path(__file__).resolve().parents[4]
+        migrations_dir = root / "docs" / "migrations"
+        preflight = MigrationPreflight(load_migration_checksums(migrations_dir)).inspect(
+            MySqlMigrationStateReader(pool.connection)
+        )
+        if preflight.action is not PreflightAction.UP_TO_DATE:
+            details = "; ".join(preflight.errors or preflight.warnings) or preflight.action.value
+            raise RuntimeError(
+                f"MySQL schema 尚未就绪：{details}；请显式运行 agent-platform-migration preflight/apply"
+            )
+
+        encryption_required = os.environ.get("AGENT_PLATFORM_OBJECT_ENCRYPTION_REQUIRED", "0") == "1"
+        secret_ref_text = os.environ.get("AGENT_PLATFORM_STORAGE_SECRET_REF")
+        key_version = os.environ.get("AGENT_PLATFORM_STORAGE_KEY_VERSION")
+        key_b64 = os.environ.get("AGENT_PLATFORM_STORAGE_KEY_B64")
+        key_provider = None
+        secret_ref = None
+        if encryption_required:
+            if not secret_ref_text or not key_version or not key_b64:
+                raise RuntimeError("对象加密已启用，但 SecretRef、密钥版本或密钥值未配置")
+            secret_ref = SecretRef(secret_ref_text)
+            key_provider = EnvironmentSecretProvider(
+                secret_ref_text,
+                current_key_version=key_version,
+                environment_variable="AGENT_PLATFORM_STORAGE_KEY_B64",
+            )
+
+        data_root = Path(
+            os.environ.get(
+                "AGENT_PLATFORM_DATA_ROOT",
+                str(Path.home() / ".local" / "share" / "agent-platform"),
+            )
+        ).expanduser().resolve()
+        if root == data_root or root in data_root.parents:
+            raise RuntimeError("AGENT_PLATFORM_DATA_ROOT 必须位于代码仓库和 Web root 之外")
+        object_store = LocalObjectStore(
+            data_root / "objects",
+            metadata_repository=MySqlMediaAssetRepository(pool.connection),
+            require_encryption=encryption_required,
+            encryption_secret_ref=secret_ref,
+            encryption_key_version=key_version,
+            key_provider=key_provider,
+        )
+        return create_app(
+            mode="mysql",
+            catalog_repository=MySqlCatalogRepository(pool.connection),
+            execution_repository=MySqlExecutionRepository(pool.connection),
+            conversation_repository=MySqlConversationRepository(pool.connection),
+            object_store=object_store,
+            lifecycle_resources=(pool,),
+        )
+    except Exception:
+        pool.close()
+        raise

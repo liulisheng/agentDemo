@@ -31,8 +31,10 @@ def _published_service() -> tuple[ControlPlaneService, object, object]:
 def test_run_persists_snapshot_and_ordered_trace() -> None:
     service, identity, deployment = _published_service()
     session = service.create_session(identity, deployment.deployment_id)
+    assert len(session.session_id) == 26
 
     run = service.create_run(identity, session.session_id, "echo: hello", "idem-1")
+    assert len(run.run_id) == 26
     trace = service.get_trace(identity, run.run_id)
 
     assert run.status.value == "succeeded"

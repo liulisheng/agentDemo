@@ -1,39 +1,51 @@
-# MySQL migration 验收说明
+# MySQL Migration 约定
 
-`V001__core_schema.sql` 是 Harness 控制面的核心 migration；`V002__conversation_messages.sql` 增加消息顺序字段、消息索引、流式分段索引、上传 intent 和对象清理队列。目标均为 MySQL 8.4、InnoDB 和 `utf8mb4_0900_ai_ci`。V001+V002 已于 2026-11-13 在一次性 MySQL 8.4.13 实例依序执行；本轮代表性 V002 集成检查通过，完整生产迁移流程仍待验证。两个文件必须按顺序运行。密码、OIDC Provider、浏览器会话和令牌签发仍由用户中心负责。
+`docs/migrations/` 是仓库中唯一的可执行 schema/migration SQL 目录。V001/V002 是历史迁移，禁止为补注释或兼容代码而修改；新增或修改表结构时必须新增 migration，并为每张新表和每个新建/变更字段添加中文 MySQL `COMMENT`。MySQL 集成测试读取 `information_schema.TABLES` 和 `information_schema.COLUMNS` 验证实际落库注释。
 
-## 执行前提
+当前迁移面向 MySQL 8.4、InnoDB 和 `utf8mb4_0900_ai_ci`。V003 是在首次共享环境应用前完成的控制面迁移。如果任何共享环境已经应用较早的 V003 草案，不得重写 V003，应先核对 schema/checksum 并制定向前兼容的 V004。当前仓库没有针对未知 V003 草案数据的通用 V004；Runner 会 fail closed。
 
-- 使用一次性 MySQL 8.4 实例或临时数据库。
-- 连接账号具备建表和外键权限。
-- 在目标实例确认 `sql_mode` 未关闭 CHECK 约束执行。
-- 不要把 SQLite 或其他兼容数据库的结果当作 MySQL 8.4 结果。
+## 显式预检和迁移
 
-## 执行命令示例
+先配置 `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_DATABASE`、`MYSQL_USER` 和 `MYSQL_PASSWORD`。API/Worker 启动只做只读 schema 预检，不会执行 DDL。迁移需要人工显式运行：
 
 ```bash
-mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u harness_verify -p \
-  -e "CREATE DATABASE harness_verify CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
-mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u harness_verify -p harness_verify \
-  < docs/migrations/V001__core_schema.sql
-mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u harness_verify -p harness_verify \
-  < docs/migrations/V002__conversation_messages.sql
+cd backend
+python -m pip install -e '.[mysql]'
+cd ..
+agent-platform-migration preflight --migrations-dir docs/migrations
+agent-platform-migration apply --migrations-dir docs/migrations
+agent-platform-migration preflight --migrations-dir docs/migrations
 ```
 
-DDL 会由 MySQL 独立提交；迁移工具必须在失败后停止，不要把半套表结构当成成功版本。生产接入 Flyway、Liquibase 或自有 runner 时，需要把文件名和校验和写入迁移历史表。
+`preflight` 读取 `schema_version`、migration checksum 和 `information_schema`。`apply` 才会取得 MySQL advisory lock、逐版本执行 DDL、写入 checksum history 并在第一个失败处停止。V001/V002 没有旧 checksum history 时，preflight 会显示 legacy warning，不会声称已核验历史文件。
 
-## 最小验收场景
+如果 preflight 发现版本、checksum 或部分 DDL 不一致，先备份并调查目标库；不要重放已应用 migration。不要把空库或半迁移库当作可运行应用的数据库。
 
-1. 插入两个平台和各自租户、用户、session、run，确认同名 `tenant_id` 只在本平台内唯一。
-2. 构造平台 A 的用户关联平台 B 的租户，确认联合外键失败。
-3. 写入非法 `status` 或 `state`，确认 CHECK 失败。
-4. 两个事务按 `platform_id + tenant_id` 领取 queued run，确认 `FOR UPDATE SKIP LOCKED` 只返回一条。
-5. 使用旧 `fencing_token` 更新或完成 run，确认影响行数为 0。
-6. 重复提交同一租户的 `idempotency_key`，确认返回原 run 或冲突，不产生第二条记录。
-7. 通过连接池连续执行两个不同租户请求，确认第二个请求不会继承第一个请求的上下文；仓储 SQL 必须显式绑定 `platform_id` 和 `tenant_id`。
+## 一次性 MySQL 集成验证
 
-已由 Task 1–3 验证：V002 schema 与代表性 CHECK/外键、只读 doctor、MySQL 消息顺序分配、USER/ASSISTANT 发布事务、请求幂等、租户范围过滤、上传 lease 过期入队、过期后发布/续租拒绝，以及消息删除排入正文引用并清除匹配 `runs.result_ref`。这些仓储用例不等于并发竞争压力测试。
+集成测试只有在显式设置 `AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE=1` 时才会创建随机命名 disposable database，并在 teardown 删除。该开关只能连接一次性 MySQL：
 
-仍需验证/实现：`last_committed_chunk_sequence` 与 chunk 行的连续前缀；upload intent 过期/发布 barrier 竞争和死锁恢复；延迟 PUT 首次清理后完成时的孤儿重扫；删除队列 worker、session 级显式删除与所有关联 UPLOADING intents；对象清理重试；durable-tail replay/通知交界无漏段；孤儿扫描对旧 `runs.result_ref` 的保护。生产对象存储/KMS、备份恢复、最小权限和负载测试也仍待完成。
+```bash
+cd backend
+AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE=1 \
+MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 MYSQL_USER=agent_platform_test \
+MYSQL_PASSWORD='<一次性数据库密码>' \
+python -m pytest tests/integration/test_production_control_plane_migration.py \
+  tests/integration/test_mysql_migration_runner.py -q
+```
 
-完整项目清单见 [真实验证矩阵](../verification-matrix.md)。2026-11-10 已在一次性 Docker MySQL 8.4.13 实例上执行 V001，并通过 `tests/test_mysql_integration.py`（1 passed）。2026-11-13 又在无持久卷的一次性 Docker MySQL 8.4.13 实例依序执行 V001+V002；最终 `tests/test_mysql_integration.py` 为 7 passed，覆盖 schema/doctor、消息与 chunk 事务、服务级流式完成/续读、租户隔离、worker 租约回收和上传 lease/GC enqueue。离线全套为 157 passed、2 skipped。DeepSeek 实时流、显式 session 删除、竞争压力、清理 worker、生产权限、备份恢复和负载测试仍待验证。
+测试覆盖 V003 正向/回滚、外键与租户联合键、CHAR(26) 主键、中文表/字段注释、重复迁移、checksum 变化和失败停止。运行版本和最终 checksum 记录在 [`../验证记录.md`](../验证记录.md)。
+
+## 备份与回滚
+
+在升级前停止写入服务，交互式输入密码并备份数据库；对象文件必须和数据库在同一停写窗口内归档：
+
+```bash
+mysqldump --single-transaction -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p \
+  "$MYSQL_DATABASE" > /secure/backup/agent-platform.sql
+tar -C "$AGENT_PLATFORM_DATA_ROOT" -czf /secure/backup/agent-platform-objects.tgz objects
+```
+
+[`V003__agent_platform_foundation.down.sql`](V003__agent_platform_foundation.down.sql) 仅用于 disposable database 验证；不得在有业务数据的环境执行。生产回滚采用兼容旧应用版本的代码回滚，并保留增量 schema。破坏性 DDL 需单独审批并先演练 DB/对象备份恢复。
+
+项目级长期约定见 [`文档维护约定`](../文档维护约定.md) 和仓库根目录 [`AGENTS.md`](../../AGENTS.md)。

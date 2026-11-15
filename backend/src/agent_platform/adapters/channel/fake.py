@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from uuid import uuid4
-
+from agent_platform.domain.common import generate_database_id
 from agent_platform.domain.conversations import InboundEvent, Message, MessageSource
 from agent_platform.domain.identity import IdentityContext
 
@@ -28,7 +27,7 @@ class FakeChannelAdapter:
         message = self._messages.get(key)
         if message is None:
             message = Message(
-                message_id=f"message-{uuid4().hex}",
+                message_id=generate_database_id(),
                 conversation_id=conversation_id,
                 platform_id=identity.platform_id,
                 tenant_id=identity.tenant_id,
@@ -40,7 +39,7 @@ class FakeChannelAdapter:
             self._messages[key] = message
         event = self._events.get(message.message_id)
         if event is None:
-            event = InboundEvent(f"event-{uuid4().hex}", channel_name, external_message_id, message.message_id)
+            event = InboundEvent(generate_database_id(), channel_name, external_message_id, message.message_id)
             self._events[message.message_id] = event
         return event
 

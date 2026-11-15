@@ -1,5 +1,12 @@
 schema: spec-driven
 
+rules:
+  design:
+    - 将可执行 MySQL schema/migration SQL 放在 docs/migrations/，不要建立重复来源目录。
+    - 新增或变更的表和字段必须带中文 MySQL COMMENT；历史已应用 migration 不得改写，使用 forward migration 补充元数据。
+  tasks:
+    - Schema 任务必须包含表/字段中文 COMMENT，并验证 information_schema.TABLES 与 information_schema.COLUMNS。
+
 # Project context (optional)
 # Add only constraints that should guide OpenSpec artifacts and workflows.
 # Include constraints an agent cannot infer by reading the code.

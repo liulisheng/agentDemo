@@ -52,6 +52,10 @@ class RunSnapshot:
     skill_version_ids: tuple[str, ...]
     tool_version_ids: tuple[str, ...]
     execution_profile_id: str
+    skill_version_refs: tuple[tuple[str, int], ...] = ()
+    tool_version_refs: tuple[tuple[str, int], ...] = ()
+    execution_profile_version: int = 1
+    model_route_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -64,6 +68,10 @@ class SessionRecord:
     deployment_id: str
     trace_id: str
     employee_version: int
+    employee_id: str = ""
+    execution_profile_id: str = ""
+    execution_profile_version: int = 1
+    model_route_id: str | None = None
     runtime_session_ref: str | None = None
     status: str = "ACTIVE"
     span_id: str = ""
@@ -82,6 +90,7 @@ class RunRecord:
     snapshot: RunSnapshot
     status: RuntimeStatus
     result_text: str = ""
+    result_ref: str | None = None
     runtime_reference: RuntimeReference | None = None
     error_category: str | None = None
     context_snapshot: ContextSnapshot | None = None

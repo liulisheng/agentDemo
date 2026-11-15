@@ -20,6 +20,8 @@ docker compose exec mysql mysql -u harness -p harness -e "SHOW TABLES;"
 docker compose exec mysql mysql -u harness -p harness -e "SHOW CREATE TABLE runs\G"
 ```
 
+Compose 仅在全新本地数据卷初始化时自动加载 V001；这不是 backend 应用启动时自动迁移。V002/V003 和后续版本需先执行只读 preflight，再使用 backend 的显式 migration runner。命令、V003/V004 分支、中文 COMMENT 校验和回滚边界见 [迁移验收说明](../../docs/migrations/README.md)。
+
 ## 重新执行 migration
 
 官方镜像只在数据目录为空时执行 `/docker-entrypoint-initdb.d` 文件。修改 migration 后，必须销毁验证卷再重建：

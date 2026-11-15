@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping
 from dataclasses import dataclass
+from uuid import uuid4
 
 from .identity import IdentityContext
+
+
+def generate_database_id() -> str:
+    """生成适配 V001/V002 CHAR(26) 主键的 opaque ID，不暴露资源类型前缀。"""
+
+    return base64.b32encode(uuid4().bytes).decode("ascii").rstrip("=").lower()[:26]
 
 
 def _require_text(value: str, field_name: str) -> str:

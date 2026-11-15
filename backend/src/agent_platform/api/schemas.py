@@ -37,7 +37,9 @@ class EmployeeVersionCreateRequest(TenantAwareRequest):
     execution_profile_id: str = "profile-fake"
     model_route_id: str | None = None
     workspace_profile_id: str | None = None
+    workspace_profile_version: int | None = None
     sandbox_profile_id: str | None = None
+    sandbox_profile_version: int | None = None
     approval_policy: str = "none"
 
 
@@ -89,7 +91,9 @@ class ExecutionProfileCreateRequest(TenantAwareRequest):
     model_alias: str = "fake-model"
     model_route_id: str | None = None
     workspace_profile_id: str | None = None
+    workspace_profile_version: int | None = None
     sandbox_profile_id: str | None = None
+    sandbox_profile_version: int | None = None
     approval_policy: str = "none"
 
 class DeploymentRollbackRequest(TenantAwareRequest):

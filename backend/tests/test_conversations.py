@@ -9,6 +9,7 @@ def test_duplicate_channel_message_is_idempotent() -> None:
     first = channel.receive(identity, "web", "external-1", "conversation-1", "member-local", "hello")
     second = channel.receive(identity, "web", "external-1", "conversation-1", "member-local", "hello")
     assert first.message_id == second.message_id
+    assert len(first.message_id) == 26
     assert len(channel.messages(identity)) == 1
 
 

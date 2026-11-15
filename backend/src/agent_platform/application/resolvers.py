@@ -42,10 +42,17 @@ class AgentResolver:
     def snapshot(self, identity: IdentityContext, deployment: Deployment) -> RunSnapshot:
         version = deployment.employee_version
         self.skills.resolve(identity, version)
+        profile = self.catalog.repository.get_profile_version(
+            identity, version.execution_profile_id, version.execution_profile_version
+        )
         return RunSnapshot(
             employee_id=version.employee_id,
             employee_version=version.version,
             skill_version_ids=tuple(version.skill_version_ids),
             tool_version_ids=tuple(version.tool_version_ids),
             execution_profile_id=version.execution_profile_id,
+            skill_version_refs=tuple(version.skill_version_refs),
+            tool_version_refs=tuple(version.tool_version_refs),
+            execution_profile_version=version.execution_profile_version,
+            model_route_id=version.model_route_id or profile.model_route_id,
         )

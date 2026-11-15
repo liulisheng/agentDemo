@@ -4,6 +4,8 @@ from agent_platform.adapters.identity.fake import FakeIdentityProvider
 from agent_platform.application.catalog_service import CatalogService, InMemoryCatalogRepository
 from agent_platform.domain.catalog import LifecycleStatus, SkillType
 from agent_platform.domain.common import DomainError
+from agent_platform.domain.model_routes import ModelProfile, ModelRoute
+from agent_platform.ports.workspaces import SandboxProfile, WorkspaceProfile
 
 
 def _service() -> tuple[CatalogService, object]:
@@ -64,9 +66,12 @@ def test_cross_tenant_deployment_is_hidden() -> None:
 def test_publish_validates_model_route_workspace_and_sandbox_references() -> None:
     service, identity = _service()
     repo = service.repository
-    repo.model_routes[(identity.platform_id, identity.tenant_id, "route-1")] = object()
-    repo.workspace_profiles[(identity.platform_id, identity.tenant_id, "workspace-1")] = object()
-    repo.sandbox_profiles[(identity.platform_id, identity.tenant_id, "sandbox-1")] = object()
+    repo.save_model_route(
+        identity,
+        ModelRoute("route-1", identity.tenant_id, "route", ModelProfile("model-1", identity.tenant_id, "fake", "fake", "fake://model")),
+    )
+    repo.save_workspace_profile(identity, WorkspaceProfile("workspace-1"))
+    repo.save_sandbox_profile(identity, SandboxProfile("sandbox-1"))
     tool = service.create_tool(identity, "echo", "回显", {"type": "object"})
     service.publish_tool(identity, tool.tool_id)
     skill = service.create_skill(identity, "技能", SkillType.INSTRUCTION, "回答", [])

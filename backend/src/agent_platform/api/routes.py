@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from agent_platform.api.dependencies import (
     catalog_service,
@@ -96,6 +96,7 @@ def _employee_response(value: DigitalEmployee) -> dict[str, object]:
         "role_name": value.role_name,
         "description": value.description,
         "status": value.status.value,
+        "published_to_gallery": value.published_to_gallery,
     }
 
 
@@ -110,7 +111,10 @@ def _version_response(value: DigitalEmployeeVersion) -> dict[str, object]:
         "execution_profile_id": value.execution_profile_id,
         "model_route_id": value.model_route_id,
         "workspace_profile_id": value.workspace_profile_id,
+        "workspace_profile_version": value.workspace_profile_version,
         "sandbox_profile_id": value.sandbox_profile_id,
+        "sandbox_profile_version": value.sandbox_profile_version,
+        "execution_profile_version": value.execution_profile_version,
         "approval_policy": value.approval_policy,
         "status": value.status.value,
     }
@@ -144,6 +148,7 @@ def _run_response(value: RunRecord) -> dict[str, object]:
         "trace_id": value.trace_id,
         "status": value.status.value,
         "result": value.result_text,
+        "result_ref": value.result_ref,
         "error_category": value.error_category,
         "snapshot": {
             "employee_id": value.snapshot.employee_id,
@@ -204,28 +209,58 @@ def _timeline_response(value: RunTimeline) -> dict[str, object]:
 
 
 @router.get("/digital-employees")
-def list_digital_employees(identity: Identity) -> dict[str, object]:
-    """返回当前租户可在 Gallery 使用的数字员工摘要。"""
+def list_digital_employees(
+    identity: Identity, service: Catalog, request: Request
+) -> dict[str, object]:
+    """开发 Fake Gallery 保持旧 fixture；注入持久仓储时返回真实租户目录。"""
 
-    return {
-        "items": [
+    if request.app.state.use_fake_gallery:
+        return {
+            "items": [
+                {
+                    "id": employee.employee_id,
+                    "tenant_id": employee.tenant_id,
+                    "name": employee.name,
+                    "role_name": employee.role_name,
+                    "description": employee.description,
+                    "status": employee.status,
+                    "published_to_gallery": employee.published_to_gallery,
+                    "resource_counts": {
+                        "knowledge_base": employee.knowledge_count,
+                        "skill": employee.skill_count,
+                        "sop": employee.sop_count,
+                    },
+                }
+                for employee in employee_repository.list_available(identity)
+            ]
+        }
+
+    items = []
+    for employee in service.list_employees(identity):
+        published_versions = [
+            version
+            for version in service.list_employee_versions(identity, employee.employee_id)
+            if version.status.value == "PUBLISHED"
+        ]
+        latest = max(published_versions, key=lambda value: value.version, default=None)
+        items.append(
             {
                 "id": employee.employee_id,
                 "tenant_id": employee.tenant_id,
                 "name": employee.name,
                 "role_name": employee.role_name,
                 "description": employee.description,
-                "status": employee.status,
+                "status": employee.status.value,
                 "published_to_gallery": employee.published_to_gallery,
                 "resource_counts": {
-                    "knowledge_base": employee.knowledge_count,
-                    "skill": employee.skill_count,
-                    "sop": employee.sop_count,
+                    "knowledge_base": 0,
+                    "skill": len(latest.skill_version_ids) if latest else 0,
+                    "sop": 0,
+                    "tool": len(latest.tool_version_ids) if latest else 0,
                 },
             }
-            for employee in employee_repository.list_available(identity)
-        ]
-    }
+        )
+    return {"items": items}
 
 
 @router.post("/tools", status_code=201)
@@ -296,6 +331,8 @@ def create_employee_version(
             request.workspace_profile_id,
             request.sandbox_profile_id,
             request.approval_policy,
+            request.workspace_profile_version,
+            request.sandbox_profile_version,
         )
     )
 
@@ -366,7 +403,17 @@ def get_session_trace(session_id: str, identity: Identity, service: ControlPlane
 @router.post("/execution-profiles", status_code=201)
 def create_execution_profile(request: ExecutionProfileCreateRequest, identity: Identity, service: Catalog) -> dict[str, object]:
     _check_tenant(identity, request)
-    profile = service.create_profile(identity, request.engine_name, request.model_alias, model_route_id=request.model_route_id, workspace_profile_id=request.workspace_profile_id, sandbox_profile_id=request.sandbox_profile_id, approval_policy=request.approval_policy)
+    profile = service.create_profile(
+        identity,
+        request.engine_name,
+        request.model_alias,
+        model_route_id=request.model_route_id,
+        workspace_profile_id=request.workspace_profile_id,
+        workspace_profile_version=request.workspace_profile_version,
+        sandbox_profile_id=request.sandbox_profile_id,
+        sandbox_profile_version=request.sandbox_profile_version,
+        approval_policy=request.approval_policy,
+    )
     return {"id": profile.profile_id, "tenant_id": profile.tenant_id, "engine_name": profile.engine_name, "model_alias": profile.model_alias, "status": profile.status.value}
 
 
@@ -405,6 +452,27 @@ def ingest_conversation_message(conversation_id: str, request: MessageCreateRequ
     _check_tenant(identity, request)
     message = service.ingest(identity, conversation_id, request.sender_id, request.text, source=request.source, routing_depth=request.routing_depth)
     return {"id": message.message_id, "conversation_id": message.conversation_id, "source": message.source.value, "routing_depth": message.routing_depth}
+
+
+@router.get("/conversations/{conversation_id}/messages")
+def list_conversation_messages(
+    conversation_id: str, identity: Identity, service: Conversations
+) -> dict[str, object]:
+    """按租户恢复消息正文；持久仓储只保存正文对象引用。"""
+
+    return {
+        "items": [
+            {
+                "id": message.message_id,
+                "conversation_id": message.conversation_id,
+                "sender_id": message.sender_id,
+                "source": message.source.value,
+                "text": message.text,
+                "routing_depth": message.routing_depth,
+            }
+            for message in service.list_messages(identity, conversation_id)
+        ]
+    }
 
 
 @router.post("/conversations/{conversation_id}/messages/{message_id}/route")

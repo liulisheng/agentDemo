@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+from typing import Protocol
 from uuid import uuid4
 
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import ModelProfile, ModelRoute, SecretRef
+
+
+class ModelRouteRepository(Protocol):
+    """模型路由的租户范围持久化端口。"""
+
+    def save(self, identity: IdentityContext, route: ModelRoute) -> None: ...
+
+    def get(self, identity: IdentityContext, route_id: str) -> ModelRoute | None: ...
+
+    def list(self, identity: IdentityContext) -> tuple[ModelRoute, ...]: ...
 
 
 class InMemoryModelRouteRepository:
@@ -28,7 +39,7 @@ class InMemoryModelRouteRepository:
 class ModelRouteService:
     """创建、切换和查询模型路由；Secret 只作为 SecretRef 保存。"""
 
-    def __init__(self, repository: InMemoryModelRouteRepository) -> None:
+    def __init__(self, repository: ModelRouteRepository) -> None:
         self.repository = repository
 
     def create(

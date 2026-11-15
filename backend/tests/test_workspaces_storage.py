@@ -66,6 +66,7 @@ def test_capabilities_gate_mutating_operations() -> None:
 def test_local_store_uses_generated_refs_and_bounded_reads(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
     intent = store.create_upload_intent(UploadRequest("plt", "tenant-a", "hello.txt", "text/plain", 5))
+    assert len(intent.upload_id) == 26
     assert str(tmp_path) not in intent.upload_url
     asset = store.complete_upload(intent.upload_id, b"hello")
     assert asset.object_ref == intent.object_ref
@@ -77,11 +78,21 @@ def test_local_store_uses_generated_refs_and_bounded_reads(tmp_path: Path) -> No
 
 
 def test_storage_profile_requires_explicit_provider_and_secret_ref() -> None:
+
     assert StorageProfile("s3", "s3", "bucket", endpoint="https://s3.example", credential_ref=SecretRef("secret/object"))
     with pytest.raises(ValueError):
         StorageProfile("bad", "filesystem", "bucket")
     with pytest.raises(ValueError):
         StorageProfile("s3", "s3", "bucket", credential_ref="raw-secret")
+
+
+@pytest.mark.parametrize("provider", ["minio", "s3", "oss", "cos"])
+def test_uninstalled_storage_provider_fails_without_local_fallback(provider: str) -> None:
+    from agent_platform.ports.storage import build_object_store
+
+    profile = StorageProfile(provider, provider, "bucket", endpoint="https://storage.example")
+    with pytest.raises(NotImplementedError, match="adapter is not installed"):
+        build_object_store(profile)
 
 
 def test_attachments_keep_platform_asset_and_runtime_copy_separate() -> None:

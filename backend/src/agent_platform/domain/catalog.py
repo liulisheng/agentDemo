@@ -92,6 +92,7 @@ class SkillVersion:
     approval_policy: str = "none"
     version: int = 1
     status: LifecycleStatus = LifecycleStatus.DRAFT
+    allowed_tool_versions: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.skill_id, "skill_id")
@@ -102,6 +103,16 @@ class SkillVersion:
             raise ValueError("version must be positive")
         if not isinstance(self.allowed_tool_ids, tuple):
             raise TypeError("allowed_tool_ids must be a tuple")
+        if not self.allowed_tool_versions:
+            object.__setattr__(
+                self,
+                "allowed_tool_versions",
+                tuple((tool_id, 1) for tool_id in self.allowed_tool_ids),
+            )
+        if tuple(tool_id for tool_id, _ in self.allowed_tool_versions) != self.allowed_tool_ids:
+            raise ValueError("allowed_tool_versions must match allowed_tool_ids order")
+        if any(version < 1 for _, version in self.allowed_tool_versions):
+            raise ValueError("Tool version references must be positive")
 
     def publish(self) -> SkillVersion:
         self.assert_mutable()
@@ -129,6 +140,7 @@ class DigitalEmployee:
     role_name: str
     description: str
     status: LifecycleStatus = LifecycleStatus.DRAFT
+    published_to_gallery: bool = False
 
     def __post_init__(self) -> None:
         for field_name in ("employee_id", "tenant_id", "name", "role_name", "description"):
@@ -149,7 +161,9 @@ class ExecutionProfile:
     status: LifecycleStatus = LifecycleStatus.DRAFT
     model_route_id: str | None = None
     workspace_profile_id: str | None = None
+    workspace_profile_version: int | None = None
     sandbox_profile_id: str | None = None
+    sandbox_profile_version: int | None = None
     approval_policy: str = "none"
 
     def __post_init__(self) -> None:
@@ -159,6 +173,19 @@ class ExecutionProfile:
             value = getattr(self, field_name)
             if value is not None:
                 _text(value, field_name)
+        for profile_field, version_field in (
+            ("workspace_profile_id", "workspace_profile_version"),
+            ("sandbox_profile_id", "sandbox_profile_version"),
+        ):
+            profile_id = getattr(self, profile_field)
+            profile_version = getattr(self, version_field)
+            if profile_id is None and profile_version is not None:
+                raise ValueError(f"{version_field} requires {profile_field}")
+            if profile_id is not None:
+                if profile_version is None:
+                    object.__setattr__(self, version_field, 1)
+                elif profile_version < 1:
+                    raise ValueError(f"{version_field} must be positive")
         if self.version < 1:
             raise ValueError("version must be positive")
 
@@ -182,8 +209,13 @@ class DigitalEmployeeVersion:
     status: LifecycleStatus = LifecycleStatus.DRAFT
     model_route_id: str | None = None
     workspace_profile_id: str | None = None
+    workspace_profile_version: int | None = None
     sandbox_profile_id: str | None = None
+    sandbox_profile_version: int | None = None
     approval_policy: str = "none"
+    execution_profile_version: int = 1
+    skill_version_refs: tuple[tuple[str, int], ...] = ()
+    tool_version_refs: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in ("employee_id", "tenant_id", "system_prompt", "execution_profile_id"):
@@ -192,10 +224,43 @@ class DigitalEmployeeVersion:
             raise ValueError("version must be positive")
         if not isinstance(self.skill_version_ids, tuple) or not isinstance(self.tool_version_ids, tuple):
             raise TypeError("version references must be tuples")
+        if self.execution_profile_version < 1:
+            raise ValueError("execution_profile_version must be positive")
+        if not self.skill_version_refs:
+            object.__setattr__(
+                self,
+                "skill_version_refs",
+                tuple((skill_id, 1) for skill_id in self.skill_version_ids),
+            )
+        if not self.tool_version_refs:
+            object.__setattr__(
+                self,
+                "tool_version_refs",
+                tuple((tool_id, 1) for tool_id in self.tool_version_ids),
+            )
+        if tuple(resource_id for resource_id, _ in self.skill_version_refs) != self.skill_version_ids:
+            raise ValueError("skill_version_refs must match skill_version_ids order")
+        if tuple(resource_id for resource_id, _ in self.tool_version_refs) != self.tool_version_ids:
+            raise ValueError("tool_version_refs must match tool_version_ids order")
+        if any(version < 1 for _, version in (*self.skill_version_refs, *self.tool_version_refs)):
+            raise ValueError("Skill and Tool version references must be positive")
         for field_name in ("model_route_id", "workspace_profile_id", "sandbox_profile_id"):
             value = getattr(self, field_name)
             if value is not None:
                 _text(value, field_name)
+        for profile_field, version_field in (
+            ("workspace_profile_id", "workspace_profile_version"),
+            ("sandbox_profile_id", "sandbox_profile_version"),
+        ):
+            profile_id = getattr(self, profile_field)
+            profile_version = getattr(self, version_field)
+            if profile_id is None and profile_version is not None:
+                raise ValueError(f"{version_field} requires {profile_field}")
+            if profile_id is not None:
+                if profile_version is None:
+                    object.__setattr__(self, version_field, 1)
+                elif profile_version < 1:
+                    raise ValueError(f"{version_field} must be positive")
 
     def publish(self) -> DigitalEmployeeVersion:
         self.assert_mutable()
