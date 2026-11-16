@@ -208,11 +208,20 @@ class InMemoryCatalogRepository:
             self.employees[_key(identity, value.employee_id)] = value
 
     def save_version(self, identity: IdentityContext, value: DigitalEmployeeVersion) -> None:
-        with self._employee_version_lock:
-            self.employee_versions[(*_key(identity, value.employee_id), value.version)] = value
+        self.save_employee_version(identity, value)
 
     def save_employee_version(self, identity: IdentityContext, value: DigitalEmployeeVersion) -> None:
-        self.save_version(identity, value)
+        """保存新版本或更新仍为草稿的版本，避免过期请求覆盖已发布快照。"""
+
+        key = (*_key(identity, value.employee_id), value.version)
+        with self._employee_version_lock:
+            current = self.employee_versions.get(key)
+            # 以锁内的持久状态为准，避免迟到的发布或草稿保存撤销版本下线。
+            if current is not None:
+                current.assert_mutable()
+            if value.status not in (LifecycleStatus.DRAFT, LifecycleStatus.PUBLISHED):
+                raise DomainError("INVALID_STATE", "只允许保存草稿或已发布员工版本")
+            self.employee_versions[key] = value
 
     def fork_employee_version(
         self, identity: IdentityContext, employee_id: str, source_version: int
@@ -259,7 +268,7 @@ class InMemoryCatalogRepository:
                 payload={"employee_id": employee_id, "version": version},
                 created_at=datetime.now(UTC),
             )
-            self.save_employee_version(identity, deprecated)
+            self.employee_versions[(*_key(identity, employee_id), version)] = deprecated
             self.audit_events.append(event)
             return deprecated
 
