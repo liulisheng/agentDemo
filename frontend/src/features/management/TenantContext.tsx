@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
 const STORAGE_KEY = 'agent-platform.fake-user'
@@ -39,6 +39,7 @@ export const TENANT_IDENTITY_OPTIONS: TenantIdentityOption[] = [
 interface TenantContextValue {
   fakeUser: string
   currentIdentity: TenantIdentityOption
+  getCurrentFakeUser: () => string
   setFakeUser: (userId: string) => void
 }
 
@@ -48,14 +49,26 @@ const fallbackIdentity = TENANT_IDENTITY_OPTIONS.find((item) => item.userId === 
 const TenantContext = createContext<TenantContextValue>({
   fakeUser: fallbackIdentity.userId,
   currentIdentity: fallbackIdentity,
+  getCurrentFakeUser: () => fallbackIdentity.userId,
   setFakeUser: () => undefined,
 })
 
+/** 提供当前租户身份，并让异步操作在回调中读取最新身份。 */
 export function TenantProvider({ children }: { children: ReactNode }) {
   const [fakeUser, setFakeUserState] = useState(() => {
     const stored = window.localStorage.getItem(STORAGE_KEY)
     return TENANT_IDENTITY_OPTIONS.some((item) => item.userId === stored) ? stored! : DEFAULT_USER
   })
+
+  const currentFakeUser = useRef(fakeUser)
+  const getCurrentFakeUser = useCallback(() => currentFakeUser.current, [])
+  const setFakeUser = useCallback((userId: string) => {
+    if (TENANT_IDENTITY_OPTIONS.some((item) => item.userId === userId)) {
+      // 渲染可能延后，异步回调需要立刻看到切换后的身份。
+      currentFakeUser.current = userId
+      setFakeUserState(userId)
+    }
+  }, [])
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, fakeUser)
@@ -67,13 +80,10 @@ export function TenantProvider({ children }: { children: ReactNode }) {
     return {
       fakeUser,
       currentIdentity,
-      setFakeUser: (userId: string) => {
-        if (TENANT_IDENTITY_OPTIONS.some((item) => item.userId === userId)) {
-          setFakeUserState(userId)
-        }
-      },
+      getCurrentFakeUser,
+      setFakeUser,
     }
-  }, [fakeUser])
+  }, [fakeUser, getCurrentFakeUser, setFakeUser])
 
   return <TenantContext.Provider value={value}>{children}</TenantContext.Provider>
 }

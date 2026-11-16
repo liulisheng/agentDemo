@@ -66,7 +66,7 @@ export function EmployeeVersionLifecycleActions({ employeeId, version }: {
   employeeId: string
   version: EmployeeVersion
 }) {
-  const { fakeUser } = useTenantContext()
+  const { fakeUser, getCurrentFakeUser } = useTenantContext()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [confirming, setConfirming] = useState(false)
@@ -75,18 +75,22 @@ export function EmployeeVersionLifecycleActions({ employeeId, version }: {
     queryFn: () => listActiveVersionDeployments(employeeId, version.version, fakeUser),
     enabled: confirming && version.status === 'PUBLISHED',
   })
-  const invalidateEmployee = () => Promise.all([
-    queryClient.invalidateQueries({ queryKey: ['digital-employees', fakeUser] }),
-    queryClient.invalidateQueries({ queryKey: ['digital-employee', fakeUser, employeeId] }),
-    queryClient.invalidateQueries({ queryKey: ['employee-versions', fakeUser, employeeId] }),
+  const invalidateEmployee = (userId: string) => Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['digital-employees', userId] }),
+    queryClient.invalidateQueries({ queryKey: ['digital-employee', userId, employeeId] }),
+    queryClient.invalidateQueries({ queryKey: ['employee-versions', userId, employeeId] }),
   ])
-  const fork = useMutation<EmployeeVersion, Error, { pathname: string; historyKey?: string }>({
-    mutationFn: () => forkEmployeeVersion(employeeId, version.version, fakeUser),
+  const fork = useMutation<EmployeeVersion, Error, { fakeUser: string; pathname: string; historyKey?: string }>({
+    mutationFn: (source) => forkEmployeeVersion(employeeId, version.version, source.fakeUser),
     onSuccess: async (created, source) => {
-      queryClient.setQueryData(['employee-version', fakeUser, employeeId, created.version], created)
-      await invalidateEmployee()
-      // 刷新可能移除发起卡片，浏览器历史条目仍能确定用户是否停留在原页面。
-      if (window.location.pathname !== source.pathname || window.history.state?.key !== source.historyKey) return
+      queryClient.setQueryData(['employee-version', source.fakeUser, employeeId, created.version], created)
+      await invalidateEmployee(source.fakeUser)
+      // 缓存刷新可能卸载来源卡片，通过当前身份和浏览器历史判断是否还应跳转。
+      if (
+        getCurrentFakeUser() !== source.fakeUser ||
+        window.location.pathname !== source.pathname ||
+        window.history.state?.key !== source.historyKey
+      ) return
       message.success(`已从 v${version.version} 创建草稿 v${created.version}`)
       navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/versions/${created.version}`, {
         state: { sourceVersion: version.version },
@@ -100,7 +104,7 @@ export function EmployeeVersionLifecycleActions({ employeeId, version }: {
       setConfirming(false)
       queryClient.setQueryData(['employee-version', fakeUser, employeeId, version.version], deprecated)
       await Promise.all([
-        invalidateEmployee(),
+        invalidateEmployee(fakeUser),
         queryClient.invalidateQueries({ queryKey: ['employee-version', fakeUser, employeeId, version.version] }),
         queryClient.invalidateQueries({ queryKey: ['deployments', fakeUser] }),
       ])
@@ -109,7 +113,9 @@ export function EmployeeVersionLifecycleActions({ employeeId, version }: {
   })
 
   const createDraft = () => {
+    if (getCurrentFakeUser() !== fakeUser) return
     fork.mutate({
+      fakeUser,
       pathname: window.location.pathname,
       historyKey: window.history.state?.key,
     })
