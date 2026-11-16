@@ -81,10 +81,13 @@ function buildTree(files: SkillFileSummary[]): FileTreeNode[] {
   return roots.map(convert)
 }
 
-/** 员工详情下的 Skill 文件树和编辑工作区，REFERENCE/已发布版本只读。 */
+/** Skill 精确版本的文件树和编辑工作区，REFERENCE/已发布版本只读。 */
 export function SkillFileWorkspacePage() {
   const { employeeId = '', skillId = '', version: versionParam = '1' } = useParams()
   const version = Number(versionParam)
+  const returnPath = employeeId
+    ? `/enterprise/employees/${encodeURIComponent(employeeId)}`
+    : '/enterprise/resources'
   const { fakeUser, currentIdentity } = useTenantContext()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
@@ -218,7 +221,9 @@ export function SkillFileWorkspacePage() {
     onSuccess: async (created) => {
       await queryClient.invalidateQueries({ queryKey: ['skill-files', fakeUser, skillId] })
       message.success(`已创建 Skill 草稿 v${created.version}`)
-      navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/skills/${encodeURIComponent(skillId)}/versions/${created.version}/files`)
+      navigate(employeeId
+        ? `/enterprise/employees/${encodeURIComponent(employeeId)}/skills/${encodeURIComponent(skillId)}/versions/${created.version}/files`
+        : `/enterprise/resources/skills/${encodeURIComponent(skillId)}/versions/${created.version}/files`)
     },
   })
 
@@ -310,8 +315,8 @@ export function SkillFileWorkspacePage() {
     <section className="management-page" aria-label="Skill 文件工作区">
       <div className="management-page-header">
         <div>
-          <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}`}>← 返回员工详情</Link>
-          <Text className="management-eyebrow">员工 Skill / v{version}</Text>
+          <Link to={returnPath}>← 返回{employeeId ? '员工详情' : '资源中心'}</Link>
+          <Text className="management-eyebrow">技能资源 / v{version}</Text>
           <Space align="center">
             <Title level={2}>Skill 文件工作区</Title>
             <Tag color={readOnly ? 'default' : 'blue'}>{readOnly ? '只读' : tree.status}</Tag>

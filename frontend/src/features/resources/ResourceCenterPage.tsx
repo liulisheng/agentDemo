@@ -48,6 +48,7 @@ import {
 } from '../../api/client'
 import type { HubGrant, HubImport, HubResourceSummary } from '../../api/client'
 import { useTenantContext } from '../management/TenantContext'
+import { ResourceCatalogPanel } from './ResourceCatalogPanel'
 
 const { Paragraph, Text, Title } = Typography
 
@@ -76,7 +77,7 @@ export function ResourceCenterPage() {
   const { fakeUser, currentIdentity } = useTenantContext()
   const queryClient = useQueryClient()
   const canManage = currentIdentity.roleName === '管理员'
-  const [activeTab, setActiveTab] = useState<'discover' | 'published' | 'imports'>('discover')
+  const [activeTab, setActiveTab] = useState<'catalog' | 'discover' | 'published' | 'imports'>('catalog')
   const [keyword, setKeyword] = useState('')
   const [resourceType, setResourceType] = useState<string>()
   const [selectedResource, setSelectedResource] = useState<HubResourceSummary>()
@@ -99,7 +100,7 @@ export function ResourceCenterPage() {
       resource_type: resourceType,
       limit: 100,
     }, fakeUser),
-    enabled: activeTab !== 'imports',
+    enabled: activeTab === 'discover' || activeTab === 'published',
   })
   const imports = useQuery({
     queryKey: ['hub-imports', fakeUser],
@@ -346,9 +347,9 @@ export function ResourceCenterPage() {
     <section className="management-page" aria-label="资源中心">
       <div className="management-page-header">
         <div>
-          <Text className="management-eyebrow">共享能力 / 资源中心</Text>
+          <Text className="management-eyebrow">租户能力 / 资源中心</Text>
           <Title level={2}>资源中心</Title>
-          <Paragraph type="secondary">发现租户共享的员工、Skill 和 Tool；复制后独立维护，引用在运行时只读。</Paragraph>
+          <Paragraph type="secondary">管理本租户技能与工具，也可发布、发现和导入共享资源。</Paragraph>
         </div>
         {canManage && activeTab === 'published' && (
           <Button type="primary" onClick={() => {
@@ -364,16 +365,20 @@ export function ResourceCenterPage() {
       </div>
 
       <Tabs
+        className="resource-center-tabs"
         activeKey={activeTab}
         onChange={(key) => setActiveTab(key as typeof activeTab)}
         items={[
+          { key: 'catalog', label: '技能与工具' },
           { key: 'discover', label: '发现资源' },
           { key: 'published', label: '我发布的' },
           { key: 'imports', label: '我导入的' },
         ]}
       />
 
-      {activeTab !== 'imports' && (
+      {activeTab === 'catalog' && <ResourceCatalogPanel />}
+
+      {(activeTab === 'discover' || activeTab === 'published') && (
         <Card className="management-card">
           <div className="management-filter-row">
             <Input.Search

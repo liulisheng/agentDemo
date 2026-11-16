@@ -6,6 +6,26 @@
 
 ## ADDED Requirements
 
+### Requirement: 租户资源中心提供本地技能与工具目录
+
+系统 SHALL 在资源中心向当前租户展示 Skill 与 Tool 目录，并允许管理员创建资源草稿、维护可编辑版本和发布不可变版本；员工绑定仍在员工 DRAFT 中按精确版本完成。
+
+#### Scenario: 管理员创建 Skill
+- **WHEN** 管理员在资源中心提交 Skill 名称、类型、指令和可选的已发布 Tool 依赖
+- **THEN** 系统创建当前租户 Skill DRAFT，并可从资源中心打开该精确版本的文件工作区
+
+#### Scenario: 管理员维护 Tool 草稿
+- **WHEN** 管理员在资源中心创建或编辑 Tool DRAFT 并提交输入 JSON Schema
+- **THEN** 系统校验顶层 Schema 为对象并保存草稿；发布后该版本不可原地编辑
+
+#### Scenario: 员工绑定能力
+- **WHEN** 管理员在员工版本中绑定已发布 Skill 或 Tool
+- **THEN** 系统只修改员工 DRAFT 的对应类型绑定，不隐式改写其他绑定和运行配置
+
+#### Scenario: 成员浏览租户目录
+- **WHEN** 成员打开资源中心的 Skill/Tool 目录
+- **THEN** 系统提供可读列表但不显示新建、编辑、分叉或发布写入口
+
 ### Requirement: 发布到资源中心的版本保持不可变
 
 系统 SHALL 以发布方租户和精确版本创建资源中心资源快照，并记录其依赖清单和内容摘要；已发布快照不得原地修改。

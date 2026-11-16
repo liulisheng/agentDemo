@@ -15,7 +15,7 @@ import { RunTracePage } from './features/runs/RunTrace'
 import { ChatWorkspace } from './features/platform/PlatformPages'
 
 export function App() {
-  // 管理控制台以租户上下文分区；Skill/Tool/文件工作区后续只从员工详情进入。
+  // 资源中心管理租户 Skill/Tool，员工工作台负责把精确版本绑定到员工草稿。
   return (
     <TenantProvider>
       <BrowserRouter>
@@ -35,6 +35,7 @@ export function App() {
             <Route path="employees/:employeeId/skills/new" element={<SkillCreationPage />} />
             <Route path="employees/:employeeId/skills/:skillId/versions/:version/files" element={<SkillFileWorkspacePage />} />
             <Route path="employees/:employeeId/tools/:toolId" element={<ToolManagementPage />} />
+            <Route path="resources/skills/:skillId/versions/:version/files" element={<SkillFileWorkspacePage />} />
             <Route path="resources" element={<ResourceCenterPage />} />
             <Route path="deployments" element={<DeploymentListPage />} />
           </Route>

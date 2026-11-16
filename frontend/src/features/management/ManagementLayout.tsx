@@ -31,6 +31,7 @@ export function ManagementLayout() {
             <Link
               key={item.path}
               className={selectedPath === item.path ? 'management-nav-link selected' : 'management-nav-link'}
+              aria-current={selectedPath === item.path ? 'page' : undefined}
               to={item.path}
             >
               {item.label}
@@ -62,6 +63,18 @@ export function ManagementLayout() {
             </select>
           </div>
         </Header>
+        <nav aria-label="管理导航（窄屏）" className="management-mobile-nav">
+          {navigation.map((item) => (
+            <Link
+              key={item.path}
+              className={selectedPath === item.path ? 'management-mobile-nav-link selected' : 'management-mobile-nav-link'}
+              aria-current={selectedPath === item.path ? 'page' : undefined}
+              to={item.path}
+            >
+              {item.label}
+            </Link>
+          ))}
+        </nav>
         <Content className="management-content">
           <Outlet />
         </Content>
