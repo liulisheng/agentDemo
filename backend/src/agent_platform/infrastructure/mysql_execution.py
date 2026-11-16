@@ -344,18 +344,33 @@ class MySqlExecutionRepository:
                 ),
             )
             created = cursor.rowcount == 1
-            cursor.execute(
-                "SELECT run_id, request_digest FROM runs "
-                "WHERE platform_id=%s AND tenant_id=%s AND session_id=%s AND idempotency_key=%s",
-                (identity.platform_id, identity.tenant_id, run.session_id, idempotency_key),
-            )
-            existing = cursor.fetchone()
+            existing = self._find_run_idempotency(cursor, identity, run.session_id, idempotency_key)
             if existing is None:
                 raise DomainError("CONFLICT", "Run 标识与现有记录冲突")
             if str(existing[1]) != run.prompt_digest:
                 raise DomainError("IDEMPOTENCY_CONFLICT", "幂等键对应的请求内容已改变")
             existing_run_id = str(existing[0])
         return self.get_run(identity, existing_run_id), created
+
+    @staticmethod
+    def _find_run_idempotency(
+        cursor: Any, identity: IdentityContext, session_id: str, idempotency_key: str
+    ) -> tuple[Any, ...] | None:
+        cursor.execute(
+            "SELECT run_id, request_digest FROM runs "
+            "WHERE platform_id=%s AND tenant_id=%s AND session_id=%s AND idempotency_key=%s",
+            (identity.platform_id, identity.tenant_id, session_id, idempotency_key),
+        )
+        return cursor.fetchone()
+
+    def get_run_by_idempotency(
+        self, identity: IdentityContext, session_id: str, idempotency_key: str
+    ) -> RunRecord | None:
+        """用现有幂等唯一键查找已提交的 Run，供服务重启或跨进程重放。"""
+
+        with self._reader() as (_, cursor):
+            existing = self._find_run_idempotency(cursor, identity, session_id, idempotency_key)
+        return self.get_run(identity, str(existing[0])) if existing is not None else None
 
     def acquire_lease(
         self, identity: IdentityContext, run_id: str, worker_id: str, *, lease_seconds: int = 30

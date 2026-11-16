@@ -49,7 +49,7 @@ class ControlPlaneService:
         self._runs: dict[tuple[str, str, str], RunRecord] = {}
         self._spans: dict[str, list[TraceSpan]] = {}
         self._usage: dict[str, UsageRecord] = {}
-        self._idempotency: dict[tuple[str, str, str, str], tuple[str, str]] = {}
+        self._idempotency: dict[tuple[str, str, str, str], str] = {}
 
     @staticmethod
     def _scope(identity: IdentityContext, resource_id: str) -> tuple[str, str, str]:
@@ -172,6 +172,28 @@ class ControlPlaneService:
             attributes=attributes,
         )
 
+    def _get_idempotent_run(
+        self,
+        identity: IdentityContext,
+        session_id: str,
+        idempotency_key: str | None,
+        prompt_digest: str,
+    ) -> RunRecord | None:
+        if not idempotency_key:
+            return None
+        local_run_id = self._idempotency.get((*self._scope(identity, session_id), idempotency_key))
+        if local_run_id is not None:
+            previous = self._get_run(identity, local_run_id)
+        elif self.persistence is not None and hasattr(self.persistence, "get_run_by_idempotency"):
+            previous = self.persistence.get_run_by_idempotency(identity, session_id, idempotency_key)
+        else:
+            return None
+        if previous is None:
+            return None
+        if previous.prompt_digest != prompt_digest:
+            raise DomainError("IDEMPOTENCY_CONFLICT", "幂等键对应的请求内容已改变")
+        return previous if local_run_id is not None else self._load_result(identity, previous)
+
     def create_run(
         self,
         identity: IdentityContext,
@@ -182,19 +204,24 @@ class ControlPlaneService:
         if not prompt.strip():
             raise DomainError("INVALID_ARGUMENT", "prompt 不能为空")
         session = self.get_session(identity, session_id)
+        prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        # 已提交请求按原摘要重放；只有新请求需要通过当前部署准入。
+        previous = self._get_idempotent_run(identity, session_id, idempotency_key, prompt_digest)
+        if previous is not None:
+            return previous
         if session.status != "ACTIVE":
             raise DomainError("INVALID_STATE", "Session 不是 ACTIVE 状态")
-        # 以本次状态读取为准入点；通过后允许完成，无需在 Runtime 完成时再次检查。
-        deployment = self._require_active_deployment(identity, session.deployment_id)
-        prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        if idempotency_key:
-            idempotency_index = (*self._scope(identity, session_id), idempotency_key)
-            previous = self._idempotency.get(idempotency_index)
+        try:
+            deployment = self._require_active_deployment(identity, session.deployment_id)
+        except DomainError as error:
+            if error.code != "DEPLOYMENT_DISABLED":
+                raise
+            # 首次查询与下线之间可能已有同键请求提交，拒绝前用新读取确认。
+            previous = self._get_idempotent_run(identity, session_id, idempotency_key, prompt_digest)
             if previous is not None:
-                previous_digest, previous_run_id = previous
-                if previous_digest != prompt_digest:
-                    raise DomainError("IDEMPOTENCY_CONFLICT", "幂等键对应的请求内容已改变")
-                return self._get_run(identity, previous_run_id)
+                return previous
+            raise
+
         resolved_agent = self.agent_resolver.resolve(identity, deployment)
         snapshot = resolved_agent.snapshot
         run = RunRecord(
@@ -225,14 +252,8 @@ class ControlPlaneService:
         if persistent_submission:
             existing_run, created = self.persistence.submit_run(identity, run, persistent_key)
             if not created:
-                self._load_result(identity, existing_run)
-                self._runs[self._scope(identity, existing_run.run_id)] = existing_run
-                if idempotency_key:
-                    self._idempotency[(*self._scope(identity, session_id), idempotency_key)] = (
-                        prompt_digest,
-                        existing_run.run_id,
-                    )
-                return existing_run
+                # 其他请求可能仍在执行，后续重放继续从仓储读取最新状态。
+                return self._load_result(identity, existing_run)
             fencing_token = self.persistence.acquire_lease(
                 identity, run.run_id, generate_database_id(), lease_seconds=30
             )
@@ -407,10 +428,7 @@ class ControlPlaneService:
                     runtime_result_ref=result.runtime_result_ref,
                 )
         if idempotency_key:
-            self._idempotency[(*self._scope(identity, session_id), idempotency_key)] = (
-                prompt_digest,
-                run.run_id,
-            )
+            self._idempotency[(*self._scope(identity, session_id), idempotency_key)] = run.run_id
         return run
 
     def test_employee_version(

@@ -32,6 +32,12 @@ class ExecutionRepository(Protocol):
         self, identity: IdentityContext, run: RunRecord, idempotency_key: str
     ) -> tuple[RunRecord, bool]: ...
 
+    def get_run_by_idempotency(
+        self, identity: IdentityContext, session_id: str, idempotency_key: str
+    ) -> RunRecord | None:
+        """按平台、租户及 Session 范围读取已提交的 Run。"""
+        ...
+
     def acquire_lease(
         self, identity: IdentityContext, run_id: str, worker_id: str, *, lease_seconds: int = 30
     ) -> int | None: ...
