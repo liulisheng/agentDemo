@@ -34,7 +34,6 @@ import {
 import type {
   DeploymentSummary,
   EmployeeVersion,
-  ExecutionProfileSummary,
   ModelRouteSummary,
   SkillSummary,
   ToolSummary,
@@ -86,10 +85,6 @@ export function EmployeeVersionLifecycleActions({ employeeId, version }: {
     onSuccess: async (created) => {
       queryClient.setQueryData(['employee-version', fakeUser, employeeId, created.version], created)
       await invalidateEmployee()
-      message.success(`已从 v${version.version} 创建草稿 v${created.version}`)
-      navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/versions/${created.version}`, {
-        state: { sourceVersion: version.version },
-      })
     },
     onError: (error) => message.error(error.message),
   })
@@ -107,9 +102,21 @@ export function EmployeeVersionLifecycleActions({ employeeId, version }: {
     },
   })
 
+  const createDraft = () => {
+    fork.mutate(undefined, {
+      // 缓存更新跟随请求完成，跳转回调只在发起路由仍挂载时运行。
+      onSuccess: (created) => {
+        message.success(`已从 v${version.version} 创建草稿 v${created.version}`)
+        navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/versions/${created.version}`, {
+          state: { sourceVersion: version.version },
+        })
+      },
+    })
+  }
+
   return (
     <>
-      <Button loading={fork.isPending} disabled={deprecate.isPending} onClick={() => fork.mutate()}>
+      <Button loading={fork.isPending} disabled={deprecate.isPending} onClick={createDraft}>
         基于此版本创建草稿
       </Button>
       {version.status === 'PUBLISHED' && (
@@ -170,7 +177,7 @@ interface VersionFormValues {
   system_prompt: string
   skill_keys: string[]
   tool_keys: string[]
-  execution_profile_id: string
+  execution_profile_key: string
   model_route_id?: string
   workspace_profile_id?: string
   workspace_profile_version?: number
@@ -202,7 +209,8 @@ function selectedRefs(keys: string[]) {
 export function EmployeeVersionEditorPage() {
   const { employeeId = '', version: versionParam = '1' } = useParams()
   const versionNumber = Number(versionParam)
-  const sourceVersion = useLocation().state?.sourceVersion as number | undefined
+  const location = useLocation()
+  const sourceVersion = location.state?.sourceVersion as number | undefined
   const { fakeUser, currentIdentity } = useTenantContext()
   const queryClient = useQueryClient()
   const [form] = Form.useForm<VersionFormValues>()
@@ -249,7 +257,7 @@ export function EmployeeVersionEditorPage() {
       system_prompt: version.data.system_prompt,
       skill_keys: versionSkillRefs(version.data),
       tool_keys: versionToolRefs(version.data),
-      execution_profile_id: version.data.execution_profile_id,
+      execution_profile_key: refKey(version.data.execution_profile_id, version.data.execution_profile_version),
       model_route_id: version.data.model_route_id ?? undefined,
       workspace_profile_id: version.data.workspace_profile_id ?? undefined,
       workspace_profile_version: version.data.workspace_profile_version ?? undefined,
@@ -311,13 +319,31 @@ export function EmployeeVersionEditorPage() {
     const lookup = new Map((tools.data?.items ?? []).map((tool) => [refKey(tool.id, tool.version), tool]))
     return (selectedValues?.tool_keys ?? []).map((key) => lookup.get(key)).filter((item): item is ToolSummary => Boolean(item))
   }, [selectedValues?.tool_keys, tools.data?.items])
-  const selectedProfile = (profiles.data?.items ?? []).find(
-    (profile) => profile.id === selectedValues?.execution_profile_id,
+  const profileItems = profiles.data?.items ?? []
+  const selectedProfileKey = selectedValues?.execution_profile_key
+  const selectedProfile = profileItems.find(
+    (profile) => profile.version !== undefined && refKey(profile.id, profile.version) === selectedProfileKey,
   )
-  const toolPolicy = selectedProfile?.tool_policy ?? []
+  const profileOptions = profileItems.flatMap((profile) => {
+    if (profile.version === undefined) return []
+    return [{
+      value: refKey(profile.id, profile.version),
+      label: `${profile.engine_name} · ${profile.model_alias} · v${profile.version} · ${profile.status}`,
+      disabled: profile.status !== 'PUBLISHED',
+    }]
+  })
+  if (selectedProfileKey && !selectedProfile) {
+    const pinned = parseRefKey(selectedProfileKey)
+    profileOptions.push({
+      value: selectedProfileKey,
+      label: `固定配置 ${pinned.resource_id} · v${pinned.version}`,
+      disabled: true,
+    })
+  }
+  const toolPolicy = selectedProfile?.tool_policy
   const declaredToolIds = new Set(selectedSkills.flatMap((skill) => skill.allowed_tool_ids))
   const effectiveTools = selectedTools.filter(
-    (tool) => declaredToolIds.has(tool.id) && (toolPolicy.length === 0 || toolPolicy.includes(tool.name)),
+    (tool) => declaredToolIds.has(tool.id) && (toolPolicy?.length === 0 || toolPolicy?.includes(tool.name)),
   )
   const excludedTools = selectedTools.filter((tool) => !effectiveTools.includes(tool))
   const archived = employee.data?.status === 'ARCHIVED'
@@ -325,24 +351,28 @@ export function EmployeeVersionEditorPage() {
   const canEditDraft = admin && !archived && version.data?.status === 'DRAFT'
 
   const saveMutation = useMutation({
-    mutationFn: (values: VersionFormValues) => updateEmployeeVersion(
-      employeeId,
-      versionNumber,
-      {
-        system_prompt: values.system_prompt,
-        skill_version_refs: selectedRefs(values.skill_keys),
-        tool_version_refs: selectedRefs(values.tool_keys),
-        execution_profile_id: values.execution_profile_id,
-        execution_profile_version: selectedProfile?.version ?? version.data?.execution_profile_version ?? 1,
-        model_route_id: values.model_route_id || null,
-        workspace_profile_id: values.workspace_profile_id || null,
-        workspace_profile_version: values.workspace_profile_version ?? null,
-        sandbox_profile_id: values.sandbox_profile_id || null,
-        sandbox_profile_version: values.sandbox_profile_version ?? null,
-        approval_policy: values.approval_policy,
-      },
-      fakeUser,
-    ),
+    mutationFn: (values: VersionFormValues) => {
+      // 直接提交表单选中的精确引用，目录更新不会改变已固定的版本号。
+      const executionProfile = parseRefKey(values.execution_profile_key)
+      return updateEmployeeVersion(
+        employeeId,
+        versionNumber,
+        {
+          system_prompt: values.system_prompt,
+          skill_version_refs: selectedRefs(values.skill_keys),
+          tool_version_refs: selectedRefs(values.tool_keys),
+          execution_profile_id: executionProfile.resource_id,
+          execution_profile_version: executionProfile.version,
+          model_route_id: values.model_route_id || null,
+          workspace_profile_id: values.workspace_profile_id || null,
+          workspace_profile_version: values.workspace_profile_version ?? null,
+          sandbox_profile_id: values.sandbox_profile_id || null,
+          sandbox_profile_version: values.sandbox_profile_version ?? null,
+          approval_policy: values.approval_policy,
+        },
+        fakeUser,
+      )
+    },
     onSuccess: async (saved) => {
       initializedKey.current = `${fakeUser}:${employeeId}:${versionNumber}`
       setDirty(false)
@@ -446,7 +476,7 @@ export function EmployeeVersionEditorPage() {
         {admin && !archived && (currentVersion.status === 'PUBLISHED' || currentVersion.status === 'DEPRECATED') && (
           <div className="employee-version-actions">
             <EmployeeVersionLifecycleActions
-              key={`${fakeUser}:${employeeId}:${versionNumber}`}
+              key={`${location.key}:${fakeUser}:${employeeId}:${versionNumber}`}
               employeeId={employeeId}
               version={currentVersion}
             />
@@ -522,11 +552,17 @@ export function EmployeeVersionEditorPage() {
               <div className="employee-tool-policy-panel">
                 <Text strong>当前版本可用范围</Text>
                 <Paragraph type="secondary">运行时会同时检查员工选择、Skill 声明范围和执行策略。</Paragraph>
-                <Space wrap>
-                  {effectiveTools.map((tool) => <Tag key={tool.id} color="green">可用 · {tool.name}</Tag>)}
-                  {excludedTools.map((tool) => <Tag key={tool.id} color="orange">被策略排除 · {tool.name}</Tag>)}
-                  {selectedTools.length === 0 && <Text type="secondary">选择 Skill 和 Tool 后显示结果</Text>}
-                </Space>
+                {toolPolicy ? (
+                  <Space wrap>
+                    {effectiveTools.map((tool) => <Tag key={tool.id} color="green">可用 · {tool.name}</Tag>)}
+                    {excludedTools.map((tool) => <Tag key={tool.id} color="orange">被策略排除 · {tool.name}</Tag>)}
+                    {selectedTools.length === 0 && <Text type="secondary">选择 Skill 和 Tool 后显示结果</Text>}
+                  </Space>
+                ) : (
+                  <Text type="secondary">
+                    {selectedProfileKey ? '无法读取固定版本的工具策略，暂时无法预览。' : '请选择执行配置以预览。'}
+                  </Text>
+                )}
               </div>
               {canEditDraft && (
                 <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`}>打开 Tool 管理</Link>
@@ -537,15 +573,8 @@ export function EmployeeVersionEditorPage() {
           <Card className="management-card employee-editor-card" title="运行配置">
             <Paragraph type="secondary">先设置模型与审批策略；可选执行环境默认收起。</Paragraph>
             <div className="employee-runtime-primary-fields">
-              <Form.Item name="execution_profile_id" label="ExecutionProfile" rules={[{ required: true, message: '请选择执行配置' }]}>
-                <Select
-                  options={(profiles.data?.items ?? []).map((profile: ExecutionProfileSummary) => ({
-                    value: profile.id,
-                    label: `${profile.engine_name} · ${profile.model_alias} · ${profile.status}`,
-                    disabled: profile.status !== 'PUBLISHED',
-                  }))}
-                  placeholder="选择执行配置"
-                />
+              <Form.Item name="execution_profile_key" label="ExecutionProfile" rules={[{ required: true, message: '请选择执行配置' }]}>
+                <Select options={profileOptions} placeholder="选择执行配置" />
               </Form.Item>
               <Form.Item name="model_route_id" label="ModelRoute">
                 <Select
@@ -570,6 +599,8 @@ export function EmployeeVersionEditorPage() {
               items={[{
                 key: 'advanced',
                 label: '高级环境参数（可选）',
+                // 保持未展开的字段注册，保存其他字段时也会提交固定环境配置。
+                forceRender: true,
                 children: (
                   <div className="employee-runtime-advanced-fields">
                     <Form.Item label="Workspace Profile">
@@ -596,9 +627,11 @@ export function EmployeeVersionEditorPage() {
                 ),
               }]}
             />
-            <Paragraph className="employee-profile-policy" type="secondary">
-              Profile 工具策略：{selectedProfile?.tool_policy?.join('、') || '不额外限制'}
-            </Paragraph>
+            {toolPolicy && (
+              <Paragraph className="employee-profile-policy" type="secondary">
+                Profile 工具策略：{toolPolicy.join('、') || '不额外限制'}
+              </Paragraph>
+            )}
           </Card>
         </div>
       </Form>
