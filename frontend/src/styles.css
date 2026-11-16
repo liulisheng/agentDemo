@@ -157,7 +157,12 @@ body { margin: 0; min-width: 320px; }
 .employee-version-summary { display: flex; flex-wrap: wrap; gap: 10px 24px; margin-top: 20px; padding-top: 18px; border-top: 1px solid #eef1f5; color: #758094; font-size: 13px; }
 .employee-version-editor-sections { display: grid; width: min(100%, 1040px); gap: 24px; margin: 0 auto; }
 .employee-editor-header { align-items: center; }
-.employee-editor-header .ant-space { flex-wrap: wrap; justify-content: flex-end; }
+.employee-version-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.employee-version-actions .ant-btn:focus-visible, .employee-version-actions a:focus-visible {
+  outline: 3px solid #48818a;
+  outline-offset: 3px;
+}
+.employee-version-deployments { max-height: 10rem; overflow-y: auto; overflow-wrap: anywhere; }
 .employee-editor-card { border-radius: 14px; }
 .employee-editor-card .ant-card-head { min-height: 70px; padding: 0 28px; }
 .employee-editor-card .ant-card-head-title { font-size: 16px; font-weight: 650; }
@@ -290,6 +295,7 @@ body { color: var(--ink); background: var(--canvas); }
   .management-page-header, .employee-workspace-header, .employee-resource-toolbar, .employee-version-workspace-header, .employee-version-card-header { align-items: stretch; flex-direction: column; }
   .employee-workspace-title { font-size: 25px !important; }
   .employee-resource-card .ant-card-head { padding: 0 18px; }
+  .employee-version-actions { align-items: stretch; flex-direction: column; }
   .employee-resource-card .ant-card-body, .employee-overview-card .ant-card-body, .employee-version-card .ant-card-body, .employee-editor-card .ant-card-body { padding: 20px; }
   .employee-runtime-primary-fields, .employee-runtime-advanced-fields { grid-template-columns: 1fr; gap: 0; }
   .employee-resource-item { align-items: flex-start; flex-direction: column; }

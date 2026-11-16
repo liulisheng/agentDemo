@@ -15,11 +15,14 @@ import {
   message,
 } from 'antd'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import {
+  deprecateEmployeeVersion,
+  forkEmployeeVersion,
   getDigitalEmployee,
   getEmployeeVersion,
+  listDeployments,
   listExecutionProfiles,
   listModelRoutes,
   listSkills,
@@ -29,6 +32,7 @@ import {
   updateEmployeeVersion,
 } from '../../api/client'
 import type {
+  DeploymentSummary,
   EmployeeVersion,
   ExecutionProfileSummary,
   ModelRouteSummary,
@@ -38,6 +42,129 @@ import type {
 import { useTenantContext } from '../management/TenantContext'
 
 const { Title, Text, Paragraph } = Typography
+
+/** 员工版本时间线和配置页使用相同的状态名称。 */
+export const employeeVersionStatusLabels: Readonly<Partial<Record<string, string>>> = {
+  DRAFT: '草稿',
+  PUBLISHED: '已发布',
+  DEPRECATED: '已下线',
+}
+
+async function listActiveVersionDeployments(employeeId: string, version: number, fakeUser: string) {
+  const deployments: DeploymentSummary[] = []
+  let cursor: string | null | undefined
+  // 部署列表按员工分页，需要读完才能显示该版本的实际影响范围。
+  do {
+    const page = await listDeployments({ employee_id: employeeId, status: 'ACTIVE', limit: 200, cursor }, fakeUser)
+    deployments.push(...page.items.filter((item) => item.version === version))
+    cursor = page.next_cursor
+  } while (cursor)
+  return deployments
+}
+
+/** 两个版本入口复用分叉、下线确认和缓存刷新逻辑。 */
+export function EmployeeVersionLifecycleActions({ employeeId, version }: {
+  employeeId: string
+  version: EmployeeVersion
+}) {
+  const { fakeUser } = useTenantContext()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [confirming, setConfirming] = useState(false)
+  const deploymentImpact = useQuery({
+    queryKey: ['active-version-deployments', fakeUser, employeeId, version.version],
+    queryFn: () => listActiveVersionDeployments(employeeId, version.version, fakeUser),
+    enabled: confirming && version.status === 'PUBLISHED',
+  })
+  const invalidateEmployee = () => Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['digital-employees', fakeUser] }),
+    queryClient.invalidateQueries({ queryKey: ['digital-employee', fakeUser, employeeId] }),
+    queryClient.invalidateQueries({ queryKey: ['employee-versions', fakeUser, employeeId] }),
+  ])
+  const fork = useMutation({
+    mutationFn: () => forkEmployeeVersion(employeeId, version.version, fakeUser),
+    onSuccess: async (created) => {
+      queryClient.setQueryData(['employee-version', fakeUser, employeeId, created.version], created)
+      await invalidateEmployee()
+      message.success(`已从 v${version.version} 创建草稿 v${created.version}`)
+      navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/versions/${created.version}`, {
+        state: { sourceVersion: version.version },
+      })
+    },
+    onError: (error) => message.error(error.message),
+  })
+  const deprecate = useMutation({
+    mutationFn: () => deprecateEmployeeVersion(employeeId, version.version, fakeUser),
+    onSuccess: async (deprecated) => {
+      setConfirming(false)
+      queryClient.setQueryData(['employee-version', fakeUser, employeeId, version.version], deprecated)
+      await Promise.all([
+        invalidateEmployee(),
+        queryClient.invalidateQueries({ queryKey: ['employee-version', fakeUser, employeeId, version.version] }),
+        queryClient.invalidateQueries({ queryKey: ['deployments', fakeUser] }),
+      ])
+      message.success(`版本 v${version.version} 已下线`)
+    },
+  })
+
+  return (
+    <>
+      <Button loading={fork.isPending} disabled={deprecate.isPending} onClick={() => fork.mutate()}>
+        基于此版本创建草稿
+      </Button>
+      {version.status === 'PUBLISHED' && (
+        <Button
+          danger
+          disabled={fork.isPending}
+          loading={deprecate.isPending}
+          onClick={() => {
+            deprecate.reset()
+            setConfirming(true)
+          }}
+        >
+          下线版本
+        </Button>
+      )}
+      <Modal
+        title={`下线版本 v${version.version}？`}
+        open={confirming && version.status === 'PUBLISHED'}
+        onCancel={() => setConfirming(false)}
+        onOk={() => deprecate.mutate()}
+        okText="确认下线版本"
+        okButtonProps={{
+          danger: true,
+          disabled: deploymentImpact.isFetching || !deploymentImpact.isSuccess,
+        }}
+        cancelText="取消"
+        confirmLoading={deprecate.isPending}
+      >
+        {deploymentImpact.isFetching && <Paragraph role="status">正在查询运行中的 Deployment…</Paragraph>}
+        {deploymentImpact.isError && (
+          <Alert
+            type="error"
+            showIcon
+            message="无法查询运行中的 Deployment"
+            description={deploymentImpact.error.message}
+            action={<Button onClick={() => void deploymentImpact.refetch()}>重试</Button>}
+          />
+        )}
+        {deploymentImpact.isSuccess && !deploymentImpact.isFetching && (
+          <>
+            <Paragraph>有 {deploymentImpact.data.length} 个 ACTIVE Deployment 使用此版本。</Paragraph>
+            {deploymentImpact.data.length > 0 && (
+              <ul className="employee-version-deployments" tabIndex={0} aria-label="使用此版本的 ACTIVE Deployment">
+                {deploymentImpact.data.map((item) => <li key={item.id}>{item.id}</li>)}
+              </ul>
+            )}
+          </>
+        )}
+        <Paragraph>下线后，今后新建部署和回滚均无法选择此版本。现有 Deployment 不会自动停止。</Paragraph>
+        <Paragraph>如需停止运行，请前往<Link to="/enterprise/deployments">部署记录</Link>逐个下线。</Paragraph>
+        {deprecate.isError && <Alert type="error" showIcon message={deprecate.error.message} />}
+      </Modal>
+    </>
+  )
+}
 
 interface VersionFormValues {
   system_prompt: string
@@ -71,13 +198,13 @@ function selectedRefs(keys: string[]) {
   return keys.map(parseRefKey).filter((item) => item.resource_id && Number.isFinite(item.version))
 }
 
-/** DRAFT 员工版本向导：编辑指令、精确资源版本和执行配置。 */
+/** 员工版本配置页：编辑草稿或查看历史版本的固定配置。 */
 export function EmployeeVersionEditorPage() {
   const { employeeId = '', version: versionParam = '1' } = useParams()
   const versionNumber = Number(versionParam)
+  const sourceVersion = useLocation().state?.sourceVersion as number | undefined
   const { fakeUser, currentIdentity } = useTenantContext()
   const queryClient = useQueryClient()
-  const navigate = useNavigate()
   const [form] = Form.useForm<VersionFormValues>()
   const [dirty, setDirty] = useState(false)
   const [testOpen, setTestOpen] = useState(false)
@@ -131,6 +258,9 @@ export function EmployeeVersionEditorPage() {
       approval_policy: version.data.approval_policy,
     })
     setDirty(false)
+    setTestResult(null)
+    setTestOpen(false)
+    setPublishOpen(false)
   }, [employeeId, fakeUser, form, version.data, versionNumber])
 
   const selectedValues = Form.useWatch([], form) as VersionFormValues | undefined
@@ -190,8 +320,9 @@ export function EmployeeVersionEditorPage() {
     (tool) => declaredToolIds.has(tool.id) && (toolPolicy.length === 0 || toolPolicy.includes(tool.name)),
   )
   const excludedTools = selectedTools.filter((tool) => !effectiveTools.includes(tool))
-  const readOnly = version.data?.status !== 'DRAFT' || employee.data?.status === 'ARCHIVED'
+  const archived = employee.data?.status === 'ARCHIVED'
   const admin = currentIdentity.roleName === '管理员'
+  const canEditDraft = admin && !archived && version.data?.status === 'DRAFT'
 
   const saveMutation = useMutation({
     mutationFn: (values: VersionFormValues) => updateEmployeeVersion(
@@ -243,14 +374,6 @@ export function EmployeeVersionEditorPage() {
     },
   })
 
-  const runTest = async () => {
-    if (dirty) {
-      message.warning('请先保存草稿，再测试当前版本')
-      return
-    }
-    testMutation.mutate()
-  }
-
   useEffect(() => {
     if (!dirty) return
     const handler = (event: BeforeUnloadEvent) => {
@@ -283,6 +406,10 @@ export function EmployeeVersionEditorPage() {
   }
 
   const currentVersion = version.data
+  const statusLabel = employeeVersionStatusLabels[currentVersion.status] ?? currentVersion.status
+  const editorTitle = currentVersion.status === 'DRAFT'
+    ? canEditDraft ? '编辑草稿' : '查看草稿'
+    : `${statusLabel}版本`
   return (
     <section className="management-page" aria-label="员工版本编辑器">
       <div className="management-page-header employee-editor-header">
@@ -290,15 +417,20 @@ export function EmployeeVersionEditorPage() {
           <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}`}>
             ← 返回员工详情
           </Link>
-          <Text className="management-eyebrow">{employee.data.name} / 版本 v{versionNumber}</Text>
+          <Text className="management-eyebrow">{employee.data.name}</Text>
           <Space align="center">
-            <Title level={2}>员工版本配置</Title>
-            <Tag color={currentVersion.status === 'PUBLISHED' ? 'green' : 'blue'}>{currentVersion.status}</Tag>
+            <Title level={2}>{editorTitle} v{versionNumber}</Title>
+            <Tag color={currentVersion.status === 'PUBLISHED' ? 'green' : currentVersion.status === 'DRAFT' ? 'blue' : 'default'}>{statusLabel}</Tag>
           </Space>
-          <Paragraph type="secondary">绑定精确 Skill/Tool 版本，并预览执行配置的有效工具交集。</Paragraph>
+          {currentVersion.status === 'DRAFT' && typeof sourceVersion === 'number' && (
+            <Paragraph type="secondary">基于版本 v{sourceVersion} 创建</Paragraph>
+          )}
+          {canEditDraft && (
+            <Text type="secondary" role="status">{dirty ? '有未保存的修改' : '草稿已保存'}</Text>
+          )}
         </div>
-        {admin && !readOnly && (
-          <Space>
+        {canEditDraft && (
+          <div className="employee-version-actions">
             <Link
               className="ant-btn ant-btn-default"
               to={`/enterprise/employees/${encodeURIComponent(employeeId)}/skills/new`}
@@ -306,14 +438,29 @@ export function EmployeeVersionEditorPage() {
               新建 Skill 草稿
             </Link>
             <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`}>管理 Tool</Link>
-            <Button onClick={() => setTestOpen(true)}>测试版本</Button>
+            <Button loading={testMutation.isPending} onClick={() => setTestOpen(true)}>测试版本</Button>
             <Button type="primary" loading={saveMutation.isPending} onClick={() => form.submit()}>保存草稿</Button>
             <Button type="primary" ghost onClick={() => setPublishOpen(true)} disabled={dirty}>发布版本</Button>
-          </Space>
+          </div>
+        )}
+        {admin && !archived && (currentVersion.status === 'PUBLISHED' || currentVersion.status === 'DEPRECATED') && (
+          <div className="employee-version-actions">
+            <EmployeeVersionLifecycleActions
+              key={`${fakeUser}:${employeeId}:${versionNumber}`}
+              employeeId={employeeId}
+              version={currentVersion}
+            />
+          </div>
         )}
       </div>
 
-      {readOnly && <Alert type="info" showIcon message="此版本只读" description="已发布版本和已归档员工版本不可编辑。" />}
+      {!admin && (
+        <Alert type="info" showIcon message={`当前身份：${currentIdentity.label}`} description="成员可查看配置。版本变更需由租户管理员执行。" />
+      )}
+      {archived && <Alert type="info" showIcon message="员工已归档，版本配置仅供查看。" />}
+      {!archived && admin && currentVersion.status !== 'DRAFT' && (
+        <Alert type="info" showIcon message="此版本的配置只读。创建草稿后可编辑继承的配置。" />
+      )}
       {(skills.isError || tools.isError || profiles.isError || modelRoutes.isError) && (
         <Alert type="error" showIcon message="依赖目录加载失败" description="Skill、Tool、ExecutionProfile 或 ModelRoute 加载失败，请重试。" />
       )}
@@ -330,9 +477,11 @@ export function EmployeeVersionEditorPage() {
       <Form<VersionFormValues>
         form={form}
         layout="vertical"
-        disabled={readOnly || !admin}
+        disabled={!canEditDraft}
         onValuesChange={() => setDirty(true)}
-        onFinish={(values) => saveMutation.mutate(values)}
+        onFinish={(values) => {
+          if (canEditDraft) saveMutation.mutate(values)
+        }}
       >
         <div className="employee-version-editor-sections">
           <Card className="management-card employee-editor-card" title="角色指令" aria-label="角色指令">
@@ -379,7 +528,9 @@ export function EmployeeVersionEditorPage() {
                   {selectedTools.length === 0 && <Text type="secondary">选择 Skill 和 Tool 后显示结果</Text>}
                 </Space>
               </div>
-              <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`}>打开 Tool 管理</Link>
+              {canEditDraft && (
+                <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`}>打开 Tool 管理</Link>
+              )}
             </Card>
           </section>
 
@@ -460,7 +611,7 @@ export function EmployeeVersionEditorPage() {
 
       <Modal
         title="测试当前草稿版本"
-        open={testOpen}
+        open={canEditDraft && testOpen}
         onCancel={() => setTestOpen(false)}
         onOk={() => {
           if (dirty) {
@@ -487,7 +638,7 @@ export function EmployeeVersionEditorPage() {
 
       <Modal
         title="发布员工版本"
-        open={publishOpen}
+        open={canEditDraft && publishOpen}
         onCancel={() => setPublishOpen(false)}
         onOk={() => publishMutation.mutate()}
         okText="确认发布"

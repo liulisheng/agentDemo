@@ -35,6 +35,7 @@ import {
 import type { DigitalEmployeeDetail, EmployeeVersion, SkillSummary, ToolSummary } from '../../api/client'
 import { useTenantContext } from '../management/TenantContext'
 import { EmployeeResourcePickerDrawer } from './EmployeeResourcePickerDrawer'
+import { EmployeeVersionLifecycleActions, employeeVersionStatusLabels } from './EmployeeVersionEditorPage'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -320,7 +321,7 @@ export function EmployeeDetailPage() {
                         aria-label="Skill 所属员工版本"
                         value={selected?.version}
                         onChange={setSelectedVersion}
-                        options={orderedVersions.map((item) => ({ value: item.version, label: `v${item.version} · ${item.status}` }))}
+                        options={orderedVersions.map((item) => ({ value: item.version, label: `v${item.version} · ${employeeVersionStatusLabels[item.status] ?? item.status}` }))}
                         style={{ minWidth: 190 }}
                       />
                     )}
@@ -395,11 +396,13 @@ export function EmployeeDetailPage() {
                         aria-label="Tool 所属员工版本"
                         value={selected?.version}
                         onChange={setSelectedVersion}
-                        options={orderedVersions.map((item) => ({ value: item.version, label: `v${item.version} · ${item.status}` }))}
+                        options={orderedVersions.map((item) => ({ value: item.version, label: `v${item.version} · ${employeeVersionStatusLabels[item.status] ?? item.status}` }))}
                         style={{ minWidth: 190 }}
                       />
                     )}
-                    <Button onClick={() => navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`)}>管理 Tools</Button>
+                    {canConfigure && (
+                      <Button onClick={() => navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/tools/new`)}>管理 Tools</Button>
+                    )}
                     {canConfigure && selected && selected.status !== 'DEPRECATED' && (
                       <Button type="primary" loading={forkVersionMutation.isPending && forkKind === 'tool'} onClick={() => openResourcePicker('tool')}>
                         绑定 Tool
@@ -465,26 +468,39 @@ export function EmployeeDetailPage() {
                     <Title level={3}>版本与发布</Title>
                     <Paragraph type="secondary">每个版本固定自己的 Skills、Tools 和运行配置。</Paragraph>
                   </div>
-                  {canConfigure && <Button type="primary" onClick={() => setCreateVersionOpen(true)}>新建草稿版本</Button>}
+                  {canConfigure && <Button type="primary" onClick={() => setCreateVersionOpen(true)}>新建空白草稿</Button>}
                 </div>
+                {!canEdit && (
+                  <Alert type="info" showIcon message={`当前身份：${currentIdentity.label}`} description="成员可查看配置。版本变更需由租户管理员执行。" />
+                )}
+                {employeeIsArchived && <Alert type="info" showIcon message="员工已归档，版本配置仅供查看。" />}
                 {versions.isLoading && <div className="management-loading"><Spin /> 正在加载版本…</div>}
                 {versions.isError && <Alert type="error" showIcon message={(versions.error as Error).message} />}
-                {versions.isSuccess && orderedVersions.length === 0 && <Empty description="还没有版本；创建 DRAFT 开始配置。" />}
+                {versions.isSuccess && orderedVersions.length === 0 && <Empty description="还没有版本。" />}
                 <div className="employee-version-card-list">
                   {orderedVersions.map((item) => (
                     <Card className="management-card employee-version-card" key={item.version}>
                       <div className="employee-version-card-header">
                         <Space size={12} wrap>
                           <Title level={4}>版本 v{item.version}</Title>
-                          <Tag color={item.status === 'PUBLISHED' ? 'green' : item.status === 'DRAFT' ? 'blue' : 'default'}>{item.status}</Tag>
+                          <Tag color={item.status === 'PUBLISHED' ? 'green' : item.status === 'DRAFT' ? 'blue' : 'default'}>{employeeVersionStatusLabels[item.status] ?? item.status}</Tag>
                         </Space>
-                        <Space wrap>
+                        <div className="employee-version-actions">
                           <Button type="link" onClick={() => { setSelectedVersion(item.version); setActiveTab('skills') }}>查看 Skills</Button>
                           <Button type="link" onClick={() => { setSelectedVersion(item.version); setActiveTab('tools') }}>查看 Tools</Button>
-                          {item.status === 'DRAFT'
-                            ? <Button type="primary" onClick={() => openEditor(item.version)}>继续配置</Button>
-                            : <Text type="secondary">固定版本</Text>}
-                        </Space>
+                          {canConfigure && item.status === 'DRAFT' ? (
+                            <Button type="primary" onClick={() => openEditor(item.version)}>编辑草稿</Button>
+                          ) : (
+                            <Button onClick={() => openEditor(item.version)}>查看配置</Button>
+                          )}
+                          {canConfigure && (item.status === 'PUBLISHED' || item.status === 'DEPRECATED') && (
+                            <EmployeeVersionLifecycleActions
+                              key={`${fakeUser}:${employeeId}:${item.version}`}
+                              employeeId={employeeId}
+                              version={item}
+                            />
+                          )}
+                        </div>
                       </div>
                       <div className="employee-version-summary">
                         <span>{item.skill_version_refs.length} Skills</span>

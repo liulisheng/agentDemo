@@ -366,6 +366,19 @@ export async function forkEmployeeVersion(
   )
 }
 
+/** 下线指定员工版本，已有部署保留其当前状态。 */
+export async function deprecateEmployeeVersion(
+  employeeId: string,
+  version: number,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<EmployeeVersion> {
+  return request(
+    `/api/v1/digital-employees/${encodeURIComponent(employeeId)}/versions/${version}/deprecate`,
+    fakeUser,
+    { method: 'POST' },
+  )
+}
+
 export async function createEmployeeVersion(
   employeeId: string,
   input: {
