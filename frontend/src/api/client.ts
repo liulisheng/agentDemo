@@ -123,12 +123,13 @@ export interface ModelRouteSummary {
   }
 }
 
+/** 部署列表和状态转换返回的部署及其固定版本摘要。 */
 export interface DeploymentSummary {
   id: string
   tenant_id: string
   employee_id: string
   version: number
-  status: string
+  status: 'ACTIVE' | 'DISABLED'
   version_summary: {
     version: number
     status: string
@@ -592,6 +593,16 @@ export async function rollbackDeployment(
     method: 'POST',
     body: jsonBody({ employee_id: employeeId, version }),
   })
+}
+
+/** 下线指定部署，停止接收新会话和新运行。 */
+export async function disableDeployment(deploymentId: string, fakeUser = DEFAULT_FAKE_USER): Promise<DeploymentSummary> {
+  return request(`/api/v1/deployments/${encodeURIComponent(deploymentId)}/disable`, fakeUser, { method: 'POST' })
+}
+
+/** 重新上线固定版本仍可用的部署。 */
+export async function enableDeployment(deploymentId: string, fakeUser = DEFAULT_FAKE_USER): Promise<DeploymentSummary> {
+  return request(`/api/v1/deployments/${encodeURIComponent(deploymentId)}/enable`, fakeUser, { method: 'POST' })
 }
 
 export interface AuditEventQuery {

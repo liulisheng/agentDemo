@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
   Button,
@@ -15,35 +15,47 @@ import {
   message,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import {
+  ApiError,
   createDeployment,
+  disableDeployment,
+  enableDeployment,
+  getDigitalEmployee,
   listAuditEvents,
   listDeployments,
   listDigitalEmployees,
   listEmployeeVersions,
   rollbackDeployment,
 } from '../../api/client'
-import type { AuditEvent, DeploymentSummary, EmployeeVersion } from '../../api/client'
+import type { DeploymentSummary } from '../../api/client'
 import { useTenantContext } from '../management/TenantContext'
 
 const { Paragraph, Text, Title } = Typography
 
-/** Deployment 列表：选择发布版本、回滚并查看租户审计记录。 */
+const deploymentStatusLabels = { ACTIVE: '已上线', DISABLED: '已下线' }
+
+/** 提供部署创建、回滚、上下线和审计入口，身份切换时重置操作状态。 */
 export function DeploymentListPage() {
-  const { fakeUser, currentIdentity } = useTenantContext()
+  const { fakeUser } = useTenantContext()
+  return <DeploymentList key={fakeUser} />
+}
+
+function DeploymentList() {
+  const { fakeUser, currentIdentity, getCurrentFakeUser } = useTenantContext()
   const queryClient = useQueryClient()
   const isAdmin = currentIdentity.roleName === '管理员'
   const [employeeFilter, setEmployeeFilter] = useState<string>()
-  const [statusFilter, setStatusFilter] = useState<string>()
+  const [statusFilter, setStatusFilter] = useState<DeploymentSummary['status']>()
   const [cursorStack, setCursorStack] = useState<(string | null)[]>([null])
   const [createOpen, setCreateOpen] = useState(false)
   const [createEmployeeId, setCreateEmployeeId] = useState<string>()
   const [createVersion, setCreateVersion] = useState<number>()
   const [rollbackTarget, setRollbackTarget] = useState<DeploymentSummary>()
   const [rollbackVersion, setRollbackVersion] = useState<number>()
+  const [statusTarget, setStatusTarget] = useState<DeploymentSummary>()
   const [auditDeploymentId, setAuditDeploymentId] = useState<string>()
   const cursor = cursorStack[cursorStack.length - 1] ?? null
 
@@ -60,6 +72,22 @@ export function DeploymentListPage() {
     queryKey: ['employee-options', fakeUser],
     queryFn: () => listDigitalEmployees({ limit: 100 }, fakeUser),
   })
+  const employees = new Map(employeeOptions.data?.items.map((employee) => [employee.id, employee]))
+  // 员工选项只读首批数据。需要重新上线的部署按员工 ID 补查，避免把缺失状态当作未归档。
+  const missingEmployeeIds = [...new Set((deployments.data?.items ?? [])
+    .filter((item) => isAdmin && item.status === 'DISABLED' &&
+      item.version_summary.status === 'PUBLISHED' && !employees.has(item.employee_id))
+    .map((item) => item.employee_id))]
+  const employeeDetails = useQueries({
+    queries: missingEmployeeIds.map((employeeId) => ({
+      queryKey: ['digital-employee', fakeUser, employeeId],
+      queryFn: () => getDigitalEmployee(employeeId, fakeUser),
+      enabled: !employeeOptions.isPending,
+    })),
+  })
+  for (const { data } of employeeDetails) {
+    if (data) employees.set(data.id, data)
+  }
   const versionEmployeeId = rollbackTarget?.employee_id ?? createEmployeeId
   const publishedVersions = useQuery({
     queryKey: ['employee-versions', fakeUser, versionEmployeeId, 'PUBLISHED'],
@@ -113,11 +141,48 @@ export function DeploymentListPage() {
     },
   })
 
-  const employeeNames = useMemo(
-    () => new Map((employeeOptions.data?.items ?? []).map((employee) => [employee.id, employee.name])),
-    [employeeOptions.data?.items],
-  )
-  const columns = useMemo<ColumnsType<DeploymentSummary>>(() => [
+  const statusMutation = useMutation({
+    mutationFn: (item: DeploymentSummary) => item.status === 'ACTIVE'
+      ? disableDeployment(item.id, fakeUser)
+      : enableDeployment(item.id, fakeUser),
+    onSuccess: async (updated) => {
+      await invalidateDeployments()
+      // 审计入口只在发起身份仍然有效时打开。
+      if (getCurrentFakeUser() !== fakeUser) return
+      setStatusTarget(undefined)
+      setAuditDeploymentId(updated.id)
+      message.success(updated.status === 'DISABLED' ? '部署已下线' : '部署已重新上线')
+    },
+    onError: async (error) => {
+      if (!(error instanceof ApiError) || error.status !== 409) return
+      await Promise.all([
+        invalidateDeployments(),
+        queryClient.invalidateQueries({ queryKey: ['employee-options', fakeUser] }),
+        queryClient.invalidateQueries({ queryKey: ['digital-employee', fakeUser] }),
+      ])
+    },
+  })
+
+  const enableBlockedReason = (item: DeploymentSummary) => {
+    if (item.version_summary.status === 'DEPRECATED') return '固定员工版本已下线'
+    if (item.version_summary.status !== 'PUBLISHED') return '固定员工版本尚未发布'
+    const employee = employees.get(item.employee_id)
+    if (employee?.status === 'ARCHIVED') return '员工已归档'
+    if (!employee) {
+      const employeeDetail = employeeDetails[missingEmployeeIds.indexOf(item.employee_id)]
+      return employeeDetail?.isError ? '无法确认员工状态' : '正在确认员工状态…'
+    }
+    return undefined
+  }
+  const currentStatusTarget = deployments.data?.items.find((item) => item.id === statusTarget?.id)
+  const statusTargetChanged = Boolean(statusTarget && (
+    currentStatusTarget?.status !== statusTarget.status || currentStatusTarget.version !== statusTarget.version
+  ))
+  const statusBlockedReason = currentStatusTarget?.status === 'DISABLED'
+    ? enableBlockedReason(currentStatusTarget)
+    : undefined
+  const statusActionLabel = statusTarget?.status === 'ACTIVE' ? '下线' : '重新上线'
+  const columns: ColumnsType<DeploymentSummary> = [
     {
       title: '数字员工',
       dataIndex: 'employee_id',
@@ -125,9 +190,10 @@ export function DeploymentListPage() {
       render: (employeeId: string, item) => (
         <Space direction="vertical" size={0}>
           <Link to={`/enterprise/employees/${encodeURIComponent(employeeId)}`}>
-            {employeeNames.get(employeeId) ?? employeeId}
+            {employees.get(employeeId)?.name ?? employeeId}
           </Link>
           <Text type="secondary">Deployment {item.id}</Text>
+          <Tag color={item.status === 'ACTIVE' ? 'green' : 'default'}>{deploymentStatusLabels[item.status]}</Tag>
         </Space>
       ),
     },
@@ -141,34 +207,45 @@ export function DeploymentListPage() {
           <Text type="secondary">
             {item.version_summary.skill_count} Skill · {item.version_summary.tool_count} Tool
           </Text>
+          <Text type="secondary">
+            {item.version_summary.execution_profile_id} · v{item.version_summary.execution_profile_version}
+          </Text>
         </Space>
       ),
     },
-    {
-      title: '执行配置',
-      key: 'profile',
-      render: (_: unknown, item) => (
-        <Text>{item.version_summary.execution_profile_id} · v{item.version_summary.execution_profile_version}</Text>
-      ),
-    },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      key: 'status',
-      render: (value: string) => <Tag color={value === 'ACTIVE' ? 'green' : 'default'}>{value}</Tag>,
-    },
-    {
+  ]
+  if (isAdmin) {
+    columns.push({
       title: '操作',
       key: 'actions',
-      width: 190,
-      render: (_: unknown, item) => (
-        <Space>
-          <Button type="link" onClick={() => setAuditDeploymentId(item.id)}>审计记录</Button>
-          {isAdmin && <Button type="link" onClick={() => { setRollbackTarget(item); setRollbackVersion(undefined) }}>回滚</Button>}
-        </Space>
-      ),
-    },
-  ], [employeeNames, isAdmin])
+      render: (_: unknown, item) => {
+        const blockedReason = item.status === 'DISABLED' ? enableBlockedReason(item) : undefined
+        return (
+          <>
+            <div className="deployment-row-actions">
+              <Button type="link" onClick={() => setAuditDeploymentId(item.id)}>审计记录</Button>
+              <Button type="link" onClick={() => { setRollbackTarget(item); setRollbackVersion(undefined) }}>回滚</Button>
+              <Button
+                type="link"
+                danger={item.status === 'ACTIVE'}
+                disabled={Boolean(blockedReason)}
+                aria-describedby={blockedReason ? `deployment-enable-reason-${item.id}` : undefined}
+                onClick={() => {
+                  statusMutation.reset()
+                  setStatusTarget(item)
+                }}
+              >
+                {item.status === 'ACTIVE' ? '下线' : '重新上线'}
+              </Button>
+            </div>
+            {blockedReason && (
+              <Text type="secondary" id={`deployment-enable-reason-${item.id}`}>{blockedReason}</Text>
+            )}
+          </>
+        )
+      },
+    })
+  }
 
   const closeCreate = () => {
     setCreateOpen(false)
@@ -182,7 +259,7 @@ export function DeploymentListPage() {
         <div>
           <Text className="management-eyebrow">运行管理 / Deployment</Text>
           <Title level={2}>部署记录</Title>
-          <Paragraph type="secondary">每个 Deployment 固定一个已发布员工版本；回滚只改变当前指向，不改写历史 Run。</Paragraph>
+          <Paragraph type="secondary">每个 Deployment 固定一个员工版本。回滚只改变当前指向，历史 Run 保留原版本快照。</Paragraph>
         </div>
         {isAdmin && <Button type="primary" onClick={() => setCreateOpen(true)}>新建 Deployment</Button>}
       </div>
@@ -204,7 +281,10 @@ export function DeploymentListPage() {
             placeholder="全部状态"
             value={statusFilter}
             onChange={(value) => { setStatusFilter(value); setCursorStack([null]) }}
-            options={[{ value: 'ACTIVE', label: 'ACTIVE' }, { value: 'DISABLED', label: 'DISABLED' }]}
+            options={[
+              { value: 'ACTIVE', label: deploymentStatusLabels.ACTIVE },
+              { value: 'DISABLED', label: deploymentStatusLabels.DISABLED },
+            ]}
             style={{ width: 170 }}
           />
           <Text className="management-stat">{deployments.data?.items.length ?? 0} 条 / 第 {cursorStack.length} 页</Text>
@@ -216,7 +296,7 @@ export function DeploymentListPage() {
         )}
         {deployments.isSuccess && deployments.data.items.length > 0 && (
           <>
-            <Table<DeploymentSummary> rowKey="id" columns={columns} dataSource={deployments.data.items} pagination={false} />
+            <Table<DeploymentSummary> className="deployment-table" rowKey="id" columns={columns} dataSource={deployments.data.items} pagination={false} />
             <div className="management-pagination">
               <Text type="secondary">部署 ID 稳定排序</Text>
               <Space>
@@ -233,11 +313,15 @@ export function DeploymentListPage() {
       {auditDeploymentId && (
         <Card
           className="management-card"
-          title="Deployment 审计事件"
+          title={`Deployment ${auditDeploymentId} 审计事件`}
           extra={<Button onClick={() => setAuditDeploymentId(undefined)}>关闭</Button>}
         >
           {auditEvents.isLoading && <div className="management-loading">正在读取审计记录…</div>}
-          {auditEvents.isError && <Alert type="error" message={(auditEvents.error as Error).message} />}
+          {auditEvents.isError && (
+            <Alert type="error" message={auditEvents.error instanceof ApiError && auditEvents.error.status === 403
+              ? '当前身份无权查看部署审计事件'
+              : '部署审计事件加载失败'} />
+          )}
           {auditEvents.data && auditEvents.data.items.length === 0 && <Empty description="尚无审计事件" />}
           {auditEvents.data?.items.map((event) => (
             <div className="audit-event-row" key={event.event_id}>
@@ -245,11 +329,55 @@ export function DeploymentListPage() {
                 <Text strong>{event.event_type}</Text>
                 <Text type="secondary">{event.created_at} · {event.actor_user_id ?? event.actor_type}</Text>
               </Space>
-              <Text>{String(event.payload.previous_version ?? '—')} → {String(event.payload.version ?? '—')}</Text>
+              {event.event_type === 'DEPLOYMENT_DISABLED' && <Text>已上线 → 已下线</Text>}
+              {event.event_type === 'DEPLOYMENT_ENABLED' && <Text>已下线 → 已上线</Text>}
+              {event.event_type !== 'DEPLOYMENT_DISABLED' && event.event_type !== 'DEPLOYMENT_ENABLED' && (
+                <Text>{String(event.payload.previous_version ?? '—')} → {String(event.payload.version ?? '—')}</Text>
+              )}
             </div>
           ))}
         </Card>
       )}
+
+      <Modal
+        title={`确认${statusActionLabel}部署？`}
+        open={Boolean(statusTarget)}
+        onCancel={() => { if (!statusMutation.isPending) setStatusTarget(undefined) }}
+        onOk={() => {
+          if (!statusTarget || statusTargetChanged || statusBlockedReason || statusMutation.isPending ||
+            !isAdmin || getCurrentFakeUser() !== fakeUser) return
+          statusMutation.mutate(statusTarget)
+        }}
+        okText={`确认${statusActionLabel}`}
+        cancelText="取消"
+        confirmLoading={statusMutation.isPending}
+        okButtonProps={{
+          danger: statusTarget?.status === 'ACTIVE',
+          disabled: statusTargetChanged || Boolean(statusBlockedReason),
+        }}
+        cancelButtonProps={{ disabled: statusMutation.isPending }}
+        destroyOnHidden
+      >
+        {statusTarget && (
+          <Space direction="vertical" size={12} className="deployment-modal-content deployment-status-confirmation">
+            <Descriptions size="small" column={1}>
+              <Descriptions.Item label="员工">{employees.get(statusTarget.employee_id)?.name ?? statusTarget.employee_id}</Descriptions.Item>
+              <Descriptions.Item label="固定版本">v{statusTarget.version_summary.version}</Descriptions.Item>
+              <Descriptions.Item label="Deployment ID">{statusTarget.id}</Descriptions.Item>
+            </Descriptions>
+            <Text>{statusTarget.status === 'ACTIVE'
+              ? '下线后，该部署将停止接收新会话和新运行。已开始的运行可以继续完成。'
+              : '重新上线后，该部署将恢复接收新会话和新运行。'}</Text>
+            {statusTargetChanged && <Alert type="warning" message="部署已变化，请关闭弹窗并重新选择操作。" />}
+            {statusBlockedReason && <Alert type="warning" message={statusBlockedReason} />}
+            {statusMutation.isError && (
+              <Alert type="error" showIcon message={`${statusActionLabel}失败`} description={
+                statusMutation.error instanceof ApiError ? statusMutation.error.message : '请求失败，请稍后重试。'
+              } />
+            )}
+          </Space>
+        )}
+      </Modal>
 
       <Modal
         title="新建 Deployment"
@@ -305,7 +433,7 @@ export function DeploymentListPage() {
         {rollbackTarget && (
           <Space direction="vertical" size={16} className="deployment-modal-content">
             <Descriptions size="small" column={1}>
-              <Descriptions.Item label="员工">{employeeNames.get(rollbackTarget.employee_id) ?? rollbackTarget.employee_id}</Descriptions.Item>
+              <Descriptions.Item label="员工">{employees.get(rollbackTarget.employee_id)?.name ?? rollbackTarget.employee_id}</Descriptions.Item>
               <Descriptions.Item label="当前版本">v{rollbackTarget.version}</Descriptions.Item>
             </Descriptions>
             <div>

@@ -70,6 +70,11 @@ body { margin: 0; min-width: 320px; }
 .modal-warning { margin-top: 12px; }
 .deployment-modal-content { width: 100%; }
 .deployment-modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.deployment-row-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.deployment-row-actions .ant-btn { padding-inline: 4px; }
+.deployment-row-actions .ant-btn:focus-visible { outline: 3px solid #48818a; outline-offset: 1px; }
+.deployment-table .ant-table-cell,
+.deployment-status-confirmation { overflow-wrap: anywhere; }
 .audit-event-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 4px; border-bottom: 1px solid #edf0f5; }
 .audit-event-row:last-child { border-bottom: 0; }
 .hub-resource-name { padding-left: 0; font-weight: 600; }
@@ -263,6 +268,10 @@ body { color: var(--ink); background: var(--canvas); }
 }
 
 @media (max-width: 720px) {
+  .deployment-table table { table-layout: fixed; }
+  .deployment-table .ant-table-thead > tr > th,
+  .deployment-table .ant-table-tbody > tr > td { padding: 8px; vertical-align: top; }
+  .deployment-row-actions { align-items: flex-start; flex-direction: column; }
   .management-sider { display: none; }
   .management-content { padding: 20px 14px 28px; }
   .management-content { min-height: calc(100vh - 116px); }
