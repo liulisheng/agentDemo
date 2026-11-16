@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
+from threading import Lock
 
 from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.context import BusinessContextAssembler
@@ -50,6 +53,8 @@ class ControlPlaneService:
         self._spans: dict[str, list[TraceSpan]] = {}
         self._usage: dict[str, UsageRecord] = {}
         self._idempotency: dict[tuple[str, str, str, str], str] = {}
+        self._local_submission_locks: dict[tuple[str, str, str, str], tuple[Lock, int]] = {}
+        self._local_submission_locks_guard = Lock()
 
     @staticmethod
     def _scope(identity: IdentityContext, resource_id: str) -> tuple[str, str, str]:
@@ -194,6 +199,24 @@ class ControlPlaneService:
             raise DomainError("IDEMPOTENCY_CONFLICT", "幂等键对应的请求内容已改变")
         return previous if local_run_id is not None else self._load_result(identity, previous)
 
+    @contextmanager
+    def _serialize_local_submission(self, key: tuple[str, str, str, str]) -> Iterator[None]:
+        # 总锁只保护锁表。登记等候者后才等单键锁，并在最后一个请求退出时清理。
+        with self._local_submission_locks_guard:
+            entry = self._local_submission_locks.get(key)
+            lock, users = entry if entry is not None else (Lock(), 0)
+            self._local_submission_locks[key] = (lock, users + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._local_submission_locks_guard:
+                _, users = self._local_submission_locks[key]
+                if users == 1:
+                    del self._local_submission_locks[key]
+                else:
+                    self._local_submission_locks[key] = (lock, users - 1)
+
     def create_run(
         self,
         identity: IdentityContext,
@@ -201,9 +224,25 @@ class ControlPlaneService:
         prompt: str,
         idempotency_key: str | None = None,
     ) -> RunRecord:
+        """提交新运行或按当前租户和会话的幂等键返回原运行。"""
+
         if not prompt.strip():
             raise DomainError("INVALID_ARGUMENT", "prompt 不能为空")
         session = self.get_session(identity, session_id)
+        persistent_submission = self.persistence is not None and hasattr(self.persistence, "submit_run")
+        if idempotency_key and not persistent_submission:
+            with self._serialize_local_submission((*self._scope(identity, session_id), idempotency_key)):
+                return self._submit_run(identity, session, prompt, idempotency_key)
+        return self._submit_run(identity, session, prompt, idempotency_key)
+
+    def _submit_run(
+        self,
+        identity: IdentityContext,
+        session: SessionRecord,
+        prompt: str,
+        idempotency_key: str | None,
+    ) -> RunRecord:
+        session_id = session.session_id
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         # 已提交请求按原摘要重放；只有新请求需要通过当前部署准入。
         previous = self._get_idempotent_run(identity, session_id, idempotency_key, prompt_digest)
@@ -301,6 +340,10 @@ class ControlPlaneService:
             parent_span_id=run.span_id,
             attributes={"snapshot_id": context_snapshot.snapshot_id, "total_tokens": context_snapshot.total_tokens},
         )
+        if idempotency_key and not persistent_submission:
+            # 调用 Runtime 前绑定该 Run，异常或后处理失败也不能重复执行。
+            self._runs[self._scope(identity, run.run_id)] = run
+            self._idempotency[(*self._scope(identity, session_id), idempotency_key)] = run.run_id
         try:
             result = self.runtime.run(
                 RuntimeRequest(
@@ -427,7 +470,7 @@ class ControlPlaneService:
                     runtime_session_ref=result.runtime_session_ref,
                     runtime_result_ref=result.runtime_result_ref,
                 )
-        if idempotency_key:
+        if idempotency_key and persistent_submission:
             self._idempotency[(*self._scope(identity, session_id), idempotency_key)] = run.run_id
         return run
 
@@ -518,10 +561,13 @@ class ControlPlaneService:
             for span in self._spans.get(run.trace_id, [])
             if span.run_id in {"", run.run_id}
         )
+        usage = self._usage.get(run_id)
+        if usage is None:
+            usage = UsageRecord(0, 0, 0, source="UNAVAILABLE")
         return RunTimeline(
             run=run,
             spans=spans,
-            usage=self._usage[run_id],
+            usage=usage,
             runtime_reference=run.runtime_reference,
         )
 
