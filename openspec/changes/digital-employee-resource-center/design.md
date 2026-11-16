@@ -172,6 +172,13 @@ sequenceDiagram
 
 数据库仅使用 V003 已存在的版本和绑定表；本次不新增 migration。`GET /skills?include_versions=true` 为绑定选择器提供历史精确版本，默认 Skill 目录仍返回每个 Skill 的最新版本。
 
+### 7. 员工版本下线与 Deployment 启停分别控制
+
+- 员工版本走 `DRAFT → PUBLISHED → DEPRECATED`。管理员编辑现有 DRAFT，或将未归档员工的 PUBLISHED/DEPRECATED 版本分叉为新 DRAFT，保留精确资源、运行和审批配置。只读历史版本不可原地编辑；下线只改状态并在同一事务写入 `EMPLOYEE_VERSION_DEPRECATED`。
+- Deployment 走 `ACTIVE ⇄ DISABLED`，与版本状态独立。新建和回滚只接受 PUBLISHED；已有 ACTIVE Deployment 可继续运行 DEPRECATED 版本。管理员重新上线时服务端在事务内校验员工未归档及锁定后的固定版本仍为 PUBLISHED；启停只改状态，并记录 `DEPLOYMENT_DISABLED` / `DEPLOYMENT_ENABLED`。
+- 新建 Session 与新 Run 需通过 ACTIVE 部署准入；部署下线不取消已通过准入的运行。已提交 Run 的同键同摘要重放先于部署状态校验，仍返回原 Run。
+- 复用现有 `digital_employee_versions`、`deployments`、`audit_events` 和版本绑定，不需要 migration。接口和状态详见[接口与状态流程](../../../docs/接口与状态流程.md)，操作与响应式交互详见[前端交互设计](../../../docs/前端交互设计.md)。
+
 ## 数据库结构设计
 
 可执行 SQL 仍只放 `docs/migrations/`；V003 已冻结，本设计拆成 V004 Hub 和 V005 Skill 文件包。新表和字段都加中文 MySQL COMMENT，并以 `information_schema.TABLES/COLUMNS` 校验。知识库表和检索模型不纳入本 Change。

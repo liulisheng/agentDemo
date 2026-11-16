@@ -52,6 +52,10 @@
 - **WHEN** 相同租户复用幂等键但请求摘要发生变化
 - **THEN** 系统返回稳定的幂等冲突且保留原 Run
 
+#### Scenario: Replay an existing Run after its Deployment is disabled
+- **WHEN** 原 Run 已提交，其关联 Deployment 已下线，且调用者在同一平台、租户和 Session 使用相同幂等键及请求摘要重试
+- **THEN** 返回原 Run（相同 `run_id`）且不重复运行；同键摘要不一致返回 `IDEMPOTENCY_CONFLICT`，没有匹配历史 Run 的新请求返回 `DEPLOYMENT_DISABLED`（409）
+
 ### Requirement: Stale workers cannot change persistent run state
 系统 SHALL 使用单调递增的 fencing token 限制 Worker 对 Session 和 Run 持久状态的更新。
 

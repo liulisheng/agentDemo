@@ -63,6 +63,17 @@
 - [x] 7.5 Skill 文件工作区对 PUBLISHED 本地 Skill 显示创建草稿版本入口，对 DRAFT 显示精确版本发布入口；COPY/REFERENCE 只读边界、入口文件和发布失败信息可见。
 - [x] 7.6 更新中文 API、数据流程和状态文档，运行后端/前端测试、Ruff、build、OpenSpec strict validation，并在 Docker 验证从资源添加到新员工草稿及 Skill 文件发布的闭环。
 
+## 8. 员工版本与部署生命周期
+
+- [x] 8.1 分离员工版本 PUBLISHED/DEPRECATED 与 Deployment ACTIVE/DISABLED 的领域状态；历史 Deployment 继续读取固定版本。
+- [x] 8.2 扩展管理员 fork 和版本下线 API，在持久化层保留不可变配置、串行分配分叉版本号并原子写入下线审计。
+- [x] 8.3 实现 Deployment 启停、状态与审计事务、新建与回滚版本校验、Session/Run 准入以及已提交 Run 的幂等重放。
+- [x] 8.4 为员工时间线和编辑器增加状态对应操作、下线影响提示、分叉导航以及精确 ExecutionProfile 和折叠环境参数保留。
+- [x] 8.5 为部署记录增加下线及重新上线确认，重新读取当前固定版本，刷新部署与审计并保持筛选分页可返回。
+- [x] 8.6 同步中文文档与 OpenSpec，记录代码评审和已通过的编译、构建、差异校验。
+- [ ] 8.7 取得测试授权后，补充或运行本轮生命周期的 API、内存/MySQL、审计、并发、Run 幂等与既有运行完成回归。
+- [ ] 8.8 取得浏览器验收授权后，验证管理员/成员视图、窄屏布局、键盘焦点、确认和错误提示，以及跨身份导航。
+
 ## Workflow follow-up
 
 - 知识库实体、文件索引、检索和 Hub COPY/REFERENCE 作为后续 Change；本 Change 不创建知识库页面或查询 API。
