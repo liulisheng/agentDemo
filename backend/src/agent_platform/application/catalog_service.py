@@ -217,7 +217,10 @@ class InMemoryCatalogRepository:
         with self._employee_version_lock:
             current = self.employee_versions.get(key)
             # 以锁内的持久状态为准，避免迟到的发布或草稿保存撤销版本下线。
-            if current is not None:
+            if current is not None and current.status is not LifecycleStatus.DRAFT:
+                # 与 MySQL 一致，相同快照视为保存成功，无需重写。
+                if current == value:
+                    return
                 current.assert_mutable()
             if value.status not in (LifecycleStatus.DRAFT, LifecycleStatus.PUBLISHED):
                 raise DomainError("INVALID_STATE", "只允许保存草稿或已发布员工版本")
