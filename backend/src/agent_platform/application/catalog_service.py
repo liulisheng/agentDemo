@@ -1105,6 +1105,9 @@ class CatalogService:
         if employee.status is LifecycleStatus.ARCHIVED:
             raise DomainError("INVALID_STATE", "已归档员工不能创建新的部署")
         employee_version = self.repository.get_employee_version(identity, employee_id, version)
+        # 历史部署可引用已下线版本，新建部署仍只接受已发布版本。
+        if employee_version.status is not LifecycleStatus.PUBLISHED:
+            raise DomainError("INVALID_STATE", "只能部署已发布员工版本")
         deployment = Deployment(
             deployment_id=self._new_id("deployment"),
             tenant_id=identity.tenant_id,

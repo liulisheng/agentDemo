@@ -21,6 +21,7 @@ class LifecycleStatus(StrEnum):
     PUBLISHED = "PUBLISHED"
     DEPRECATED = "DEPRECATED"
     ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
     ARCHIVED = "ARCHIVED"
 
 
@@ -418,6 +419,8 @@ class DigitalEmployeeVersion:
             raise DomainError("IMMUTABLE_VERSION", "已发布员工版本不可修改")
 
     def deprecate(self) -> DigitalEmployeeVersion:
+        """结束已发布版本的新用途，保留固定配置和历史部署。"""
+
         if self.status is not LifecycleStatus.PUBLISHED:
             raise DomainError("INVALID_STATE", "只有已发布员工版本才能废弃")
         return replace(self, status=LifecycleStatus.DEPRECATED)
@@ -438,7 +441,7 @@ class DigitalEmployeeVersionPage:
 
 @dataclass(frozen=True, slots=True)
 class Deployment:
-    """把一个已发布员工版本固定到租户范围。"""
+    """在租户内固定员工版本；历史部署可继续引用已下线的版本。"""
 
     deployment_id: str
     tenant_id: str
@@ -450,12 +453,29 @@ class Deployment:
         _text(self.deployment_id, "deployment_id")
         _scope(self.tenant_id)
         _text(self.employee_id, "employee_id")
-        if self.employee_version.status is not LifecycleStatus.PUBLISHED:
-            raise ValueError("deployment requires a published employee version")
+        # 历史部署在版本下线后仍需可读；新建和回滚的目标由应用服务校验。
+        if self.employee_version.status not in (LifecycleStatus.PUBLISHED, LifecycleStatus.DEPRECATED):
+            raise ValueError("deployment requires a published or deprecated employee version")
         if self.employee_version.tenant_id != self.tenant_id:
             raise ValueError("deployment scope does not match employee version")
         if self.employee_version.employee_id != self.employee_id:
             raise ValueError("deployment employee does not match version")
+
+    def disable(self) -> Deployment:
+        """下线运行入口，保留固定的员工版本供历史记录引用。"""
+
+        if self.status is not LifecycleStatus.ACTIVE:
+            raise DomainError("INVALID_STATE", "只有上线的部署才能下线")
+        return replace(self, status=LifecycleStatus.DISABLED)
+
+    def enable(self) -> Deployment:
+        """重新开放已下线的入口，前提是固定版本仍可用于部署。"""
+
+        if self.status is not LifecycleStatus.DISABLED:
+            raise DomainError("INVALID_STATE", "只有已下线的部署才能重新上线")
+        if self.employee_version.status is not LifecycleStatus.PUBLISHED:
+            raise DomainError("INVALID_STATE", "固定的员工版本必须已发布才能重新上线")
+        return replace(self, status=LifecycleStatus.ACTIVE)
 
     def rollback(self, employee_version: DigitalEmployeeVersion) -> Deployment:
         """创建指向旧发布版本的新绑定，已有 Run 的快照不受影响。"""

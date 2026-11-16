@@ -11,6 +11,7 @@ from agent_platform.domain.catalog import (
     DigitalEmployee,
     DigitalEmployeeVersion,
     ExecutionProfile,
+    LifecycleStatus,
     SkillVersion,
     ToolVersion,
 )
@@ -32,6 +33,12 @@ class CatalogRepository(Protocol):
     def delete_employee(self, identity: IdentityContext, employee_id: str) -> None: ...
 
     def save_employee_version(self, identity: IdentityContext, value: DigitalEmployeeVersion) -> None: ...
+
+    def deprecate_employee_version(
+        self, identity: IdentityContext, employee_id: str, version: int
+    ) -> DigitalEmployeeVersion:
+        """在租户事务内下线精确员工版本并写入审计；已下线时返回当前版本。"""
+        ...
 
     def get_employee_version(
         self, identity: IdentityContext, employee_id: str, version: int
@@ -122,6 +129,12 @@ class CatalogRepository(Protocol):
     def list_capability_bindings(
         self, identity: IdentityContext, employee_id: str, version: int
     ) -> tuple[CapabilityBinding, ...]: ...
+
+    def transition_deployment(
+        self, identity: IdentityContext, deployment_id: str, target_status: LifecycleStatus
+    ) -> Deployment:
+        """在租户事务内校验并切换 ACTIVE 或 DISABLED 状态，同时写入审计。"""
+        ...
 
 
 class DeploymentRepository(Protocol):
