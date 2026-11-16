@@ -937,9 +937,10 @@ class MySqlExecutionRepository:
             else None
         )
         state = str(row[6]).lower()
+        # 持久化的 RUNNING 代表 Worker 租约仍在，历史读取继续将未确认结果映射为 UNKNOWN。
         runtime_status = (
             RuntimeStatus(state)
-            if state in {item.value for item in RuntimeStatus}
+            if state in {item.value for item in RuntimeStatus} and state != RuntimeStatus.RUNNING.value
             else RuntimeStatus.UNKNOWN
         )
         return RunRecord(

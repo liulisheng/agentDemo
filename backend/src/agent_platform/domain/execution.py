@@ -7,8 +7,9 @@ from enum import StrEnum
 
 
 class RuntimeStatus(StrEnum):
-    """平台统一的 Runtime 结果状态。"""
+    """平台统一的 Runtime 执行状态。"""
 
+    RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"

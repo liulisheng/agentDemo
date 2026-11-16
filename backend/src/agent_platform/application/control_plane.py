@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from threading import Lock
 
 from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.context import BusinessContextAssembler
-from agent_platform.application.resolvers import AgentResolver
+from agent_platform.application.resolvers import AgentResolver, ResolvedAgent
 from agent_platform.domain.catalog import Deployment, LifecycleStatus
 from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.context import BusinessContextPolicy
@@ -230,18 +230,46 @@ class ControlPlaneService:
             raise DomainError("INVALID_ARGUMENT", "prompt 不能为空")
         session = self.get_session(identity, session_id)
         persistent_submission = self.persistence is not None and hasattr(self.persistence, "submit_run")
+        local_key = None
         if idempotency_key and not persistent_submission:
-            with self._serialize_local_submission((*self._scope(identity, session_id), idempotency_key)):
-                return self._submit_run(identity, session, prompt, idempotency_key)
-        return self._submit_run(identity, session, prompt, idempotency_key)
+            local_key = (*self._scope(identity, session_id), idempotency_key)
+        guard = self._serialize_local_submission(local_key) if local_key is not None else nullcontext()
+        with guard:
+            prepared = self._prepare_run(identity, session, prompt, idempotency_key)
+            if isinstance(prepared, RunRecord):
+                return prepared
+            run, resolved_agent = prepared
+            run_key = self._scope(identity, run.run_id)
+            if local_key is not None:
+                # 发布独立的运行中记录，重放不会读到执行线程逐步填充的结果。
+                self._runs[run_key] = replace(run, status=RuntimeStatus.RUNNING)
+                self._idempotency[local_key] = run.run_id
 
-    def _submit_run(
+        try:
+            return self._execute_run(
+                identity,
+                session,
+                prompt,
+                idempotency_key,
+                run,
+                resolved_agent,
+                persistent_submission=persistent_submission,
+            )
+        except Exception:
+            if local_key is not None and self._runs[run_key].status is RuntimeStatus.RUNNING:
+                # 已登记的运行若在准备调用或整理结果时异常，也保留原幂等记录。
+                self._runs[run_key] = replace(
+                    run, status=RuntimeStatus.UNKNOWN, error_category="RUNTIME_RESULT_UNKNOWN"
+                )
+            raise
+
+    def _prepare_run(
         self,
         identity: IdentityContext,
         session: SessionRecord,
         prompt: str,
         idempotency_key: str | None,
-    ) -> RunRecord:
+    ) -> RunRecord | tuple[RunRecord, ResolvedAgent]:
         session_id = session.session_id
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         # 已提交请求按原摘要重放；只有新请求需要通过当前部署准入。
@@ -273,9 +301,7 @@ class ControlPlaneService:
             snapshot=snapshot,
             status=RuntimeStatus.UNKNOWN,
         )
-        skill_instructions = resolved_agent.skill_instructions
-        allowed_tools = resolved_agent.allowed_tools
-        context_snapshot = self.context_assembler.assemble(
+        run.context_snapshot = self.context_assembler.assemble(
             run_id=run.run_id,
             trace_id=session.trace_id,
             agent_ref=f"{snapshot.employee_id}:v{snapshot.employee_version}",
@@ -284,10 +310,25 @@ class ControlPlaneService:
             memory_refs=(),
             tool_result_refs=(),
         )
-        run.context_snapshot = context_snapshot
+        return run, resolved_agent
+
+    def _execute_run(
+        self,
+        identity: IdentityContext,
+        session: SessionRecord,
+        prompt: str,
+        idempotency_key: str | None,
+        run: RunRecord,
+        resolved_agent: ResolvedAgent,
+        *,
+        persistent_submission: bool,
+    ) -> RunRecord:
+        session_id = session.session_id
+        snapshot = run.snapshot
+        context_snapshot = run.context_snapshot
+        assert context_snapshot is not None
         persistent_key = idempotency_key or run.run_id
         fencing_token: int | None = None
-        persistent_submission = self.persistence is not None and hasattr(self.persistence, "submit_run")
         if persistent_submission:
             existing_run, created = self.persistence.submit_run(identity, run, persistent_key)
             if not created:
@@ -338,20 +379,19 @@ class ControlPlaneService:
             span_type=SpanType.CONTEXT,
             status="assembled",
             parent_span_id=run.span_id,
-            attributes={"snapshot_id": context_snapshot.snapshot_id, "total_tokens": context_snapshot.total_tokens},
+            attributes={
+                "snapshot_id": context_snapshot.snapshot_id,
+                "total_tokens": context_snapshot.total_tokens,
+            },
         )
-        if idempotency_key and not persistent_submission:
-            # 调用 Runtime 前绑定该 Run，异常或后处理失败也不能重复执行。
-            self._runs[self._scope(identity, run.run_id)] = run
-            self._idempotency[(*self._scope(identity, session_id), idempotency_key)] = run.run_id
         try:
             result = self.runtime.run(
                 RuntimeRequest(
                     run_id=run.run_id,
                     session_ref=session.runtime_session_ref,
                     prompt=prompt,
-                    skill_instructions=skill_instructions,
-                    allowed_tools=allowed_tools,
+                    skill_instructions=resolved_agent.skill_instructions,
+                    allowed_tools=resolved_agent.allowed_tools,
                     system_prompt=resolved_agent.system_prompt,
                     skill_file_packages=resolved_agent.skill_file_packages,
                 )
@@ -416,8 +456,8 @@ class ControlPlaneService:
             parent_span_id=run.span_id,
             attributes={"result_digest": hashlib.sha256(result.text.encode()).hexdigest()},
         )
-        self._runs[self._scope(identity, run.run_id)] = run
         self._usage[run.run_id] = result.usage
+        self._runs[self._scope(identity, run.run_id)] = run
         if persistent_submission and fencing_token is not None:
             run_spans = tuple(
                 span
