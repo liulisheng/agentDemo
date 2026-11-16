@@ -24,6 +24,7 @@ import {
   disableDeployment,
   enableDeployment,
   getDigitalEmployee,
+  getEmployeeVersion,
   listAuditEvents,
   listDeployments,
   listDigitalEmployees,
@@ -36,6 +37,37 @@ import { useTenantContext } from '../management/TenantContext'
 const { Paragraph, Text, Title } = Typography
 
 const deploymentStatusLabels = { ACTIVE: '已上线', DISABLED: '已下线' }
+
+/** 逐页定位最新部署，再核对员工和当前固定版本。确认读取独立于列表缓存。 */
+async function readEnableConfirmation(item: DeploymentSummary, fakeUser: string) {
+  let cursor: string | null | undefined = null
+  let deployment: DeploymentSummary | undefined
+  do {
+    const page = await listDeployments({ employee_id: item.employee_id, limit: 200, cursor }, fakeUser)
+    deployment = page.items.find((row) => row.id === item.id)
+    cursor = page.next_cursor
+  } while (!deployment && cursor)
+
+  if (!deployment) return { blockedReason: '当前员工的部署记录中已找不到此部署' }
+  const [employee, version] = await Promise.all([
+    getDigitalEmployee(deployment.employee_id, fakeUser),
+    getEmployeeVersion(deployment.employee_id, deployment.version, fakeUser),
+  ])
+  return {
+    employeeName: employee.name,
+    version: version.version,
+    blockedReason: deployment.status === 'ACTIVE'
+      ? '部署已上线'
+      : getEnableBlockedReason(version.status, employee.status),
+  }
+}
+
+function getEnableBlockedReason(versionStatus: string, employeeStatus?: string) {
+  if (employeeStatus === 'ARCHIVED') return '员工已归档'
+  if (versionStatus === 'DEPRECATED') return '固定员工版本已下线'
+  if (versionStatus !== 'PUBLISHED') return '固定员工版本尚未发布'
+  return undefined
+}
 
 /** 提供部署创建、回滚、上下线和审计入口，身份切换时重置操作状态。 */
 export function DeploymentListPage() {
@@ -73,7 +105,7 @@ function DeploymentList() {
     queryFn: () => listDigitalEmployees({ limit: 100 }, fakeUser),
   })
   const employees = new Map(employeeOptions.data?.items.map((employee) => [employee.id, employee]))
-  // 员工选项只读首批数据。需要重新上线的部署按员工 ID 补查，避免把缺失状态当作未归档。
+  // 员工选项只读首批数据。详情查询用于补充列表的归档提示，提交前另行读取。
   const missingEmployeeIds = [...new Set((deployments.data?.items ?? [])
     .filter((item) => isAdmin && item.status === 'DISABLED' &&
       item.version_summary.status === 'PUBLISHED' && !employees.has(item.employee_id))
@@ -162,26 +194,23 @@ function DeploymentList() {
       ])
     },
   })
+  const enableConfirmation = useMutation({
+    mutationFn: (item: DeploymentSummary) => readEnableConfirmation(item, fakeUser),
+  })
 
-  const enableBlockedReason = (item: DeploymentSummary) => {
-    if (item.version_summary.status === 'DEPRECATED') return '固定员工版本已下线'
-    if (item.version_summary.status !== 'PUBLISHED') return '固定员工版本尚未发布'
-    const employee = employees.get(item.employee_id)
-    if (employee?.status === 'ARCHIVED') return '员工已归档'
-    if (!employee) {
-      const employeeDetail = employeeDetails[missingEmployeeIds.indexOf(item.employee_id)]
-      return employeeDetail?.isError ? '无法确认员工状态' : '正在确认员工状态…'
-    }
-    return undefined
-  }
+  const enabling = statusTarget?.status === 'DISABLED'
   const currentStatusTarget = deployments.data?.items.find((item) => item.id === statusTarget?.id)
-  const statusTargetChanged = Boolean(statusTarget && (
+  const statusTargetChanged = Boolean(statusTarget?.status === 'ACTIVE' && (
     currentStatusTarget?.status !== statusTarget.status || currentStatusTarget.version !== statusTarget.version
   ))
-  const statusBlockedReason = currentStatusTarget?.status === 'DISABLED'
-    ? enableBlockedReason(currentStatusTarget)
-    : undefined
-  const statusActionLabel = statusTarget?.status === 'ACTIVE' ? '下线' : '重新上线'
+  const confirmation = enableConfirmation.data
+  const enableConflict = enabling && statusMutation.error instanceof ApiError && statusMutation.error.status === 409
+  const statusBlockedReason = enableConfirmation.isError
+    ? '无法读取最新的部署、员工或固定版本。请关闭弹窗后重试。'
+    : confirmation?.blockedReason
+  const statusConfirmDisabled = statusTargetChanged ||
+    (enabling && (!confirmation || Boolean(statusBlockedReason) || enableConflict))
+  const statusActionLabel = enabling ? '重新上线' : '下线'
   const columns: ColumnsType<DeploymentSummary> = [
     {
       title: '数字员工',
@@ -219,7 +248,9 @@ function DeploymentList() {
       title: '操作',
       key: 'actions',
       render: (_: unknown, item) => {
-        const blockedReason = item.status === 'DISABLED' ? enableBlockedReason(item) : undefined
+        const blockedReason = item.status === 'DISABLED'
+          ? getEnableBlockedReason(item.version_summary.status, employees.get(item.employee_id)?.status)
+          : undefined
         return (
           <>
             <div className="deployment-row-actions">
@@ -232,7 +263,9 @@ function DeploymentList() {
                 aria-describedby={blockedReason ? `deployment-enable-reason-${item.id}` : undefined}
                 onClick={() => {
                   statusMutation.reset()
+                  enableConfirmation.reset()
                   setStatusTarget(item)
+                  if (item.status === 'DISABLED') enableConfirmation.mutate(item)
                 }}
               >
                 {item.status === 'ACTIVE' ? '下线' : '重新上线'}
@@ -295,18 +328,19 @@ function DeploymentList() {
           <Empty className="management-empty" description="当前筛选下没有部署记录" />
         )}
         {deployments.isSuccess && deployments.data.items.length > 0 && (
-          <>
-            <Table<DeploymentSummary> className="deployment-table" rowKey="id" columns={columns} dataSource={deployments.data.items} pagination={false} />
-            <div className="management-pagination">
-              <Text type="secondary">部署 ID 稳定排序</Text>
-              <Space>
-                <Button disabled={cursorStack.length <= 1} onClick={() => setCursorStack((stack) => stack.slice(0, -1))}>上一页</Button>
-                <Button disabled={!deployments.data.next_cursor} onClick={() => {
-                  if (deployments.data?.next_cursor) setCursorStack((stack) => [...stack, deployments.data!.next_cursor!])
-                }}>下一页</Button>
-              </Space>
-            </div>
-          </>
+          <Table<DeploymentSummary> className="deployment-table" rowKey="id" columns={columns} dataSource={deployments.data.items} pagination={false} />
+        )}
+        {(cursorStack.length > 1 || Boolean(deployments.data?.items.length)) && (
+          <div className="management-pagination">
+            <Text type="secondary">部署 ID 稳定排序</Text>
+            <Space>
+              <Button disabled={cursorStack.length <= 1} onClick={() => setCursorStack((stack) => stack.slice(0, -1))}>上一页</Button>
+              <Button disabled={!deployments.data?.next_cursor} onClick={() => {
+                const nextCursor = deployments.data?.next_cursor
+                if (nextCursor) setCursorStack((stack) => [...stack, nextCursor])
+              }}>下一页</Button>
+            </Space>
+          </div>
         )}
       </Card>
 
@@ -344,7 +378,7 @@ function DeploymentList() {
         open={Boolean(statusTarget)}
         onCancel={() => { if (!statusMutation.isPending) setStatusTarget(undefined) }}
         onOk={() => {
-          if (!statusTarget || statusTargetChanged || statusBlockedReason || statusMutation.isPending ||
+          if (!statusTarget || statusConfirmDisabled || statusMutation.isPending ||
             !isAdmin || getCurrentFakeUser() !== fakeUser) return
           statusMutation.mutate(statusTarget)
         }}
@@ -353,7 +387,7 @@ function DeploymentList() {
         confirmLoading={statusMutation.isPending}
         okButtonProps={{
           danger: statusTarget?.status === 'ACTIVE',
-          disabled: statusTargetChanged || Boolean(statusBlockedReason),
+          disabled: statusConfirmDisabled,
         }}
         cancelButtonProps={{ disabled: statusMutation.isPending }}
         destroyOnHidden
@@ -361,14 +395,19 @@ function DeploymentList() {
         {statusTarget && (
           <Space direction="vertical" size={12} className="deployment-modal-content deployment-status-confirmation">
             <Descriptions size="small" column={1}>
-              <Descriptions.Item label="员工">{employees.get(statusTarget.employee_id)?.name ?? statusTarget.employee_id}</Descriptions.Item>
-              <Descriptions.Item label="固定版本">v{statusTarget.version_summary.version}</Descriptions.Item>
+              <Descriptions.Item label="员工">
+                {confirmation?.employeeName ?? employees.get(statusTarget.employee_id)?.name ?? statusTarget.employee_id}
+              </Descriptions.Item>
+              <Descriptions.Item label="固定版本">
+                {enabling ? (confirmation?.version ? `v${confirmation.version}` : '—') : `v${statusTarget.version_summary.version}`}
+              </Descriptions.Item>
               <Descriptions.Item label="Deployment ID">{statusTarget.id}</Descriptions.Item>
             </Descriptions>
             <Text>{statusTarget.status === 'ACTIVE'
               ? '下线后，该部署将停止接收新会话和新运行。已开始的运行可以继续完成。'
               : '重新上线后，该部署将恢复接收新会话和新运行。'}</Text>
             {statusTargetChanged && <Alert type="warning" message="部署已变化，请关闭弹窗并重新选择操作。" />}
+            {enableConfirmation.isPending && <Alert type="info" message="正在确认部署、员工和固定版本的最新状态…" />}
             {statusBlockedReason && <Alert type="warning" message={statusBlockedReason} />}
             {statusMutation.isError && (
               <Alert type="error" showIcon message={`${statusActionLabel}失败`} description={
