@@ -98,6 +98,20 @@ def rollback_deployment(deployment_id: str, request: DeploymentRollbackRequest, 
     return _deployment_response(service.rollback(identity, deployment_id, request.employee_id, request.version))
 
 
+@router.post("/deployments/{deployment_id}/disable")
+def disable_deployment(deployment_id: str, identity: Identity, service: Catalog) -> dict[str, object]:
+    """租户管理员下线指定部署，停止该入口接收新会话和运行。"""
+
+    return _deployment_response(service.disable_deployment(identity, deployment_id))
+
+
+@router.post("/deployments/{deployment_id}/enable")
+def enable_deployment(deployment_id: str, identity: Identity, service: Catalog) -> dict[str, object]:
+    """租户管理员重新上线仍符合准入条件的指定部署。"""
+
+    return _deployment_response(service.enable_deployment(identity, deployment_id))
+
+
 @router.post("/sessions", status_code=201)
 def create_session(
     request: SessionCreateRequest, identity: Identity, service: ControlPlane

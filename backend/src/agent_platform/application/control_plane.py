@@ -96,8 +96,17 @@ class ControlPlaneService:
         spans.append(span)
         return span
 
-    def create_session(self, identity: IdentityContext, deployment_id: str) -> SessionRecord:
+    def _require_active_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
         deployment = self.catalog.resolve_deployment(identity, deployment_id)
+        # 只用部署状态准入。固定版本下线后，已上线的部署仍可运行。
+        if deployment.status is LifecycleStatus.DISABLED:
+            raise DomainError("DEPLOYMENT_DISABLED", "部署已下线", {"deployment_id": deployment_id})
+        if deployment.status is not LifecycleStatus.ACTIVE:
+            raise DomainError("INVALID_STATE", "部署当前未上线")
+        return deployment
+
+    def create_session(self, identity: IdentityContext, deployment_id: str) -> SessionRecord:
+        deployment = self._require_active_deployment(identity, deployment_id)
         profile = self.catalog.repository.get_profile_version(
             identity,
             deployment.employee_version.execution_profile_id,
@@ -175,6 +184,8 @@ class ControlPlaneService:
         session = self.get_session(identity, session_id)
         if session.status != "ACTIVE":
             raise DomainError("INVALID_STATE", "Session 不是 ACTIVE 状态")
+        # 以本次状态读取为准入点；通过后允许完成，无需在 Runtime 完成时再次检查。
+        deployment = self._require_active_deployment(identity, session.deployment_id)
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         if idempotency_key:
             idempotency_index = (*self._scope(identity, session_id), idempotency_key)
@@ -184,7 +195,6 @@ class ControlPlaneService:
                 if previous_digest != prompt_digest:
                     raise DomainError("IDEMPOTENCY_CONFLICT", "幂等键对应的请求内容已改变")
                 return self._get_run(identity, previous_run_id)
-        deployment = self.catalog.resolve_deployment(identity, session.deployment_id)
         resolved_agent = self.agent_resolver.resolve(identity, deployment)
         snapshot = resolved_agent.snapshot
         run = RunRecord(

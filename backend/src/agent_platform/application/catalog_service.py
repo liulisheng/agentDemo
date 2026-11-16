@@ -63,6 +63,7 @@ class InMemoryCatalogRepository:
         self.sandbox_profiles: dict[tuple[str, str, str], object] = {}
         self.deployments: dict[tuple[str, str, str], Deployment] = {}
         self.audit_events: list[AuditEventRecord] = []
+        # 员工、版本与部署共用写锁，保证版本下线与部署写入的先后顺序。
         self._employee_version_lock = RLock()
 
     def _get(self, values: Mapping, key: tuple, resource: str):
@@ -126,15 +127,23 @@ class InMemoryCatalogRepository:
         return self._get(self.profile_versions, (*_key(identity, profile_id), version), "execution_profile")
 
     def get_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
-        return self._get(self.deployments, _key(identity, deployment_id), "deployment")
+        """读取当前部署状态与它固定的员工版本，保留下线版本的历史绑定。"""
+
+        with self._employee_version_lock:
+            deployment = self._get(self.deployments, _key(identity, deployment_id), "deployment")
+            version = self.get_employee_version(
+                identity, deployment.employee_id, deployment.employee_version.version
+            )
+            return replace(deployment, employee_version=version)
 
     def list_deployments(self, identity: IdentityContext) -> tuple[Deployment, ...]:
         prefix = (identity.platform_id, identity.tenant_id)
-        return tuple(
-            deployment
-            for (platform_id, tenant_id, _), deployment in self.deployments.items()
-            if (platform_id, tenant_id) == prefix
-        )
+        with self._employee_version_lock:
+            return tuple(
+                self.get_deployment(identity, deployment_id)
+                for platform_id, tenant_id, deployment_id in self.deployments
+                if (platform_id, tenant_id) == prefix
+            )
 
     def list_audit_events(
         self,
@@ -147,9 +156,11 @@ class InMemoryCatalogRepository:
         before_created_at: datetime | None = None,
         before_event_id: str | None = None,
     ) -> tuple[AuditEventRecord, ...]:
+        with self._employee_version_lock:
+            events = tuple(self.audit_events)
         rows = [
             event
-            for event in self.audit_events
+            for event in events
             if event.platform_id == identity.platform_id
             and event.tenant_id == identity.tenant_id
             and (resource_type is None or event.resource_type == resource_type)
@@ -343,29 +354,77 @@ class InMemoryCatalogRepository:
     def get_sandbox_profile(self, identity: IdentityContext, profile_id: str, *, version: int = 1) -> SandboxProfile:
         return self._get(self.sandbox_profiles, (*_key(identity, profile_id), version), "sandbox_profile")
 
-    def save_deployment(self, identity: IdentityContext, value: Deployment) -> None:
+    def save_deployment(self, identity: IdentityContext, value: Deployment) -> Deployment:
+        """在共用锁内校验发布状态，回滚只替换当前部署的版本绑定。"""
+
         key = _key(identity, value.deployment_id)
-        previous = self.deployments.get(key)
-        self.deployments[key] = value
-        if previous is None or previous.employee_version.version != value.employee_version.version:
-            self.audit_events.append(
-                AuditEventRecord(
-                    event_id=generate_database_id(),
-                    platform_id=identity.platform_id,
-                    tenant_id=identity.tenant_id,
-                    actor_type="USER",
-                    actor_user_id=identity.user_id,
-                    event_type="DEPLOYMENT_CREATED" if previous is None else "DEPLOYMENT_ROLLED_BACK",
-                    resource_type="deployment",
-                    resource_id=value.deployment_id,
-                    payload={
-                        "employee_id": value.employee_id,
-                        "previous_version": previous.employee_version.version if previous else None,
-                        "version": value.employee_version.version,
-                    },
-                    created_at=datetime.now(UTC),
+        with self._employee_version_lock:
+            previous = self.deployments.get(key)
+            employee = self.get_employee(identity, value.employee_id)
+            if employee.status is LifecycleStatus.ARCHIVED:
+                message = "已归档员工不能回滚部署" if previous else "已归档员工不能创建新的部署"
+                raise DomainError("INVALID_STATE", message)
+            target = self.get_employee_version(identity, value.employee_id, value.employee_version.version)
+            if target.status is not LifecycleStatus.PUBLISHED:
+                if previous is not None:
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "回滚目标必须是已发布版本")
+                raise DomainError("INVALID_STATE", "只能部署已发布员工版本")
+            saved = previous.rollback(target) if previous else replace(value, employee_version=target)
+            previous_version = previous.employee_version.version if previous else None
+            if previous_version != target.version:
+                self._record_deployment_event(
+                    identity,
+                    saved,
+                    "DEPLOYMENT_CREATED" if previous is None else "DEPLOYMENT_ROLLED_BACK",
+                    {"previous_version": previous_version},
                 )
+            self.deployments[key] = saved
+            return saved
+
+    def transition_deployment(
+        self, identity: IdentityContext, deployment_id: str, target_status: LifecycleStatus
+    ) -> Deployment:
+        """使用最新绑定执行启停，并在同一临界区写入审计。"""
+
+        with self._employee_version_lock:
+            current = self.get_deployment(identity, deployment_id)
+            if target_status is LifecycleStatus.DISABLED:
+                updated = current.disable()
+                event_type = "DEPLOYMENT_DISABLED"
+            elif target_status is LifecycleStatus.ACTIVE:
+                employee = self.get_employee(identity, current.employee_id)
+                if employee.status is LifecycleStatus.ARCHIVED:
+                    raise DomainError("INVALID_STATE", "已归档员工不能重新上线部署")
+                updated = current.enable()
+                event_type = "DEPLOYMENT_ENABLED"
+            else:
+                raise DomainError("INVALID_STATE", "部署只能下线或重新上线")
+            self._record_deployment_event(
+                identity,
+                updated,
+                event_type,
+                {"previous_status": current.status.value, "status": updated.status.value},
             )
+            self.deployments[_key(identity, deployment_id)] = updated
+            return updated
+
+    def _record_deployment_event(
+        self, identity: IdentityContext, value: Deployment, event_type: str, changes: dict[str, object]
+    ) -> None:
+        self.audit_events.append(
+            AuditEventRecord(
+                event_id=generate_database_id(),
+                platform_id=identity.platform_id,
+                tenant_id=identity.tenant_id,
+                actor_type="USER",
+                actor_user_id=identity.user_id,
+                event_type=event_type,
+                resource_type="deployment",
+                resource_id=value.deployment_id,
+                payload={"employee_id": value.employee_id, "version": value.employee_version.version, **changes},
+                created_at=datetime.now(UTC),
+            )
+        )
 
     def delete_tool(self, identity: IdentityContext, tool_id: str) -> None:
         current = self.get_tool(identity, tool_id)
@@ -1177,8 +1236,7 @@ class CatalogService:
             employee_id=employee_id,
             employee_version=employee_version,
         )
-        self.repository.save_deployment(identity, deployment)
-        return deployment
+        return self.repository.save_deployment(identity, deployment)
 
     def list_tools(self, identity: IdentityContext) -> tuple[ToolVersion, ...]:
         return self.repository.list_tools(identity)
@@ -1319,9 +1377,25 @@ class CatalogService:
         target = self.repository.get_employee_version(identity, employee_id, version)
         if target.status is not LifecycleStatus.PUBLISHED:
             raise DomainError("DEPENDENCY_VALIDATION_ERROR", "回滚目标必须是已发布版本")
-        updated = current.rollback(target)
-        self.repository.save_deployment(identity, updated)
-        return updated
+        return self.repository.save_deployment(identity, current.rollback(target))
+
+    def disable_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
+        """管理员下线当前租户的部署，停止该入口的新会话和运行。"""
+
+        self._require_employee_admin(identity)
+        return self.repository.transition_deployment(identity, deployment_id, LifecycleStatus.DISABLED)
+
+    def enable_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
+        """管理员重新上线固定版本仍为已发布的部署。"""
+
+        self._require_employee_admin(identity)
+        current = self.repository.get_deployment(identity, deployment_id)
+        employee = self.repository.get_employee(identity, current.employee_id)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能重新上线部署")
+        # 仓储在锁内再次校验，避免读取后发生回滚、归档或版本下线。
+        current.enable()
+        return self.repository.transition_deployment(identity, deployment_id, LifecycleStatus.ACTIVE)
 
     def resolve_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
         return self.repository.get_deployment(identity, deployment_id)

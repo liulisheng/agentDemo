@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -1368,67 +1369,156 @@ class MySqlCatalogRepository:
             long_lived_credentials=bool(security.get("long_lived_credentials", False)),
         )
 
-    def save_deployment(self, identity: IdentityContext, value: Deployment) -> None:
-        """创建或回滚 Deployment；目标员工版本必须已经发布。"""
+    def save_deployment(self, identity: IdentityContext, value: Deployment) -> Deployment:
+        """锁定目标版本并校验发布状态，回滚只更新版本绑定。"""
 
-        self.get_employee_version(identity, value.employee_id, value.employee_version.version)
+        key = _identity_key(identity, value.deployment_id)
         with self._transaction() as (_, cursor):
-            cursor.execute(
-                "SELECT employee_id, employee_version, status FROM deployments "
-                "WHERE platform_id=%s AND tenant_id=%s AND deployment_id=%s FOR UPDATE",
-                (identity.platform_id, identity.tenant_id, value.deployment_id),
+            # 员工行在部署启停和版本下线中也是第一把锁，后续读取以持久状态为准。
+            employee_status = self._lock_employee_status(cursor, identity, value.employee_id)
+            target = self._read_employee_version(
+                cursor, identity, value.employee_id, value.employee_version.version, lock=True
             )
-            previous = cursor.fetchone()
-            cursor.execute(
-                "INSERT INTO deployments "
-                "(platform_id, tenant_id, deployment_id, employee_id, employee_version, status, created_by) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
-                "employee_id=VALUES(employee_id), employee_version=VALUES(employee_version), status=VALUES(status)",
-                (
-                    identity.platform_id,
-                    identity.tenant_id,
-                    value.deployment_id,
-                    value.employee_id,
-                    value.employee_version.version,
-                    value.status.value,
-                    identity.user_id,
-                ),
-            )
-            previous_version = int(previous[1]) if previous is not None else None
-            if previous is None or previous_version != value.employee_version.version:
-                cursor.execute(
-                    "INSERT INTO audit_events "
-                    "(platform_id, tenant_id, event_id, actor_type, actor_user_id, event_type, policy_version, "
-                    "resource_type, resource_id, payload_json) VALUES (%s,%s,%s,'USER',%s,%s,'1','deployment',%s,%s)",
-                    (
-                        identity.platform_id,
-                        identity.tenant_id,
-                        generate_database_id(),
-                        identity.user_id,
-                        "DEPLOYMENT_CREATED" if previous is None else "DEPLOYMENT_ROLLED_BACK",
-                        value.deployment_id,
-                        _json_dump(
-                            {
-                                "employee_id": value.employee_id,
-                                "previous_version": previous_version,
-                                "version": value.employee_version.version,
-                            }
-                        ),
-                    ),
-                )
+            previous = self._read_deployment_row(cursor, identity, value.deployment_id)
+            if previous is not None:
+                # 仅锁现有记录，避免不同员工同时新建部署时争用主键间隙锁。
+                previous = self._read_deployment_row(cursor, identity, value.deployment_id, lock=True)
+            if employee_status is LifecycleStatus.ARCHIVED:
+                message = "已归档员工不能回滚部署" if previous else "已归档员工不能创建新的部署"
+                raise DomainError("INVALID_STATE", message)
+            if target.status is not LifecycleStatus.PUBLISHED:
+                if previous is not None:
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "回滚目标必须是已发布版本")
+                raise DomainError("INVALID_STATE", "只能部署已发布员工版本")
 
-    def get_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
+            if previous is None:
+                saved = replace(value, employee_version=target)
+                previous_version = None
+                cursor.execute(
+                    "INSERT INTO deployments "
+                    "(platform_id, tenant_id, deployment_id, employee_id, employee_version, status, created_by) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (*key, saved.employee_id, target.version, saved.status.value, identity.user_id),
+                )
+            else:
+                employee_id = str(previous[0])
+                previous_version = int(previous[1])
+                status = LifecycleStatus(str(previous[2]))
+                # 用行锁读到的状态返回结果，避免过期快照撤销刚发生的启停操作。
+                saved = Deployment(value.deployment_id, identity.tenant_id, employee_id, target, status)
+                if previous_version != target.version:
+                    cursor.execute(
+                        "UPDATE deployments SET employee_version=%s WHERE platform_id=%s AND tenant_id=%s "
+                        "AND deployment_id=%s",
+                        (target.version, *key),
+                    )
+
+            if previous_version != target.version:
+                self._record_deployment_event(
+                    cursor,
+                    identity,
+                    saved,
+                    "DEPLOYMENT_CREATED" if previous is None else "DEPLOYMENT_ROLLED_BACK",
+                    {"previous_version": previous_version},
+                )
+            return saved
+
+    def transition_deployment(
+        self, identity: IdentityContext, deployment_id: str, target_status: LifecycleStatus
+    ) -> Deployment:
+        """原子更新当前租户内的部署状态和审计，重新上线时锁定固定版本。"""
+
+        # 员工归属在部署创建后保持固定，先找出员工以遵循统一的加锁顺序。
         with self._reader() as (_, cursor):
-            cursor.execute(
-                "SELECT employee_id, employee_version, status FROM deployments "
-                "WHERE platform_id=%s AND tenant_id=%s AND deployment_id=%s",
-                (identity.platform_id, identity.tenant_id, deployment_id),
-            )
-            row = cursor.fetchone()
+            row = self._read_deployment_row(cursor, identity, deployment_id)
         if row is None:
             raise self._not_found("deployment")
-        version = self.get_employee_version(identity, str(row[0]), int(row[1]))
-        return Deployment(deployment_id, identity.tenant_id, str(row[0]), version, LifecycleStatus(str(row[2])))
+        employee_id = str(row[0])
+
+        key = _identity_key(identity, deployment_id)
+        with self._transaction() as (_, cursor):
+            employee_status = self._lock_employee_status(cursor, identity, employee_id)
+            row = self._read_deployment_row(cursor, identity, deployment_id, lock=True)
+            if row is None:
+                raise self._not_found("deployment")
+            # 回滚可能已更换固定版本，使用锁定的部署行读取最新绑定。
+            current = self._load_deployment(cursor, identity, deployment_id, row, lock_version=True)
+            if target_status is LifecycleStatus.DISABLED:
+                updated = current.disable()
+                event_type = "DEPLOYMENT_DISABLED"
+            elif target_status is LifecycleStatus.ACTIVE:
+                if employee_status is LifecycleStatus.ARCHIVED:
+                    raise DomainError("INVALID_STATE", "已归档员工不能重新上线部署")
+                updated = current.enable()
+                event_type = "DEPLOYMENT_ENABLED"
+            else:
+                raise DomainError("INVALID_STATE", "部署只能下线或重新上线")
+
+            cursor.execute(
+                "UPDATE deployments SET status=%s WHERE platform_id=%s AND tenant_id=%s AND deployment_id=%s",
+                (updated.status.value, *key),
+            )
+            self._record_deployment_event(
+                cursor,
+                identity,
+                updated,
+                event_type,
+                {"previous_status": current.status.value, "status": updated.status.value},
+            )
+            return updated
+
+    @staticmethod
+    def _record_deployment_event(
+        cursor: Any, identity: IdentityContext, value: Deployment, event_type: str, changes: dict[str, object]
+    ) -> None:
+        cursor.execute(
+            "INSERT INTO audit_events "
+            "(platform_id, tenant_id, event_id, actor_type, actor_user_id, event_type, policy_version, "
+            "resource_type, resource_id, payload_json) VALUES (%s,%s,%s,'USER',%s,%s,'1','deployment',%s,%s)",
+            (
+                identity.platform_id,
+                identity.tenant_id,
+                generate_database_id(),
+                identity.user_id,
+                event_type,
+                value.deployment_id,
+                _json_dump({"employee_id": value.employee_id, "version": value.employee_version.version, **changes}),
+            ),
+        )
+
+    @staticmethod
+    def _read_deployment_row(
+        cursor: Any, identity: IdentityContext, deployment_id: str, *, lock: bool = False
+    ) -> tuple[Any, ...] | None:
+        lock_clause = " FOR UPDATE" if lock else ""
+        cursor.execute(
+            "SELECT employee_id, employee_version, status FROM deployments "
+            "WHERE platform_id=%s AND tenant_id=%s AND deployment_id=%s" + lock_clause,
+            _identity_key(identity, deployment_id),
+        )
+        return cursor.fetchone()
+
+    def _load_deployment(
+        self,
+        cursor: Any,
+        identity: IdentityContext,
+        deployment_id: str,
+        row: tuple[Any, ...],
+        *,
+        lock_version: bool = False,
+    ) -> Deployment:
+        employee_id = str(row[0])
+        version = self._read_employee_version(cursor, identity, employee_id, int(row[1]), lock=lock_version)
+        return Deployment(deployment_id, identity.tenant_id, employee_id, version, LifecycleStatus(str(row[2])))
+
+    def get_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
+        """读取部署及其固定版本，供运行准入和历史状态查询使用。"""
+
+        with self._reader() as (_, cursor):
+            row = self._read_deployment_row(cursor, identity, deployment_id)
+            if row is None:
+                raise self._not_found("deployment")
+            return self._load_deployment(cursor, identity, deployment_id, row)
 
     def list_deployments(self, identity: IdentityContext) -> tuple[Deployment, ...]:
         with self._reader() as (_, cursor):

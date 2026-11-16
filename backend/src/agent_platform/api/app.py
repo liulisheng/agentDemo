@@ -115,6 +115,7 @@ def create_app(
             "RESOURCE_NOT_FOUND": 404,
             "AUTHORIZATION_DENIED": 403,
             "DEPENDENCY_VALIDATION_ERROR": 409,
+            "DEPLOYMENT_DISABLED": 409,
             "IMMUTABLE_VERSION": 409,
             "IDEMPOTENCY_CONFLICT": 409,
             "INVALID_STATE": 409,

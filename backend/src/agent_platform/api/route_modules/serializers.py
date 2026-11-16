@@ -85,6 +85,8 @@ def _version_response(value: DigitalEmployeeVersion) -> dict[str, object]:
 
 
 def _deployment_response(value: Deployment) -> dict[str, object]:
+    """独立输出部署状态与固定版本状态，便于展示历史部署。"""
+
     return {
         "id": value.deployment_id,
         "tenant_id": value.tenant_id,

@@ -138,9 +138,17 @@ class CatalogRepository(Protocol):
 
 
 class DeploymentRepository(Protocol):
-    """租户范围 Deployment 查询、创建和版本切换契约。"""
+    """租户范围 Deployment 查询、创建、版本切换和启停契约。"""
 
-    def save_deployment(self, identity: IdentityContext, value: Deployment) -> None: ...
+    def save_deployment(self, identity: IdentityContext, value: Deployment) -> Deployment:
+        """保存已发布版本绑定，返回写入时的实际部署状态。"""
+        ...
+
+    def transition_deployment(
+        self, identity: IdentityContext, deployment_id: str, target_status: LifecycleStatus
+    ) -> Deployment:
+        """在当前租户内原子校验并更新部署状态，同时记录审计。"""
+        ...
 
     def get_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment: ...
 
