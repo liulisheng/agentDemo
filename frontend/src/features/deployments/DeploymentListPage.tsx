@@ -1,4 +1,4 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
   Button,
@@ -56,16 +56,20 @@ async function readEnableConfirmation(item: DeploymentSummary, fakeUser: string)
   return {
     employeeName: employee.name,
     version: version.version,
-    blockedReason: deployment.status === 'ACTIVE'
-      ? '部署已上线'
-      : getEnableBlockedReason(version.status, employee.status),
+    blockedReason: getEnableBlockedReason(deployment.status, employee.status, version.status),
   }
 }
 
-function getEnableBlockedReason(versionStatus: string, employeeStatus?: string) {
+function getEnableBlockedReason(deploymentStatus: string, employeeStatus: string, versionStatus: string) {
+  if (deploymentStatus === 'ACTIVE') return '部署已上线'
+  if (deploymentStatus !== 'DISABLED') return '部署状态不允许重新上线'
   if (employeeStatus === 'ARCHIVED') return '员工已归档'
+  // 员工的其他合法状态由数据模型定义，缺失或未知值无法确认其未归档。
+  if (employeeStatus !== 'DRAFT' && employeeStatus !== 'ACTIVE' && employeeStatus !== 'DISABLED') {
+    return '无法确认员工状态'
+  }
   if (versionStatus === 'DEPRECATED') return '固定员工版本已下线'
-  if (versionStatus !== 'PUBLISHED') return '固定员工版本尚未发布'
+  if (versionStatus !== 'PUBLISHED') return '固定员工版本当前状态不允许重新上线'
   return undefined
 }
 
@@ -105,21 +109,6 @@ function DeploymentList() {
     queryFn: () => listDigitalEmployees({ limit: 100 }, fakeUser),
   })
   const employees = new Map(employeeOptions.data?.items.map((employee) => [employee.id, employee]))
-  // 员工选项只读首批数据。详情查询用于补充列表的归档提示，提交前另行读取。
-  const missingEmployeeIds = [...new Set((deployments.data?.items ?? [])
-    .filter((item) => isAdmin && item.status === 'DISABLED' &&
-      item.version_summary.status === 'PUBLISHED' && !employees.has(item.employee_id))
-    .map((item) => item.employee_id))]
-  const employeeDetails = useQueries({
-    queries: missingEmployeeIds.map((employeeId) => ({
-      queryKey: ['digital-employee', fakeUser, employeeId],
-      queryFn: () => getDigitalEmployee(employeeId, fakeUser),
-      enabled: !employeeOptions.isPending,
-    })),
-  })
-  for (const { data } of employeeDetails) {
-    if (data) employees.set(data.id, data)
-  }
   const versionEmployeeId = rollbackTarget?.employee_id ?? createEmployeeId
   const publishedVersions = useQuery({
     queryKey: ['employee-versions', fakeUser, versionEmployeeId, 'PUBLISHED'],
@@ -222,7 +211,7 @@ function DeploymentList() {
             {employees.get(employeeId)?.name ?? employeeId}
           </Link>
           <Text type="secondary">Deployment {item.id}</Text>
-          <Tag color={item.status === 'ACTIVE' ? 'green' : 'default'}>{deploymentStatusLabels[item.status]}</Tag>
+          <Tag color={item.status === 'ACTIVE' ? 'green' : 'default'}>{deploymentStatusLabels[item.status] ?? '状态未知'}</Tag>
         </Space>
       ),
     },
@@ -247,36 +236,26 @@ function DeploymentList() {
     columns.push({
       title: '操作',
       key: 'actions',
-      render: (_: unknown, item) => {
-        const blockedReason = item.status === 'DISABLED'
-          ? getEnableBlockedReason(item.version_summary.status, employees.get(item.employee_id)?.status)
-          : undefined
-        return (
-          <>
-            <div className="deployment-row-actions">
-              <Button type="link" onClick={() => setAuditDeploymentId(item.id)}>审计记录</Button>
-              <Button type="link" onClick={() => { setRollbackTarget(item); setRollbackVersion(undefined) }}>回滚</Button>
-              <Button
-                type="link"
-                danger={item.status === 'ACTIVE'}
-                disabled={Boolean(blockedReason)}
-                aria-describedby={blockedReason ? `deployment-enable-reason-${item.id}` : undefined}
-                onClick={() => {
-                  statusMutation.reset()
-                  enableConfirmation.reset()
-                  setStatusTarget(item)
-                  if (item.status === 'DISABLED') enableConfirmation.mutate(item)
-                }}
-              >
-                {item.status === 'ACTIVE' ? '下线' : '重新上线'}
-              </Button>
-            </div>
-            {blockedReason && (
-              <Text type="secondary" id={`deployment-enable-reason-${item.id}`}>{blockedReason}</Text>
-            )}
-          </>
-        )
-      },
+      render: (_: unknown, item) => (
+        <div className="deployment-row-actions">
+          <Button type="link" onClick={() => setAuditDeploymentId(item.id)}>审计记录</Button>
+          <Button type="link" onClick={() => { setRollbackTarget(item); setRollbackVersion(undefined) }}>回滚</Button>
+          {(item.status === 'ACTIVE' || item.status === 'DISABLED') && (
+            <Button
+              type="link"
+              danger={item.status === 'ACTIVE'}
+              onClick={() => {
+                statusMutation.reset()
+                enableConfirmation.reset()
+                setStatusTarget(item)
+                if (item.status === 'DISABLED') enableConfirmation.mutate(item)
+              }}
+            >
+              {item.status === 'ACTIVE' ? '下线' : '重新上线'}
+            </Button>
+          )}
+        </div>
+      ),
     })
   }
 
