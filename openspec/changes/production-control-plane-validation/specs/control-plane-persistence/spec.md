@@ -52,6 +52,10 @@
 - **WHEN** 相同租户复用幂等键但请求摘要发生变化
 - **THEN** 系统返回稳定的幂等冲突且保留原 Run
 
+#### Scenario: Duplicate an in-memory Run while its outcome is uncertain
+- **WHEN** Fake/InMemory Runtime 请求仍在执行或结果已标记为 UNKNOWN 时，相同租户、Session、幂等键和请求内容再次提交
+- **THEN** 运行中立即返回同一个 RUNNING Run；结果 UNKNOWN 时返回同一个 UNKNOWN Run，不等待 Runtime 或再次调用 Runtime；同键不同摘要立即返回幂等冲突
+
 #### Scenario: Replay an existing Run after its Deployment is disabled
 - **WHEN** 原 Run 已提交，其关联 Deployment 已下线，且调用者在同一平台、租户和 Session 使用相同幂等键及请求摘要重试
 - **THEN** 返回原 Run（相同 `run_id`）且不重复运行；同键摘要不一致返回 `IDEMPOTENCY_CONFLICT`，没有匹配历史 Run 的新请求返回 `DEPLOYMENT_DISABLED`（409）
