@@ -18,7 +18,7 @@ import {
   message,
 } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import {
   archiveDigitalEmployee,
@@ -47,7 +47,6 @@ export function EmployeeDetailPage() {
   const { fakeUser, currentIdentity } = useTenantContext()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
-  const { key: locationKey } = useLocation()
   const canEdit = currentIdentity.roleName === '管理员'
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('overview')
   const [editOpen, setEditOpen] = useState(false)
@@ -496,7 +495,7 @@ export function EmployeeDetailPage() {
                           )}
                           {canConfigure && (item.status === 'PUBLISHED' || item.status === 'DEPRECATED') && (
                             <EmployeeVersionLifecycleActions
-                              key={`${locationKey}:${fakeUser}:${employeeId}:${item.version}`}
+                              key={`${fakeUser}:${employeeId}:${item.version}`}
                               employeeId={employeeId}
                               version={item}
                             />

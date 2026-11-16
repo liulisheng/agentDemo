@@ -80,11 +80,17 @@ export function EmployeeVersionLifecycleActions({ employeeId, version }: {
     queryClient.invalidateQueries({ queryKey: ['digital-employee', fakeUser, employeeId] }),
     queryClient.invalidateQueries({ queryKey: ['employee-versions', fakeUser, employeeId] }),
   ])
-  const fork = useMutation({
+  const fork = useMutation<EmployeeVersion, Error, { pathname: string; historyKey?: string }>({
     mutationFn: () => forkEmployeeVersion(employeeId, version.version, fakeUser),
-    onSuccess: async (created) => {
+    onSuccess: async (created, source) => {
       queryClient.setQueryData(['employee-version', fakeUser, employeeId, created.version], created)
       await invalidateEmployee()
+      // 刷新可能移除发起卡片，浏览器历史条目仍能确定用户是否停留在原页面。
+      if (window.location.pathname !== source.pathname || window.history.state?.key !== source.historyKey) return
+      message.success(`已从 v${version.version} 创建草稿 v${created.version}`)
+      navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/versions/${created.version}`, {
+        state: { sourceVersion: version.version },
+      })
     },
     onError: (error) => message.error(error.message),
   })
@@ -103,14 +109,9 @@ export function EmployeeVersionLifecycleActions({ employeeId, version }: {
   })
 
   const createDraft = () => {
-    fork.mutate(undefined, {
-      // 缓存更新跟随请求完成，跳转回调只在发起路由仍挂载时运行。
-      onSuccess: (created) => {
-        message.success(`已从 v${version.version} 创建草稿 v${created.version}`)
-        navigate(`/enterprise/employees/${encodeURIComponent(employeeId)}/versions/${created.version}`, {
-          state: { sourceVersion: version.version },
-        })
-      },
+    fork.mutate({
+      pathname: window.location.pathname,
+      historyKey: window.history.state?.key,
     })
   }
 
@@ -476,7 +477,7 @@ export function EmployeeVersionEditorPage() {
         {admin && !archived && (currentVersion.status === 'PUBLISHED' || currentVersion.status === 'DEPRECATED') && (
           <div className="employee-version-actions">
             <EmployeeVersionLifecycleActions
-              key={`${location.key}:${fakeUser}:${employeeId}:${versionNumber}`}
+              key={`${fakeUser}:${employeeId}:${versionNumber}`}
               employeeId={employeeId}
               version={currentVersion}
             />
