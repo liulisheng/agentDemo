@@ -780,28 +780,40 @@ class MySqlCatalogRepository:
         self, identity: IdentityContext, employee_id: str, version: int
     ) -> DigitalEmployeeVersion:
         with self._reader() as (_, cursor):
-            cursor.execute(
-                "SELECT employee_id, tenant_id, version, system_prompt, execution_profile_id, "
-                "execution_profile_version, model_route_id, workspace_profile_id, workspace_profile_version, "
-                "sandbox_profile_id, sandbox_profile_version, approval_policy_json, status FROM digital_employee_versions "
-                "WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND version=%s",
-                (identity.platform_id, identity.tenant_id, employee_id, version),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise self._not_found("digital_employee_version")
-            cursor.execute(
-                "SELECT skill_id, skill_version FROM employee_skill_bindings "
-                "WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND employee_version=%s ORDER BY sequence_no",
-                (identity.platform_id, identity.tenant_id, employee_id, version),
-            )
-            skill_refs = tuple((str(item[0]), int(item[1])) for item in cursor.fetchall())
-            cursor.execute(
-                "SELECT tool_id, tool_version FROM employee_tool_bindings "
-                "WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND employee_version=%s ORDER BY sequence_no",
-                (identity.platform_id, identity.tenant_id, employee_id, version),
-            )
-            tool_refs = tuple((str(item[0]), int(item[1])) for item in cursor.fetchall())
+            return self._read_employee_version(cursor, identity, employee_id, version)
+
+    def _read_employee_version(
+        self,
+        cursor: Any,
+        identity: IdentityContext,
+        employee_id: str,
+        version: int,
+        *,
+        lock: bool = False,
+    ) -> DigitalEmployeeVersion:
+        lock_clause = " FOR UPDATE" if lock else ""
+        cursor.execute(
+            "SELECT employee_id, tenant_id, version, system_prompt, execution_profile_id, "
+            "execution_profile_version, model_route_id, workspace_profile_id, workspace_profile_version, "
+            "sandbox_profile_id, sandbox_profile_version, approval_policy_json, status FROM digital_employee_versions "
+            "WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND version=%s" + lock_clause,
+            (identity.platform_id, identity.tenant_id, employee_id, version),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise self._not_found("digital_employee_version")
+        cursor.execute(
+            "SELECT skill_id, skill_version FROM employee_skill_bindings "
+            "WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND employee_version=%s ORDER BY sequence_no",
+            (identity.platform_id, identity.tenant_id, employee_id, version),
+        )
+        skill_refs = tuple((str(item[0]), int(item[1])) for item in cursor.fetchall())
+        cursor.execute(
+            "SELECT tool_id, tool_version FROM employee_tool_bindings "
+            "WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND employee_version=%s ORDER BY sequence_no",
+            (identity.platform_id, identity.tenant_id, employee_id, version),
+        )
+        tool_refs = tuple((str(item[0]), int(item[1])) for item in cursor.fetchall())
         approval = _json_load(row[11], {"name": "none"})
         return DigitalEmployeeVersion(
             employee_id=str(row[0]),
@@ -843,13 +855,8 @@ class MySqlCatalogRepository:
         """锁定员工聚合根后复制版本和全部绑定，序列化并发版本号分配。"""
 
         with self._transaction() as (_, cursor):
-            cursor.execute(
-                "SELECT employee_id FROM digital_employees WHERE platform_id=%s AND tenant_id=%s "
-                "AND employee_id=%s FOR UPDATE",
-                (identity.platform_id, identity.tenant_id, employee_id),
-            )
-            if cursor.fetchone() is None:
-                raise self._not_found("digital_employee")
+            if self._lock_employee_status(cursor, identity, employee_id) is LifecycleStatus.ARCHIVED:
+                raise DomainError("INVALID_STATE", "已归档员工不能创建新版本")
             cursor.execute(
                 "SELECT status FROM digital_employee_versions WHERE platform_id=%s AND tenant_id=%s "
                 "AND employee_id=%s AND version=%s FOR UPDATE",
@@ -858,8 +865,8 @@ class MySqlCatalogRepository:
             source = cursor.fetchone()
             if source is None:
                 raise self._not_found("digital_employee_version")
-            if str(source[0]) != LifecycleStatus.PUBLISHED.value:
-                raise DomainError("INVALID_STATE", "只能基于已发布员工版本创建草稿")
+            if LifecycleStatus(str(source[0])) not in (LifecycleStatus.PUBLISHED, LifecycleStatus.DEPRECATED):
+                raise DomainError("INVALID_STATE", "只能基于已发布或已下线员工版本创建草稿")
             cursor.execute(
                 "SELECT COALESCE(MAX(version), 0) + 1 FROM digital_employee_versions "
                 "WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s",
@@ -916,7 +923,55 @@ class MySqlCatalogRepository:
                         row[5],
                     ),
                 )
-        return self.get_employee_version(identity, employee_id, next_version)
+            return self._read_employee_version(cursor, identity, employee_id, next_version)
+
+    def _lock_employee_status(
+        self, cursor: Any, identity: IdentityContext, employee_id: str
+    ) -> LifecycleStatus:
+        cursor.execute(
+            "SELECT status FROM digital_employees WHERE platform_id=%s AND tenant_id=%s "
+            "AND employee_id=%s FOR UPDATE",
+            _identity_key(identity, employee_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise self._not_found("digital_employee")
+        return LifecycleStatus(str(row[0]))
+
+    def deprecate_employee_version(
+        self, identity: IdentityContext, employee_id: str, version: int
+    ) -> DigitalEmployeeVersion:
+        """锁定员工及其固定版本，在同一事务内下线并写入审计。"""
+
+        with self._transaction() as (_, cursor):
+            # 和分叉使用相同的加锁顺序；在事务内重新确认归档状态。
+            if self._lock_employee_status(cursor, identity, employee_id) is LifecycleStatus.ARCHIVED:
+                raise DomainError("INVALID_STATE", "已归档员工不能下线版本")
+            current = self._read_employee_version(cursor, identity, employee_id, version, lock=True)
+            if current.status is LifecycleStatus.DEPRECATED:
+                return current
+            deprecated = current.deprecate()
+            # 只改状态，保持已发布快照、资源绑定和历史部署原样。
+            cursor.execute(
+                "UPDATE digital_employee_versions SET status=%s WHERE platform_id=%s AND tenant_id=%s "
+                "AND employee_id=%s AND version=%s",
+                (deprecated.status.value, *_identity_key(identity, employee_id), version),
+            )
+            cursor.execute(
+                "INSERT INTO audit_events "
+                "(platform_id, tenant_id, event_id, actor_type, actor_user_id, event_type, policy_version, "
+                "resource_type, resource_id, payload_json) "
+                "VALUES (%s,%s,%s,'USER',%s,'EMPLOYEE_VERSION_DEPRECATED','1','digital_employee_version',%s,%s)",
+                (
+                    identity.platform_id,
+                    identity.tenant_id,
+                    generate_database_id(),
+                    identity.user_id,
+                    employee_id,
+                    _json_dump({"employee_id": employee_id, "version": version}),
+                ),
+            )
+            return deprecated
 
     def replace_employee_resource_bindings(
         self,

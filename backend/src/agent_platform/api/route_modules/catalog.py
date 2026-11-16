@@ -179,9 +179,18 @@ def get_digital_employee_version(
 def fork_digital_employee_version(
     employee_id: str, source_version: int, identity: Identity, service: Catalog
 ) -> dict[str, object]:
-    """基于固定 PUBLISHED 版本创建完整继承配置的新员工 DRAFT。"""
+    """基于固定的已发布或已下线版本创建完整继承配置的新员工草稿。"""
 
     return _version_response(service.fork_employee_version(identity, employee_id, source_version))
+
+
+@router.post("/digital-employees/{employee_id}/versions/{version}/deprecate")
+def deprecate_digital_employee_version(
+    employee_id: str, version: int, identity: Identity, service: Catalog
+) -> dict[str, object]:
+    """下线指定已发布版本；重复请求返回已有下线状态。"""
+
+    return _version_response(service.deprecate_employee_version(identity, employee_id, version))
 
 
 @router.put("/digital-employees/{employee_id}/versions/{version}")

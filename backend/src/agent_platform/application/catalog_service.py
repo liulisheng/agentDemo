@@ -9,6 +9,7 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from threading import RLock
 from uuid import uuid4
 
 from agent_platform.domain.catalog import (
@@ -62,6 +63,7 @@ class InMemoryCatalogRepository:
         self.sandbox_profiles: dict[tuple[str, str, str], object] = {}
         self.deployments: dict[tuple[str, str, str], Deployment] = {}
         self.audit_events: list[AuditEventRecord] = []
+        self._employee_version_lock = RLock()
 
     def _get(self, values: Mapping, key: tuple, resource: str):
         try:
@@ -202,10 +204,12 @@ class InMemoryCatalogRepository:
         return forked
 
     def save_employee(self, identity: IdentityContext, value: DigitalEmployee) -> None:
-        self.employees[_key(identity, value.employee_id)] = value
+        with self._employee_version_lock:
+            self.employees[_key(identity, value.employee_id)] = value
 
     def save_version(self, identity: IdentityContext, value: DigitalEmployeeVersion) -> None:
-        self.employee_versions[(*_key(identity, value.employee_id), value.version)] = value
+        with self._employee_version_lock:
+            self.employee_versions[(*_key(identity, value.employee_id), value.version)] = value
 
     def save_employee_version(self, identity: IdentityContext, value: DigitalEmployeeVersion) -> None:
         self.save_version(identity, value)
@@ -213,18 +217,51 @@ class InMemoryCatalogRepository:
     def fork_employee_version(
         self, identity: IdentityContext, employee_id: str, source_version: int
     ) -> DigitalEmployeeVersion:
-        """复制员工版本完整快照；内存仓储用单次替换保持操作原子。"""
+        """在锁内分配版本号并复制历史员工配置。"""
 
-        source = self.get_employee_version(identity, employee_id, source_version)
-        if source.status is not LifecycleStatus.PUBLISHED:
-            raise DomainError("INVALID_STATE", "只能基于已发布员工版本创建草稿")
-        next_version = max(
-            (value.version for value in self.list_employee_versions(identity, employee_id)),
-            default=0,
-        ) + 1
-        forked = replace(source, version=next_version, status=LifecycleStatus.DRAFT)
-        self.save_employee_version(identity, forked)
-        return forked
+        with self._employee_version_lock:
+            employee = self.get_employee(identity, employee_id)
+            if employee.status is LifecycleStatus.ARCHIVED:
+                raise DomainError("INVALID_STATE", "已归档员工不能创建新版本")
+            source = self.get_employee_version(identity, employee_id, source_version)
+            if source.status not in (LifecycleStatus.PUBLISHED, LifecycleStatus.DEPRECATED):
+                raise DomainError("INVALID_STATE", "只能基于已发布或已下线员工版本创建草稿")
+            next_version = max(
+                (value.version for value in self.list_employee_versions(identity, employee_id)),
+                default=0,
+            ) + 1
+            forked = replace(source, version=next_version, status=LifecycleStatus.DRAFT)
+            self.save_employee_version(identity, forked)
+            return forked
+
+    def deprecate_employee_version(
+        self, identity: IdentityContext, employee_id: str, version: int
+    ) -> DigitalEmployeeVersion:
+        """在同一临界区废弃指定版本并记录一次状态变化。"""
+
+        with self._employee_version_lock:
+            employee = self.get_employee(identity, employee_id)
+            if employee.status is LifecycleStatus.ARCHIVED:
+                raise DomainError("INVALID_STATE", "已归档员工不能下线版本")
+            current = self.get_employee_version(identity, employee_id, version)
+            if current.status is LifecycleStatus.DEPRECATED:
+                return current
+            deprecated = current.deprecate()
+            event = AuditEventRecord(
+                event_id=generate_database_id(),
+                platform_id=identity.platform_id,
+                tenant_id=identity.tenant_id,
+                actor_type="USER",
+                actor_user_id=identity.user_id,
+                event_type="EMPLOYEE_VERSION_DEPRECATED",
+                resource_type="digital_employee_version",
+                resource_id=employee_id,
+                payload={"employee_id": employee_id, "version": version},
+                created_at=datetime.now(UTC),
+            )
+            self.save_employee_version(identity, deprecated)
+            self.audit_events.append(event)
+            return deprecated
 
     def replace_employee_resource_bindings(
         self,
@@ -850,16 +887,30 @@ class CatalogService:
     def fork_employee_version(
         self, identity: IdentityContext, employee_id: str, source_version: int
     ) -> DigitalEmployeeVersion:
-        """复制 PUBLISHED 员工版本的完整配置到新的 DRAFT。"""
+        """复制已发布或已下线员工版本的完整配置到新的 DRAFT。"""
 
         employee = self.repository.get_employee(identity, employee_id)
         self._require_employee_admin(identity)
         if employee.status is LifecycleStatus.ARCHIVED:
             raise DomainError("INVALID_STATE", "已归档员工不能创建新版本")
         source = self.repository.get_employee_version(identity, employee_id, source_version)
-        if source.status is not LifecycleStatus.PUBLISHED:
-            raise DomainError("INVALID_STATE", "只能基于已发布员工版本创建草稿")
+        if source.status not in (LifecycleStatus.PUBLISHED, LifecycleStatus.DEPRECATED):
+            raise DomainError("INVALID_STATE", "只能基于已发布或已下线员工版本创建草稿")
         return self.repository.fork_employee_version(identity, employee_id, source_version)
+
+    def deprecate_employee_version(
+        self, identity: IdentityContext, employee_id: str, version: int
+    ) -> DigitalEmployeeVersion:
+        """管理员下线指定员工版本，保留其配置与既有部署。"""
+
+        employee = self.repository.get_employee(identity, employee_id)
+        self._require_employee_admin(identity)
+        if employee.status is LifecycleStatus.ARCHIVED:
+            raise DomainError("INVALID_STATE", "已归档员工不能下线版本")
+        current = self.repository.get_employee_version(identity, employee_id, version)
+        if current.status not in (LifecycleStatus.PUBLISHED, LifecycleStatus.DEPRECATED):
+            raise DomainError("INVALID_STATE", "只有已发布员工版本才能废弃")
+        return self.repository.deprecate_employee_version(identity, employee_id, version)
 
     @staticmethod
     def _canonical_hub_manifest_digest(package: HubResourceVersion) -> str:
