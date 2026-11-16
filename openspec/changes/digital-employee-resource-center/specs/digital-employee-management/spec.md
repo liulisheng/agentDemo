@@ -114,13 +114,17 @@
 - **WHEN** 草稿引用未发布依赖、无权 Hub 资源或不匹配摘要
 - **THEN** 系统阻止发布并返回逐项可定位的依赖错误
 
-### Requirement: Deployment 只能指向已发布版本
+### Requirement: 新建 Deployment 和回滚只能选择已发布版本
 
 系统 SHALL 只允许管理员在新建 Deployment 或回滚时选择 PUBLISHED 员工版本；历史 Deployment 可以继续固定并运行 DEPRECATED 版本，部署或回滚不得改写既有 Run 的版本快照。
 
 #### Scenario: 回滚 Deployment
 - **WHEN** 管理员把 Deployment 回滚到员工旧的 PUBLISHED 版本
 - **THEN** 系统更新 Deployment 指针并记录审计事件，已有 Run 继续保留创建时的版本快照
+
+#### Scenario: 回滚 Deployment 到非 PUBLISHED 版本
+- **WHEN** 管理员选择 DRAFT 或 DEPRECATED 的员工版本作为回滚目标
+- **THEN** 系统返回 `DEPENDENCY_VALIDATION_ERROR`（409），部署保留当前版本
 
 ### Requirement: 员工版本下线不改变已有部署
 
