@@ -186,6 +186,8 @@ test('employee list creates an employee and opens its detail page', async () => 
 
   expect(await screen.findByRole('heading', { name: '数字员工' })).toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: '新建数字员工' }))
+  const descriptionGuidance = screen.getByText('用于员工目录和详情说明，不会作为模型运行指令。')
+  expect(descriptionGuidance.closest('.ant-form-item')).toBe(screen.getByLabelText('员工描述').closest('.ant-form-item'))
   await user.type(screen.getByLabelText('员工名称'), '办公助手')
   await user.type(screen.getByLabelText('员工类型'), '行政支持')
   await user.type(screen.getByLabelText('员工描述'), '处理办公申请')
@@ -204,6 +206,8 @@ test('employee detail edits basic information and hides actions for a member', a
 
   expect(await screen.findByRole('heading', { name: '办公助手' })).toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: '编辑资料' }))
+  const descriptionGuidance = screen.getByText('用于员工目录和详情说明，不会作为模型运行指令。')
+  expect(descriptionGuidance.closest('.ant-form-item')).toBe(screen.getByLabelText('员工描述').closest('.ant-form-item'))
   const description = screen.getByLabelText('员工描述')
   await user.clear(description)
   await user.type(description, '修改后的办公申请处理')
@@ -220,6 +224,18 @@ test('employee detail edits basic information and hides actions for a member', a
     ))).toBe(true)
   })
   expect(screen.getByRole('heading', { name: '办公助手' })).toBeInTheDocument()
+})
+
+test('new employee version explains the scope of its system prompt', async () => {
+  const user = userEvent.setup()
+  renderEmployeeRoutes('/enterprise/employees/employee-1')
+
+  expect(await screen.findByRole('heading', { name: '办公助手' })).toBeInTheDocument()
+  await user.click(screen.getByRole('tab', { name: 'Skills' }))
+  await user.click(await screen.findByRole('button', { name: '新建草稿版本' }))
+
+  const promptGuidance = screen.getByText('定义员工每次处理请求时都遵守的角色、规则和边界。')
+  expect(promptGuidance.closest('.ant-form-item')).toBe(screen.getByLabelText('系统指令').closest('.ant-form-item'))
 })
 
 test('employee workspace gives each resource type its own tab', async () => {
@@ -313,6 +329,8 @@ test('new Skill creates a DRAFT then opens only its Skill file workspace', async
   await user.click(await screen.findByRole('button', { name: '添加 Skill' }))
   await user.click(await screen.findByRole('button', { name: '新建 Skill' }))
   expect(await screen.findByRole('heading', { name: '新建 Skill' })).toBeInTheDocument()
+  const instructionGuidance = screen.getByText('描述可复用的处理步骤、触发条件和例外；只有绑定此 Skill 的员工版本会应用。')
+  expect(instructionGuidance.closest('.ant-form-item')).toBe(screen.getByLabelText('初始指令').closest('.ant-form-item'))
   await user.type(screen.getByLabelText('Skill 名称'), '新建的 Skill')
   await user.type(screen.getByLabelText('初始指令'), '初始指令')
   await user.click(screen.getByRole('button', { name: '创建草稿并编辑文件' }))

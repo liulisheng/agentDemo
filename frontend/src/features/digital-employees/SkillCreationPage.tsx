@@ -83,7 +83,12 @@ export function SkillCreationPage() {
               { value: 'workflow', label: '流程型 Skill' },
             ]} />
           </Form.Item>
-          <Form.Item name="instruction" label="初始指令" rules={[{ required: true, message: '请输入初始指令' }]}>
+          <Form.Item
+            name="instruction"
+            label="初始指令"
+            extra="描述可复用的处理步骤、触发条件和例外；只有绑定此 Skill 的员工版本会应用。"
+            rules={[{ required: true, message: '请输入初始指令' }]}
+          >
             <Input.TextArea rows={6} maxLength={65535} placeholder="填写 Skill 的初始内容；文件工作区可继续拆分为 SKILL.md 和辅助文件。" />
           </Form.Item>
           <Form.Item name="allowed_tool_ids" label="可选 Tool 依赖">

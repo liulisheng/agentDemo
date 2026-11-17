@@ -534,7 +534,12 @@ export function EmployeeDetailPage() {
           <Form.Item name="role_name" label="员工类型" rules={[{ required: true, message: '请输入员工类型' }]}>
             <Input maxLength={128} />
           </Form.Item>
-          <Form.Item name="description" label="员工描述" rules={[{ required: true, message: '请输入员工描述' }]}>
+          <Form.Item
+            name="description"
+            label="员工描述"
+            extra="用于员工目录和详情说明，不会作为模型运行指令。"
+            rules={[{ required: true, message: '请输入员工描述' }]}
+          >
             <Input.TextArea maxLength={1024} rows={3} />
           </Form.Item>
           {updateMutation.isError && <Alert type="error" message={(updateMutation.error as Error).message} />}
@@ -553,7 +558,12 @@ export function EmployeeDetailPage() {
       >
         <Paragraph type="secondary">创建后立即进入版本配置，可分别设置 Skills、Tools 和运行环境。</Paragraph>
         <Form form={versionForm} layout="vertical" onFinish={(values) => createVersionMutation.mutate(values.system_prompt)}>
-          <Form.Item name="system_prompt" label="系统指令" rules={[{ required: true, message: '请输入系统指令' }]}>
+          <Form.Item
+            name="system_prompt"
+            label="系统指令"
+            extra="定义员工每次处理请求时都遵守的角色、规则和边界。"
+            rules={[{ required: true, message: '请输入系统指令' }]}
+          >
             <Input.TextArea rows={5} maxLength={65535} placeholder="定义员工的职责、边界和回答要求" />
           </Form.Item>
           {createVersionMutation.isError && <Alert type="error" message={(createVersionMutation.error as Error).message} />}

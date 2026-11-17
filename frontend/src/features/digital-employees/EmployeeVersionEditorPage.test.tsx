@@ -107,7 +107,7 @@ test('version editor shows exact refs, saves draft bindings and previews the fak
   const user = userEvent.setup()
   renderEditor()
 
-  expect(await screen.findByRole('heading', { name: '员工版本配置' })).toBeInTheDocument()
+  expect(await screen.findByLabelText('系统指令')).toBeInTheDocument()
   expect(screen.getByText('可用 · 读取工单')).toBeInTheDocument()
   const systemPrompt = screen.getByLabelText('系统指令')
   await user.clear(systemPrompt)
@@ -133,13 +133,21 @@ test('version editor shows exact refs, saves draft bindings and previews the fak
   expect(await screen.findByText('fake: 预览这个版本')).toBeInTheDocument()
 }, 15000)
 
+test('version editor explains the system prompt scope beside its field', async () => {
+  renderEditor()
+
+  const systemPrompt = await screen.findByLabelText('系统指令')
+  const promptGuidance = screen.getByText('定义员工每次处理请求时都遵守的角色、规则和边界。')
+  expect(promptGuidance.closest('.ant-form-item')).toBe(systemPrompt.closest('.ant-form-item'))
+})
+
 test('version editor warns before an in-app navigation with unsaved changes', async () => {
   const user = userEvent.setup()
   const confirm = vi.fn(() => false)
   vi.stubGlobal('confirm', confirm)
   renderEditor()
 
-  expect(await screen.findByRole('heading', { name: '员工版本配置' })).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { name: '编辑草稿 v3' })).toBeInTheDocument()
   await user.type(screen.getByLabelText('系统指令'), ' 未保存')
   fireEvent.click(screen.getByRole('link', { name: /返回员工详情/ }))
   expect(confirm).toHaveBeenCalled()
@@ -149,7 +157,7 @@ test('version editor warns before an in-app navigation with unsaved changes', as
 test('version editor keeps Skill and Tool selectors in separate resource sections', async () => {
   renderEditor()
 
-  expect(await screen.findByRole('heading', { name: '员工版本配置' })).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { name: '编辑草稿 v3' })).toBeInTheDocument()
   const skillSection = screen.getByRole('region', { name: 'Skill 绑定' })
   const toolSection = screen.getByRole('region', { name: 'Tool 绑定' })
   expect(within(skillSection).getByLabelText('选择 Skill 版本')).toBeInTheDocument()
@@ -161,7 +169,7 @@ test('version editor keeps Skill and Tool selectors in separate resource section
 test('version editor sends Skill creation to its dedicated workspace', async () => {
   renderEditor()
 
-  expect(await screen.findByRole('heading', { name: '员工版本配置' })).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { name: '编辑草稿 v3' })).toBeInTheDocument()
   const createLink = screen.getByRole('link', { name: '新建 Skill 草稿' })
   expect(createLink).toHaveAttribute('href', '/enterprise/employees/employee-1/skills/new')
   expect(vi.mocked(fetch).mock.calls.some(([input, init]) => (

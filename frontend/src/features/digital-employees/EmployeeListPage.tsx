@@ -244,7 +244,12 @@ export function EmployeeListPage() {
           <Form.Item name="role_name" label="员工类型" rules={[{ required: true, message: '请输入员工类型' }]}>
             <Input maxLength={128} placeholder="例如：客户支持" />
           </Form.Item>
-          <Form.Item name="description" label="员工描述" rules={[{ required: true, message: '请输入员工描述' }]}>
+          <Form.Item
+            name="description"
+            label="员工描述"
+            extra="用于员工目录和详情说明，不会作为模型运行指令。"
+            rules={[{ required: true, message: '请输入员工描述' }]}
+          >
             <Input.TextArea maxLength={1024} rows={3} placeholder="说明员工的职责和使用范围" />
           </Form.Item>
           {createMutation.isError && <Alert type="error" message={(createMutation.error as Error).message} />}

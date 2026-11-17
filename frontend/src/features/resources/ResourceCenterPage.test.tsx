@@ -108,9 +108,21 @@ function renderResourceCenter() {
   )
 }
 
+test('resource catalog explains the scope of a Skill initial instruction', async () => {
+  const user = userEvent.setup()
+  renderResourceCenter()
+
+  expect(await screen.findByRole('heading', { name: '资源中心' })).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: '新建技能' }))
+
+  const instructionGuidance = await screen.findByText('描述可复用的处理步骤、触发条件和例外；只有绑定此 Skill 的员工版本会应用。')
+  expect(instructionGuidance.closest('.ant-form-item')).toBe(screen.getByLabelText('初始指令').closest('.ant-form-item'))
+})
+
 test('discoverable resource without Grant cannot be imported and does not request its manifest', async () => {
   const user = userEvent.setup()
   renderResourceCenter()
+  await user.click(screen.getByRole('tab', { name: '发现资源' }))
   expect(await screen.findByText('工单 Skill')).toBeInTheDocument()
   expect(screen.getByText('导入需授权')).toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: '详情' }))
@@ -124,6 +136,7 @@ test('authorized Reference imports show dependencies and remain read-only in My 
   resourceModes = ['REFERENCE']
   const user = userEvent.setup()
   renderResourceCenter()
+  await user.click(screen.getByRole('tab', { name: '发现资源' }))
   expect(await screen.findByText('工单 Skill')).toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: '详情' }))
   await waitFor(() => expect(fetchCalls.some(({ url }) => url.endsWith('/manifest?mode=REFERENCE'))).toBe(true))

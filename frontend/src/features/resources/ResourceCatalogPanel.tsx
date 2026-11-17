@@ -424,7 +424,12 @@ export function ResourceCatalogPanel() {
           </section>
           <section className="resource-form-section" aria-labelledby="skill-content-heading">
             <h3 id="skill-content-heading">指令内容</h3>
-            <Form.Item name="instruction" label="初始指令" rules={[{ required: true, message: '请输入初始指令' }]}>
+            <Form.Item
+              name="instruction"
+              label="初始指令"
+              extra="描述可复用的处理步骤、触发条件和例外；只有绑定此 Skill 的员工版本会应用。"
+              rules={[{ required: true, message: '请输入初始指令' }]}
+            >
               <Input.TextArea rows={7} maxLength={65535} placeholder="描述技能要完成的工作、处理步骤和边界。创建后可在文件工作区继续编辑。" />
             </Form.Item>
           </section>

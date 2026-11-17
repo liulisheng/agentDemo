@@ -523,7 +523,12 @@ export function EmployeeVersionEditorPage() {
         <div className="employee-version-editor-sections">
           <Card className="management-card employee-editor-card" title="角色指令" aria-label="角色指令">
             <Paragraph type="secondary">描述员工职责、边界和回答要求。</Paragraph>
-            <Form.Item name="system_prompt" label="系统指令" rules={[{ required: true, message: '请输入系统指令' }]}>
+            <Form.Item
+              name="system_prompt"
+              label="系统指令"
+              extra="定义员工每次处理请求时都遵守的角色、规则和边界。"
+              rules={[{ required: true, message: '请输入系统指令' }]}
+            >
               <Input.TextArea rows={7} maxLength={65535} placeholder="定义角色职责、流程边界和输出要求" />
             </Form.Item>
           </Card>
