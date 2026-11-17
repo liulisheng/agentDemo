@@ -221,6 +221,159 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
     assert forged.status_code == 403
 
 
+def test_mysql_lifecycle_api_keeps_run_idempotency_audit_and_version_pinning(
+    tmp_path: Path, mysql_catalog_api_database
+) -> None:
+    from agent_platform.api.app import create_app
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+    from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
+    from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
+    from agent_platform.ports.storage import LocalObjectStore
+
+    database, config = mysql_catalog_api_database
+    headers = {"X-Fake-User": "admin-local"}
+
+    def create_mysql_app():
+        connection_factory = lambda: mysql.connect(**config, database=database)
+        return create_app(
+            mode="fake",
+            catalog_repository=MySqlCatalogRepository(connection_factory),
+            execution_repository=MySqlExecutionRepository(connection_factory),
+            object_store=LocalObjectStore(
+                tmp_path / "lifecycle-objects",
+                metadata_repository=MySqlMediaAssetRepository(connection_factory),
+            ),
+        )
+
+    client = TestClient(create_mysql_app())
+    route = client.post(
+        "/api/v1/model-routes",
+        headers=headers,
+        json={"alias": "lifecycle-fake", "model_name": "fake-model", "provider": "fake"},
+    )
+    assert route.status_code == 201
+    profile = client.post(
+        "/api/v1/execution-profiles",
+        headers=headers,
+        json={"engine_name": "fake", "model_alias": "lifecycle-fake", "model_route_id": route.json()["route_id"]},
+    )
+    assert profile.status_code == 201
+    skill = client.post(
+        "/api/v1/skills",
+        headers=headers,
+        json={"name": "MySQL 生命周期 Skill", "skill_type": "instruction", "instruction": "按步骤执行"},
+    )
+    assert skill.status_code == 201
+    assert client.post(f"/api/v1/skills/{skill.json()['id']}/publish", headers=headers).status_code == 200
+    employee = client.post(
+        "/api/v1/digital-employees",
+        headers=headers,
+        json={"name": "MySQL 生命周期助手", "role_name": "助理", "description": "持久化准入验收"},
+    )
+    assert employee.status_code == 201
+    employee_id = employee.json()["id"]
+
+    published_versions = []
+    for system_prompt in ("版本一", "版本二"):
+        version = client.post(
+            f"/api/v1/digital-employees/{employee_id}/versions",
+            headers=headers,
+            json={
+                "system_prompt": system_prompt,
+                "skill_ids": [skill.json()["id"]],
+                "execution_profile_id": profile.json()["id"],
+            },
+        )
+        assert version.status_code == 201
+        published_versions.append(version.json()["version"])
+        assert client.post(
+            f"/api/v1/digital-employees/{employee_id}/versions/{version.json()['version']}/publish",
+            headers=headers,
+        ).status_code == 200
+    version1, version2 = published_versions
+
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=headers,
+        json={"employee_id": employee_id, "version": version2},
+    )
+    assert deployment.status_code == 201
+    deployment_id = deployment.json()["id"]
+    session = client.post("/api/v1/sessions", headers=headers, json={"deployment_id": deployment_id})
+    assert session.status_code == 201
+    session_id = session.json()["id"]
+    completed_run = client.post(
+        f"/api/v1/sessions/{session_id}/runs",
+        headers=headers,
+        json={"prompt": "MySQL 生命周期运行", "idempotency_key": "mysql-lifecycle-run"},
+    )
+    assert completed_run.status_code == 201
+    run_id = completed_run.json()["id"]
+    assert completed_run.json()["status"] == "succeeded"
+
+    assert client.post(
+        f"/api/v1/digital-employees/{employee_id}/versions/{version1}/deprecate", headers=headers
+    ).json()["status"] == "DEPRECATED"
+    assert client.post(
+        f"/api/v1/deployments/{deployment_id}/disable", headers=headers
+    ).json()["status"] == "DISABLED"
+    client.close()
+
+    # 新进程只能凭 MySQL 幂等记录重放；新 key 仍必须通过当前 DISABLED 准入状态。
+    restarted = TestClient(create_mysql_app())
+    replay = restarted.post(
+        f"/api/v1/sessions/{session_id}/runs",
+        headers=headers,
+        json={"prompt": "MySQL 生命周期运行", "idempotency_key": "mysql-lifecycle-run"},
+    )
+    assert replay.status_code == 201
+    assert replay.json()["id"] == run_id
+    assert replay.json()["status"] == "succeeded"
+    changed_replay = restarted.post(
+        f"/api/v1/sessions/{session_id}/runs",
+        headers=headers,
+        json={"prompt": "修改后的内容", "idempotency_key": "mysql-lifecycle-run"},
+    )
+    assert changed_replay.status_code == 409
+    assert changed_replay.json()["code"] == "IDEMPOTENCY_CONFLICT"
+    new_run = restarted.post(
+        f"/api/v1/sessions/{session_id}/runs",
+        headers=headers,
+        json={"prompt": "下线后新运行", "idempotency_key": "mysql-new-run-after-disable"},
+    )
+    assert new_run.status_code == 409
+    assert new_run.json()["code"] == "DEPLOYMENT_DISABLED"
+    new_session = restarted.post(
+        "/api/v1/sessions", headers=headers, json={"deployment_id": deployment_id}
+    )
+    assert new_session.status_code == 409
+    assert new_session.json()["code"] == "DEPLOYMENT_DISABLED"
+
+    enabled = restarted.post(f"/api/v1/deployments/{deployment_id}/enable", headers=headers)
+    assert enabled.status_code == 200
+    assert enabled.json()["status"] == "ACTIVE"
+    assert enabled.json()["version"] == version2
+    employee_events = restarted.get(
+        "/api/v1/audit-events",
+        headers=headers,
+        params={"resource_type": "digital_employee_version", "resource_id": employee_id, "limit": 20},
+    )
+    assert [event["event_type"] for event in employee_events.json()["items"]].count(
+        "EMPLOYEE_VERSION_DEPRECATED"
+    ) == 1
+    deployment_events = restarted.get(
+        "/api/v1/audit-events",
+        headers=headers,
+        params={"resource_type": "deployment", "resource_id": deployment_id, "limit": 20},
+    )
+    assert {event["event_type"] for event in deployment_events.json()["items"]} == {
+        "DEPLOYMENT_CREATED",
+        "DEPLOYMENT_DISABLED",
+        "DEPLOYMENT_ENABLED",
+    }
+    assert restarted.get("/api/v1/audit-events", headers={"X-Fake-User": "member-local"}).status_code == 403
+
+
 def test_mysql_employee_search_cursor_and_version_detail_are_tenant_scoped(
     mysql_catalog_api_database,
 ) -> None:

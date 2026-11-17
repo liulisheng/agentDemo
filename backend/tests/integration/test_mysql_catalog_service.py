@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -224,3 +225,128 @@ def test_mysql_employee_fork_and_type_specific_bindings_preserve_other_configura
     assert changed_tools.tool_version_refs == ((second_tool.tool_id, 1),)
     assert changed_tools.system_prompt == "保持系统指令"
     assert service.repository.get_employee_version(identity, employee.employee_id, 1) == published
+
+
+def test_mysql_lifecycle_transitions_rollback_with_audit_and_serialize_concurrent_writes(
+    mysql_catalog_service_database,
+) -> None:
+    from agent_platform.adapters.identity.fake import FakeIdentityProvider
+    from agent_platform.application.catalog_service import CatalogService
+    from agent_platform.domain.catalog import LifecycleStatus, SkillType
+    from agent_platform.domain.common import DomainError
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+
+    database, config = mysql_catalog_service_database
+    identity = FakeIdentityProvider().resolve_identity("admin-local")
+    other = FakeIdentityProvider().resolve_identity("admin-other")
+    service = CatalogService(MySqlCatalogRepository(lambda: mysql.connect(**config, database=database)))
+    skill = service.create_skill(identity, "生命周期 Skill", SkillType.INSTRUCTION, "按步骤执行", ())
+    service.publish_skill(identity, skill.skill_id)
+    employee = service.create_employee(identity, "生命周期员工", "助理", "并发状态转换")
+    published1 = service.create_employee_version(identity, employee.employee_id, "版本一", [skill.skill_id], [])
+    service.publish_employee_version(identity, employee.employee_id, published1.version)
+    published2 = service.create_employee_version(identity, employee.employee_id, "版本二", [skill.skill_id], [])
+    service.publish_employee_version(identity, employee.employee_id, published2.version)
+    deployment = service.deploy(identity, employee.employee_id, published2.version)
+
+    def create_rejecting_audit_trigger(trigger_name: str) -> None:
+        connection = mysql.connect(**config, database=database)
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                f"CREATE TRIGGER {trigger_name} BEFORE INSERT ON audit_events FOR EACH ROW "
+                "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '测试注入审计失败'"
+            )
+            connection.commit()
+        finally:
+            cursor.close()
+            connection.close()
+
+    def drop_trigger(trigger_name: str) -> None:
+        connection = mysql.connect(**config, database=database)
+        cursor = connection.cursor()
+        try:
+            cursor.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
+            connection.commit()
+        finally:
+            cursor.close()
+            connection.close()
+
+    fail_deprecate_audit = "fail_deprecate_audit_for_test"
+    create_rejecting_audit_trigger(fail_deprecate_audit)
+    try:
+        with pytest.raises(mysql.Error):
+            service.deprecate_employee_version(identity, employee.employee_id, published1.version)
+    finally:
+        drop_trigger(fail_deprecate_audit)
+    assert service.repository.get_employee_version(
+        identity, employee.employee_id, published1.version
+    ).status is LifecycleStatus.PUBLISHED
+    assert service.list_audit_events_page(
+        identity,
+        resource_type="digital_employee_version",
+        resource_id=employee.employee_id,
+        limit=20,
+    ).items == ()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(
+            executor.map(
+                lambda _: service.deprecate_employee_version(identity, employee.employee_id, published1.version),
+                range(2),
+            )
+        )
+    assert all(result.status is LifecycleStatus.DEPRECATED for result in results)
+    deprecation_events = service.list_audit_events_page(
+        identity,
+        resource_type="digital_employee_version",
+        resource_id=employee.employee_id,
+        limit=20,
+    ).items
+    assert [event.event_type for event in deprecation_events].count("EMPLOYEE_VERSION_DEPRECATED") == 1
+
+    fail_disable_audit = "fail_deployment_disable_audit_for_test"
+    create_rejecting_audit_trigger(fail_disable_audit)
+    try:
+        with pytest.raises(mysql.Error):
+            service.disable_deployment(identity, deployment.deployment_id)
+    finally:
+        drop_trigger(fail_disable_audit)
+    assert service.resolve_deployment(identity, deployment.deployment_id).status is LifecycleStatus.ACTIVE
+    audit_after_failed_disable = service.list_audit_events_page(
+        identity,
+        resource_type="deployment",
+        resource_id=deployment.deployment_id,
+        limit=20,
+    ).items
+    assert [event.event_type for event in audit_after_failed_disable] == ["DEPLOYMENT_CREATED"]
+
+    def disable_once(_: int) -> str:
+        try:
+            return service.disable_deployment(identity, deployment.deployment_id).status.value
+        except DomainError as error:
+            return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        disable_results = tuple(executor.map(disable_once, range(2)))
+    assert sorted(disable_results) == ["DISABLED", "INVALID_STATE"]
+    assert service.resolve_deployment(identity, deployment.deployment_id).status is LifecycleStatus.DISABLED
+
+    enabled = service.enable_deployment(identity, deployment.deployment_id)
+    assert enabled.status is LifecycleStatus.ACTIVE
+    assert enabled.employee_version.version == published2.version
+    with pytest.raises(DomainError) as cross_tenant:
+        service.disable_deployment(other, deployment.deployment_id)
+    assert cross_tenant.value.code == "RESOURCE_NOT_FOUND"
+
+    deployment_events = service.list_audit_events_page(
+        identity,
+        resource_type="deployment",
+        resource_id=deployment.deployment_id,
+        limit=20,
+    ).items
+    assert {event.event_type for event in deployment_events} == {
+        "DEPLOYMENT_CREATED",
+        "DEPLOYMENT_DISABLED",
+        "DEPLOYMENT_ENABLED",
+    }

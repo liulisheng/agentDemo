@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+
 import pytest
 
 from agent_platform.adapters.identity.fake import FakeIdentityProvider
@@ -65,6 +68,53 @@ def test_run_idempotency_replays_and_conflicts() -> None:
     with pytest.raises(DomainError) as error:
         service.create_run(identity, session.session_id, "changed", "idem-1")
     assert error.value.code == "IDEMPOTENCY_CONFLICT"
+
+
+def test_run_started_before_deployment_disable_can_finish_and_replay() -> None:
+    class BlockingFakeRuntime(FakeRuntimeAdapter):
+        """允许测试在 Runtime 等待期间变更 Deployment 状态。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = Event()
+            self.finish = Event()
+
+        def run(self, request):
+            self.started.set()
+            if not self.finish.wait(timeout=5):
+                raise TimeoutError("测试未释放阻塞的 Fake Runtime")
+            return super().run(request)
+
+    catalog, identity, deployment = _published_service()
+    runtime = BlockingFakeRuntime()
+    service = ControlPlaneService(catalog.catalog, runtime)
+    session = service.create_session(identity, deployment.deployment_id)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            service.create_run, identity, session.session_id, "运行中请求", "running-idem"
+        )
+        try:
+            assert runtime.started.wait(timeout=3)
+            running_replay = service.create_run(
+                identity, session.session_id, "运行中请求", "running-idem"
+            )
+            assert running_replay.status.value == "running"
+            assert service.catalog.disable_deployment(identity, deployment.deployment_id).status.value == "DISABLED"
+
+            with pytest.raises(DomainError) as new_run_after_disable:
+                service.create_run(identity, session.session_id, "新请求", "new-after-disable")
+            assert new_run_after_disable.value.code == "DEPLOYMENT_DISABLED"
+            with pytest.raises(DomainError) as changed_replay:
+                service.create_run(identity, session.session_id, "修改内容", "running-idem")
+            assert changed_replay.value.code == "IDEMPOTENCY_CONFLICT"
+        finally:
+            runtime.finish.set()
+
+        completed = pending.result(timeout=5)
+
+    assert completed.status.value == "succeeded"
+    assert service.create_run(identity, session.session_id, "运行中请求", "running-idem").run_id == completed.run_id
 
 
 def test_trace_is_tenant_scoped() -> None:
