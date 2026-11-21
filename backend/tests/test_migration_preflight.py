@@ -70,7 +70,7 @@ def test_repository_migration_catalog_plans_forward_migrations_after_v003() -> N
     )
 
     assert result.action is PreflightAction.APPLY_MIGRATIONS
-    assert result.migrations_to_apply == ("V004", "V005")
+    assert result.migrations_to_apply == ("V004", "V005", "V006", "V007")
 
 
 def test_complete_v003_marker_without_checksum_requires_forward_v004() -> None:
@@ -194,7 +194,7 @@ def test_partial_v005_file_package_schema_blocks_migration() -> None:
     assert result.errors[0].startswith("partial_v005_schema:")
 
 
-def test_v005_database_with_complete_markers_and_checksums_is_up_to_date() -> None:
+def test_v005_database_plans_v006_after_complete_markers_and_checksums() -> None:
     from agent_platform.infrastructure.migrations import (
         V001_SENTINEL_OBJECTS,
         V002_SENTINEL_OBJECTS,
@@ -203,7 +203,7 @@ def test_v005_database_with_complete_markers_and_checksums_is_up_to_date() -> No
         V005_SKILL_COLUMNS,
     )
 
-    checksums = {version: f"v{version}" for version in range(1, 6)}
+    checksums = {version: f"v{version}" for version in range(1, 7)}
     result = MigrationPreflight(checksums).assess(
         MigrationBaseline(
             schema_version=5,
@@ -224,7 +224,178 @@ def test_v005_database_with_complete_markers_and_checksums_is_up_to_date() -> No
         )
     )
 
+    assert result.action is PreflightAction.APPLY_MIGRATIONS
+    assert result.migrations_to_apply == ("V006",)
+
+
+def test_partial_v006_profile_schema_blocks_migration() -> None:
+    from agent_platform.infrastructure.migrations import (
+        V001_SENTINEL_OBJECTS,
+        V002_SENTINEL_OBJECTS,
+        V004_SENTINEL_OBJECTS,
+        V005_SENTINEL_OBJECTS,
+        V006_SENTINEL_OBJECTS,
+        V006_TOOL_COLUMNS,
+    )
+
+    result = MigrationPreflight({version: f"v{version}" for version in range(1, 7)}).assess(
+        MigrationBaseline(
+            schema_version=5,
+            schema_objects=(
+                V001_SENTINEL_OBJECTS
+                | V002_SENTINEL_OBJECTS
+                | V003_OBJECTS
+                | V004_SENTINEL_OBJECTS
+                | V005_SENTINEL_OBJECTS
+                | {next(iter(V006_SENTINEL_OBJECTS))}
+            ),
+            schema_columns={
+                "sessions": frozenset({"last_message_sequence"}),
+                "skill_versions": frozenset({"content_format", "entry_path", "file_manifest_sha256"}),
+                "tool_versions": frozenset({next(iter(V006_TOOL_COLUMNS))}),
+            },
+            introspection_available=True,
+        )
+    )
+
+    assert result.action is PreflightAction.BLOCK_PARTIAL_MIGRATION
+    assert result.errors[0].startswith("partial_v006_schema:")
+
+
+def test_v006_database_with_all_markers_and_checksums_is_up_to_date() -> None:
+    from agent_platform.infrastructure.migrations import (
+        V001_SENTINEL_OBJECTS,
+        V002_SENTINEL_OBJECTS,
+        V004_SENTINEL_OBJECTS,
+        V005_SENTINEL_OBJECTS,
+        V005_SKILL_COLUMNS,
+        V006_APPROVAL_COLUMNS,
+        V006_RUN_COLUMNS,
+        V006_SENTINEL_OBJECTS,
+        V006_TOOL_COLUMNS,
+    )
+
+    checksums = {version: f"v{version}" for version in range(1, 7)}
+    result = MigrationPreflight(checksums).assess(
+        MigrationBaseline(
+            schema_version=6,
+            applied_checksums=checksums,
+            schema_objects=(
+                V001_SENTINEL_OBJECTS
+                | V002_SENTINEL_OBJECTS
+                | V003_OBJECTS
+                | V004_SENTINEL_OBJECTS
+                | V005_SENTINEL_OBJECTS
+                | V006_SENTINEL_OBJECTS
+            ),
+            schema_columns={
+                "sessions": frozenset({"last_message_sequence"}),
+                "skill_versions": V005_SKILL_COLUMNS,
+                "tool_versions": V006_TOOL_COLUMNS,
+                "tool_approval_requests": V006_APPROVAL_COLUMNS,
+                "runs": V006_RUN_COLUMNS,
+            },
+            checksum_history_available=True,
+            introspection_available=True,
+        )
+    )
+
     assert result.action is PreflightAction.UP_TO_DATE
+
+
+def test_partial_v007_session_lease_schema_blocks_worker_claims() -> None:
+    from agent_platform.infrastructure.migrations import (
+        V001_SENTINEL_OBJECTS,
+        V002_SENTINEL_OBJECTS,
+        V004_SENTINEL_OBJECTS,
+        V005_SENTINEL_OBJECTS,
+        V005_SKILL_COLUMNS,
+        V006_APPROVAL_COLUMNS,
+        V006_RUN_COLUMNS,
+        V006_SENTINEL_OBJECTS,
+        V006_TOOL_COLUMNS,
+    )
+
+    checksums = {version: f"v{version}" for version in range(1, 8)}
+    result = MigrationPreflight(checksums).assess(
+        MigrationBaseline(
+            schema_version=6,
+            applied_checksums={version: checksums[version] for version in range(1, 7)},
+            schema_objects=(
+                V001_SENTINEL_OBJECTS
+                | V002_SENTINEL_OBJECTS
+                | V003_OBJECTS
+                | V004_SENTINEL_OBJECTS
+                | V005_SENTINEL_OBJECTS
+                | V006_SENTINEL_OBJECTS
+                | {"session_runtime_leases"}
+            ),
+            schema_columns={
+                "sessions": frozenset({"last_message_sequence"}),
+                "skill_versions": V005_SKILL_COLUMNS,
+                "tool_versions": V006_TOOL_COLUMNS,
+                "tool_approval_requests": V006_APPROVAL_COLUMNS,
+                "runs": V006_RUN_COLUMNS,
+                "session_runtime_leases": frozenset({"session_id"}),
+            },
+            checksum_history_available=True,
+            introspection_available=True,
+        )
+    )
+
+    assert result.action is PreflightAction.BLOCK_PARTIAL_MIGRATION
+    missing_columns = (
+        "session_runtime_leases.fencing_token",
+        "session_runtime_leases.lease_expires_at",
+        "session_runtime_leases.platform_id",
+        "session_runtime_leases.run_id",
+        "session_runtime_leases.state",
+        "session_runtime_leases.tenant_id",
+        "session_runtime_leases.worker_id",
+    )
+    assert result.errors == (f"partial_v007_schema:{','.join(missing_columns)}",)
+
+
+def test_v006_database_plans_v007_session_runtime_lease_migration() -> None:
+    from agent_platform.infrastructure.migrations import (
+        V001_SENTINEL_OBJECTS,
+        V002_SENTINEL_OBJECTS,
+        V004_SENTINEL_OBJECTS,
+        V005_SENTINEL_OBJECTS,
+        V005_SKILL_COLUMNS,
+        V006_APPROVAL_COLUMNS,
+        V006_RUN_COLUMNS,
+        V006_SENTINEL_OBJECTS,
+        V006_TOOL_COLUMNS,
+    )
+
+    checksums = {version: f"v{version}" for version in range(1, 8)}
+    result = MigrationPreflight(checksums).assess(
+        MigrationBaseline(
+            schema_version=6,
+            applied_checksums={version: checksums[version] for version in range(1, 7)},
+            schema_objects=(
+                V001_SENTINEL_OBJECTS
+                | V002_SENTINEL_OBJECTS
+                | V003_OBJECTS
+                | V004_SENTINEL_OBJECTS
+                | V005_SENTINEL_OBJECTS
+                | V006_SENTINEL_OBJECTS
+            ),
+            schema_columns={
+                "sessions": frozenset({"last_message_sequence"}),
+                "skill_versions": V005_SKILL_COLUMNS,
+                "tool_versions": V006_TOOL_COLUMNS,
+                "tool_approval_requests": V006_APPROVAL_COLUMNS,
+                "runs": V006_RUN_COLUMNS,
+            },
+            checksum_history_available=True,
+            introspection_available=True,
+        )
+    )
+
+    assert result.action is PreflightAction.APPLY_MIGRATIONS
+    assert result.migrations_to_apply == ("V007",)
 
 
 def test_partial_v004_objects_block_next_migration() -> None:

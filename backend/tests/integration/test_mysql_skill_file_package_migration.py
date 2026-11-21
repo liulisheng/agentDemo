@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import shutil
 from pathlib import Path
 
 import pytest
@@ -17,10 +18,60 @@ def _has_chinese(value: str | None) -> bool:
 
 
 @pytest.fixture
-def migrated_v005_database():
+def migrated_v005_database(tmp_path: Path):
     if os.environ.get("AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE") != "1":
         pytest.skip("set AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE=1 for disposable MySQL integration")
     database = f"agent_platform_skill_files_{secrets.token_hex(5)}"
+    config = {
+        "host": os.environ.get("MYSQL_HOST", "127.0.0.1"),
+        "port": int(os.environ.get("MYSQL_PORT", "3306")),
+        "user": os.environ.get("MYSQL_USER", "root"),
+        "password": os.environ.get("MYSQL_PASSWORD", ""),
+    }
+    connection = mysql.connect(**config)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(f"CREATE DATABASE `{database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci")
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
+    try:
+        from agent_platform.infrastructure.migrations import MigrationRunner
+
+        migration_source = Path(__file__).parents[3] / "docs" / "migrations"
+        v005_migrations = tmp_path / "migrations-v005"
+        v005_migrations.mkdir()
+        for version in range(1, 6):
+            migration = next(
+                path
+                for path in migration_source.glob(f"V{version:03d}__*.sql")
+                if ".down." not in path.name
+            )
+            shutil.copyfile(migration, v005_migrations / migration.name)
+        result = MigrationRunner(
+            lambda: mysql.connect(**config, database=database),
+            v005_migrations,
+        ).apply()
+        yield database, config, result
+    finally:
+        connection = mysql.connect(**config)
+        cursor = connection.cursor()
+        try:
+            cursor.execute(f"DROP DATABASE IF EXISTS `{database}`")
+            connection.commit()
+        finally:
+            cursor.close()
+            connection.close()
+
+
+@pytest.fixture
+def migrated_current_database():
+    """为 RunSnapshot 集成用例提供 V006 最新 schema。"""
+
+    if os.environ.get("AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE") != "1":
+        pytest.skip("set AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE=1 for disposable MySQL integration")
+    database = f"agent_platform_current_schema_{secrets.token_hex(5)}"
     config = {
         "host": os.environ.get("MYSQL_HOST", "127.0.0.1"),
         "port": int(os.environ.get("MYSQL_PORT", "3306")),
@@ -522,7 +573,7 @@ def test_mysql_zip_commit_rolls_back_manifest_when_file_asset_fk_fails(
         connection.close()
 
 
-def test_mysql_run_snapshot_and_trace_pin_file_package_refs(migrated_v005_database, tmp_path: Path) -> None:
+def test_mysql_run_snapshot_and_trace_pin_file_package_refs(migrated_current_database, tmp_path: Path) -> None:
     import io
     import zipfile
 
@@ -538,7 +589,7 @@ def test_mysql_run_snapshot_and_trace_pin_file_package_refs(migrated_v005_databa
     from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
     from agent_platform.ports.storage import LocalObjectStore
 
-    database, config, _ = migrated_v005_database
+    database, config, _ = migrated_current_database
     connection_factory = lambda: mysql.connect(**config, database=database)
     identity = FakeIdentityProvider().resolve_identity("admin-local")
     connection = connection_factory()

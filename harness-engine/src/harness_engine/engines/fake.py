@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from ..core import (
@@ -82,11 +82,21 @@ class FakeEngine(LifecycleEngine):
         self._active_runs[session.session_id] = run_id
         self._cancel_requested.discard(session.session_id)
         try:
+            employee = request.employee_context
             started = HarnessEvent(
                 event_type="run_started",
                 session_id=session.session_id,
                 run_id=run_id,
-                payload={"parent_run_id": request.parent_run_id},
+                payload={
+                    "parent_run_id": request.parent_run_id,
+                    "employee_id": employee.employee_id if employee is not None else None,
+                    "employee_version": (
+                        employee.employee_version if employee is not None else None
+                    ),
+                    "allowed_tool_names": tuple(
+                        tool.name for tool in request.tool_definitions
+                    ),
+                },
             )
             if on_event is not None:
                 on_event(started)
@@ -109,7 +119,7 @@ class FakeEngine(LifecycleEngine):
             return EngineResult(
                 text=text,
                 finish_reason=finish_reason,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(UTC),
                 capabilities=self.capabilities,
                 run_id=run_id,
                 session=session,

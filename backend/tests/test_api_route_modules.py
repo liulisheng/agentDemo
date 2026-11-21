@@ -21,11 +21,13 @@ def test_business_route_groups_own_their_endpoint_families() -> None:
     assert "/tools" in _paths(catalog.router)
     assert "/deployments" in _paths(deployments.router)
     assert "/sessions/{session_id}/runs" in _paths(deployments.router)
+    assert "/runs/{run_id}/cancel" in _paths(deployments.router)
     assert "/hub/resources" in _paths(resource_center.router)
     assert "/hub/imports" in _paths(resource_center.router)
     assert "/skills/{skill_id}/versions/{version}/files/zip/preview" in _paths(skill_files.router)
     assert "/skills/{skill_id}/versions/{version}/files" in _paths(skill_files.router)
     assert "/conversations" in _paths(conversations.router)
+    assert "/conversations/{conversation_id}/turns" in _paths(conversations.router)
 
 
 def test_aggregate_router_preserves_api_prefix_and_registers_each_group_once() -> None:
@@ -34,3 +36,4 @@ def test_aggregate_router_preserves_api_prefix_and_registers_each_group_once() -
     assert "/api/v1/digital-employees" in paths
     assert "/api/v1/hub/resources" in paths
     assert "/api/v1/skills/{skill_id}/versions/{version}/files" in paths
+    assert "get" in paths["/api/v1/conversations"]

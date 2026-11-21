@@ -14,10 +14,10 @@ import os
 import tempfile
 import traceback
 import uuid
+from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Sequence
-
+from typing import Any
 
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PROFILE = "sdk-minimal"
@@ -113,7 +113,7 @@ def _jsonable(value: Any, *, depth: int = 0) -> Any:
     if callable(model_dump):
         try:
             return _jsonable(model_dump(), depth=depth + 1)
-        except Exception:
+        except (TypeError, ValueError, AttributeError):
             pass
     if hasattr(value, "__dict__"):
         try:
@@ -143,7 +143,7 @@ def _load_local_config(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"local config is not valid JSON: {path}") from exc
     if not isinstance(value, dict):
-        raise ValueError(f"local config must contain a JSON object: {path}")
+        raise TypeError(f"local config must contain a JSON object: {path}")
     return value
 
 
@@ -242,7 +242,7 @@ def _run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     try:
         local_config = _load_local_config(local_config_path)
         settings = _resolve_settings(args, local_config)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — Demo 输出稳定结构化 SDK/运行时失败。
         return 1, {
             "status": "failed",
             "phase": "preflight",
@@ -342,7 +342,7 @@ def _run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             report["status"] = "passed"
             report["phase"] = "complete"
             return 0, report
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — Demo 输出稳定结构化运行时失败。
             report.update(
                 phase=report.get("phase", "runtime"),
                 error_type=type(exc).__name__,

@@ -2,18 +2,98 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from agent_platform.api.schemas import (
     AgentBindingRequest,
     ConversationCreateRequest,
+    ConversationTurnRequest,
     DeliveryCreateRequest,
     MessageCreateRequest,
 )
 
-from .common import Conversations, Identity, _check_tenant
+from .common import Conversations, ConversationTurns, Identity, _check_tenant
 
 router = APIRouter()
+
+
+@router.get("/conversations")
+def list_conversations(
+    identity: Identity,
+    service: Conversations,
+    employee_id: str = Query(min_length=1, max_length=64),
+    status: str = Query(default="ACTIVE"),
+    cursor: str | None = Query(default=None, max_length=2048),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, object]:
+    """按认证用户、租户和数字员工绑定分页返回可恢复对话列表。"""
+
+    page = service.list_for_employee(
+        identity,
+        employee_id,
+        status=status,
+        cursor=cursor,
+        limit=limit,
+    )
+    return {
+        "items": [
+            {
+                "conversation_id": item.conversation_id,
+                "title": item.title,
+                "employee": {
+                    "employee_id": item.employee_id,
+                    "employee_name": item.employee_name,
+                },
+                "session_id": item.session_id,
+                "last_message": (
+                    {
+                        "message_id": item.last_message.message_id,
+                        "preview": item.last_message.preview,
+                        "source": item.last_message.source,
+                        "created_at": item.last_message.created_at,
+                    }
+                    if item.last_message is not None
+                    else None
+                ),
+                "last_run": (
+                    {"run_id": item.last_run_id, "status": item.last_run_status}
+                    if item.last_run_id is not None
+                    else None
+                ),
+                "pending_approval_count": item.pending_approval_count,
+                "updated_at": item.updated_at,
+            }
+            for item in page.items
+        ],
+        "next_cursor": page.next_cursor,
+    }
+
+
+@router.post("/conversations/{conversation_id}/turns", status_code=202)
+def submit_conversation_turn(
+    conversation_id: str,
+    request: ConversationTurnRequest,
+    identity: Identity,
+    service: ConversationTurns,
+) -> dict[str, object]:
+    """原子提交一条用户消息和 QUEUED Run，不等待员工 Runtime 完成。"""
+
+    _check_tenant(identity, request)
+    submission = service.submit(
+        identity,
+        conversation_id,
+        request.text,
+        request.idempotency_key,
+        employee_id=request.employee_id,
+    )
+    return {
+        "conversation_id": conversation_id,
+        "message_id": submission.message.message_id,
+        "run_id": submission.run.run_id,
+        "status": submission.run.status.value.upper(),
+        "replayed": not submission.created,
+    }
+
 
 @router.post("/conversations", status_code=201)
 def create_conversation(request: ConversationCreateRequest, identity: Identity, service: Conversations) -> dict[str, object]:

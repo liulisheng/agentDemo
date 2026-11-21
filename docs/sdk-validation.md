@@ -1,6 +1,6 @@
 # 官方 Harness SDK 最小验证记录
 
-状态：已完成本地最小运行时、一次真实模型 prompt 和一次本地 MCP 工具调用验证；会话恢复、审批和生产沙箱链路仍待验证。日期：2026-11-10。
+状态：已完成本地最小运行时、真实模型 prompt、本地 MCP 工具调用，以及 SDK 会话创建/恢复与员工上下文契约验证；生产审批和容器沙箱链路仍待验证。更新时间：2026-11-19。
 
 兼容策略：预发布 SDK 只通过 `engines/deepseek` 适配器使用；项目公共接口不得暴露其类型。每次升级必须重新运行 [真实验证矩阵](verification-matrix.md)，并记录 SDK/runtime 成对版本和回归结果。
 
@@ -58,9 +58,53 @@
 
 可重复执行的 Demo 位于 `harness-engine/src/harness_engine/deepseek_demo.py`，使用说明见 [DeepSeek Harness 最小验证 Demo](deepseek-harness-demo.md)。
 
+## macOS 隔离员工上下文与 Session 契约（2026-11-19）
+
+为 Harness Worker 的上下文注入契约创建了隔离虚拟环境，安装项目固定的 deepseek-harness-sdk==0.2.2rc2、匹配 runtime wheel、mcp==2.3.0 和测试依赖。使用临时 Harness home、临时 Session 和本机 OpenAI-compatible 测试端点；没有读取或使用本机 .artifacts/local-openai.json，没有真实 API Key，也没有向外部模型发送请求。
+
+新增可重复测试 harness-engine/tests/test_deepseek_sdk_contract.py，通过真实 SDK/runtime 进程验证：
+
+- Employee system prompt、Skill 指令和 Skill 文件内容进入模型请求的 system message。
+- 官方 MCP Stdio client 启动本机 echo MCP server，并在模型请求中暴露其真实 JSON Schema；模型工具名为 mcp__python-tools__echo。
+- SDK 返回的 Session ID 可以从首个 Harness 进程关闭后恢复，并在同一隔离 home 中继续第二轮请求。
+- 本机假模型服务捕获到的只有固定合成提示，不包含员工或租户数据。
+
+复验命令：
+
+~~~bash
+PYTHONPATH=harness-engine/src /path/to/sdk-check-venv/bin/python -m pytest harness-engine/tests/test_deepseek_sdk_contract.py -q
+PYTHONPATH=harness-engine/src python3 -m pytest harness-engine/tests/test_deepseek_engine.py -q
+~~~
+
+本次结果：SDK 契约测试 1 passed；DeepSeek Engine 适配测试 7 passed。该验证覆盖固定版本 SDK 的 prompt/schema/Session 接口和本机 Stdio 子进程，不覆盖 StaffDeck DolphinScheduler MCP 的实际 command/args/cwd/env，也不覆盖 Worker 容器内的安全隔离或真实业务写操作。
+
 ## 当前容器环境检查
 
 本机为 Windows + WSL2；Docker CLI 已安装，但 Docker Desktop Linux Engine 当前无法连接。因此本机没有完成 Docker 容器或 Kubernetes Pod 中的 Harness、MCP、恢复和产物链路验证。该项应在 Docker Engine 或 Kubernetes 节点上执行。microVM 后端不在当前阶段范围内。
+
+## 2026-11-19 RunSnapshot 类型化传递进展
+
+`harness-engine.core.EngineRequest` 已加入 `EmployeeContext`、带内容摘要的 `SkillFileContext` 和仅允许 READ/PREVIEW 的 `EngineToolDefinition`；`FakeEngine` 的 Trace 事件仅记录员工标识/版本与允许工具名，不记录系统指令、Skill 正文或 JSON Schema。Backend 的 `RuntimeRequest` 与 `AgentResolver` 按固定 RunSnapshot 恢复员工/Skill/Tool/MCP Profile 版本；`HarnessRuntimeAdapter` 为每个 Run 调用请求级 Engine factory 并在结束后关闭该 Engine。
+
+DeepSeek SDK 仍把 MCP/tools 和 system prompt 放在 Harness 初始化配置中；每 Run 独立 Harness 将员工指令和工具配置写入唯一临时 overlay，并使用 Session 稳定 Harness Home 保留历史。Home 引用由平台/租户/Session ID 的 SHA-256 生成，仅映射到 `AGENT_PLATFORM_DATA_ROOT/harness-sessions/<digest>`。MySQL V007 lease 串行同一 Session 的 Run；结果未知时 Session 变为 INTERRUPTED 且 Home 被 QUARANTINED，不允许旧进程可能仍在写入时自动复用。
+
+Worker 在启动 Harness 前从固定 MCP Profile 解析 command/cwd allowlist 与 SecretRef；官方 MCP Stdio proxy 校验 Profile 的完整目录摘要和当前 ToolVersion Schema 摘要，只向模型发布当前 Run 的 READ/PREVIEW 工具并在调用时二次拒绝未授权工具。Secret 明文不写入 overlay、临时 JSON、Trace 或日志，并在 Harness close 后清除进程配置副本。
+
+验证命令与结果：
+
+~~~bash
+cd harness-engine
+PYTHONPATH=src /tmp/agentdemo-harness-employee-sdk/bin/python -m pytest -q -rs
+cd ../backend
+PYTHONPATH=../harness-engine/src /tmp/agentdemo-harness-employee-sdk/bin/python -m pytest \
+  tests/test_runtime_employee_context.py tests/test_runtime_adapter.py \
+  tests/test_harness_runtime_adapter.py tests/test_control_plane_service.py \
+  tests/test_claimed_run_execution.py -q
+~~~
+
+Harness Engine 全量：178 passed，3 skipped；Backend 类型化上下文、Session lease、RuntimeAdapter 和 app runtime factory 聚焦测试：39 passed。真实 DeepSeek SDK/runtime 与 Stdio proxy 使用本机假 OpenAI-compatible 模型端点和本机假 MCP 服务验证：连续 Run 共用 Session Home，但员工 system prompt 与 MCP tools/list 各自隔离；第二个 Run 不会看到第一个 Run 的 echo 工具。额外 MySQL V007 disposable 集成测试验证 claim/heartbeat/Session 串行、跨租户同名 Session、UNKNOWN 隔离和迁移 rollback。
+
+该测试不覆盖真实 StaffDeck DolphinScheduler Profile、外部凭据、DolphinScheduler OFFLINE 创建、容器内子进程组关闭或非生产环境 UNKNOWN 对账；这些仍由 OpenSpec 1.1/5.3/7.2 验收。
 
 ## 当前 macOS 本地中转站复验（2026-11-14）
 

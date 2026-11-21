@@ -9,7 +9,11 @@ from typing import Any
 from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.conversations import AgentBinding, Conversation, MessageSource
 from agent_platform.domain.identity import IdentityContext
-from agent_platform.ports.conversation_repository import ConversationRepository, StoredMessage
+from agent_platform.ports.conversation_repository import (
+    ConversationRepository,
+    ConversationSummaryRecord,
+    StoredMessage,
+)
 
 
 class MySqlConversationRepository(ConversationRepository):
@@ -72,14 +76,38 @@ class MySqlConversationRepository(ConversationRepository):
     def get_conversation(self, identity: IdentityContext, conversation_id: str) -> Conversation:
         with self._reader() as (_, cursor):
             cursor.execute(
-                "SELECT conversation_id, platform_id, tenant_id, title, is_group, status FROM conversations "
-                "WHERE platform_id=%s AND tenant_id=%s AND conversation_id=%s",
-                (identity.platform_id, identity.tenant_id, conversation_id),
+                "SELECT c.conversation_id, c.platform_id, c.tenant_id, c.title, c.is_group, c.status, c.updated_at "
+                "FROM conversations c JOIN conversation_participants cp ON cp.platform_id=c.platform_id "
+                "AND cp.tenant_id=c.tenant_id AND cp.conversation_id=c.conversation_id AND cp.user_id=%s "
+                "WHERE c.platform_id=%s AND c.tenant_id=%s AND c.conversation_id=%s",
+                (identity.user_id, identity.platform_id, identity.tenant_id, conversation_id),
             )
             row = cursor.fetchone()
         if row is None:
             raise self._not_found("conversation")
-        return Conversation(str(row[0]), str(row[1]), str(row[2]), str(row[3]), bool(row[4]), str(row[5]))
+        return Conversation(
+            str(row[0]),
+            str(row[1]),
+            str(row[2]),
+            str(row[3]),
+            bool(row[4]),
+            str(row[5]),
+            row[6],
+        )
+
+    def get_conversation_id_for_run(self, identity: IdentityContext, run_id: str) -> str:
+        """只从同租户、同 Run 的 USER 消息解析审批归属 Conversation。"""
+
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT conversation_id FROM messages WHERE platform_id=%s AND tenant_id=%s "
+                "AND run_id=%s AND source='user' ORDER BY sequence_no LIMIT 1",
+                (identity.platform_id, identity.tenant_id, run_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise self._not_found("run_conversation")
+        return str(row[0])
 
     def save_binding(self, identity: IdentityContext, value: AgentBinding) -> None:
         with self._transaction() as (_, cursor):
@@ -139,6 +167,7 @@ class MySqlConversationRepository(ConversationRepository):
             content_type=str(row[9]),
             sequence_no=int(row[10]),
             routing_depth=int(row[11]),
+            created_at=row[12] if len(row) > 12 else None,
         )
 
     def save_message(
@@ -199,6 +228,16 @@ class MySqlConversationRepository(ConversationRepository):
                 "UPDATE sessions SET last_message_sequence=%s WHERE platform_id=%s AND tenant_id=%s AND session_id=%s",
                 (sequence, identity.platform_id, identity.tenant_id, session_id),
             )
+            cursor.execute(
+                "UPDATE conversations SET updated_at=CURRENT_TIMESTAMP(6) "
+                "WHERE platform_id=%s AND tenant_id=%s AND conversation_id=%s",
+                (identity.platform_id, identity.tenant_id, value.conversation_id),
+            )
+            cursor.execute(
+                "SELECT created_at FROM messages WHERE platform_id=%s AND tenant_id=%s AND message_id=%s",
+                (identity.platform_id, identity.tenant_id, value.message_id),
+            )
+            created_at = cursor.fetchone()[0]
         return StoredMessage(
             value.message_id,
             value.conversation_id,
@@ -212,13 +251,14 @@ class MySqlConversationRepository(ConversationRepository):
             content_type,
             sequence,
             value.routing_depth,
+            created_at,
         )
 
     def get_message(self, identity: IdentityContext, message_id: str) -> StoredMessage:
         with self._reader() as (_, cursor):
             cursor.execute(
                 "SELECT message_id, conversation_id, platform_id, tenant_id, sender_id, source, content_ref, "
-                "content_sha256, byte_length, content_type, sequence_no, routing_depth FROM messages "
+                "content_sha256, byte_length, content_type, sequence_no, routing_depth, created_at FROM messages "
                 "WHERE platform_id=%s AND tenant_id=%s AND message_id=%s",
                 (identity.platform_id, identity.tenant_id, message_id),
             )
@@ -233,10 +273,111 @@ class MySqlConversationRepository(ConversationRepository):
         with self._reader() as (_, cursor):
             cursor.execute(
                 "SELECT message_id, conversation_id, platform_id, tenant_id, sender_id, source, content_ref, "
-                "content_sha256, byte_length, content_type, sequence_no, routing_depth FROM messages "
+                "content_sha256, byte_length, content_type, sequence_no, routing_depth, created_at FROM messages "
                 "WHERE platform_id=%s AND tenant_id=%s AND conversation_id=%s AND status='COMPLETE' "
                 "ORDER BY sequence_no, message_id",
                 (identity.platform_id, identity.tenant_id, conversation_id),
             )
             rows = cursor.fetchall()
         return tuple(self._stored_message(row) for row in rows)
+
+    def list_conversation_summaries(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        status: str,
+        cursor: tuple[Any, str] | None,
+        limit: int,
+    ) -> tuple[ConversationSummaryRecord, ...]:
+        """按当前用户参与权和员工绑定读取稳定游标聚合列表。"""
+
+        cursor_filter = ""
+        if cursor is not None:
+            cursor_filter = "AND (c.updated_at < %s OR (c.updated_at=%s AND c.conversation_id < %s)) "
+        query = (
+            "SELECT c.conversation_id, c.platform_id, c.tenant_id, c.title, c.is_group, c.status, c.updated_at, "
+            "b.employee_id, e.name, b.session_id, "
+            "m.message_id, m.sender_id, m.source, m.content_ref, m.content_sha256, m.byte_length, "
+            "m.content_type, m.sequence_no, m.routing_depth, m.created_at, "
+            "lr.run_id, lr.state, "
+            "(SELECT COUNT(*) FROM tool_approval_requests a "
+            "WHERE a.platform_id=c.platform_id AND a.tenant_id=c.tenant_id "
+            "AND a.conversation_id=c.conversation_id AND a.state='PENDING') "
+            "FROM conversations c "
+            "JOIN conversation_participants cp ON cp.platform_id=c.platform_id AND cp.tenant_id=c.tenant_id "
+            "AND cp.conversation_id=c.conversation_id AND cp.user_id=%s "
+            "JOIN agent_bindings b ON b.platform_id=c.platform_id AND b.tenant_id=c.tenant_id "
+            "AND b.conversation_id=c.conversation_id AND b.employee_id=%s AND b.status='ACTIVE' "
+            "JOIN digital_employees e ON e.platform_id=b.platform_id AND e.tenant_id=b.tenant_id "
+            "AND e.employee_id=b.employee_id "
+            "LEFT JOIN ("
+            "SELECT ranked.* FROM ("
+            "SELECT m0.*, ROW_NUMBER() OVER (PARTITION BY m0.platform_id, m0.tenant_id, m0.conversation_id "
+            "ORDER BY m0.sequence_no DESC, m0.message_id DESC) AS message_rank "
+            "FROM messages m0 WHERE m0.status='COMPLETE' AND m0.conversation_id IS NOT NULL"
+            ") ranked WHERE ranked.message_rank=1"
+            ") m ON m.platform_id=c.platform_id AND m.tenant_id=c.tenant_id "
+            "AND m.conversation_id=c.conversation_id "
+            "LEFT JOIN runs lr ON lr.platform_id=b.platform_id AND lr.tenant_id=b.tenant_id "
+            "AND lr.session_id=b.session_id AND lr.run_id=("
+            "SELECT r0.run_id FROM runs r0 WHERE r0.platform_id=b.platform_id "
+            "AND r0.tenant_id=b.tenant_id AND r0.session_id=b.session_id "
+            "ORDER BY r0.created_at DESC, r0.run_id DESC LIMIT 1) "
+            "WHERE c.platform_id=%s AND c.tenant_id=%s AND c.status=%s "
+            + cursor_filter
+            + "ORDER BY c.updated_at DESC, c.conversation_id DESC LIMIT %s"
+        )
+        # SELECT 中参与者和员工绑定参数位于 WHERE 前，重排成 SQL 的占位符顺序。
+        parameters = [
+            identity.user_id,
+            employee_id,
+            identity.platform_id,
+            identity.tenant_id,
+            status,
+            *([cursor[0], cursor[0], cursor[1]] if cursor is not None else []),
+            limit,
+        ]
+        with self._reader() as (_, query_cursor):
+            query_cursor.execute(query, tuple(parameters))
+            rows = query_cursor.fetchall()
+        return tuple(self._conversation_summary_from_row(row) for row in rows)
+
+    @staticmethod
+    def _conversation_summary_from_row(row: tuple[Any, ...]) -> ConversationSummaryRecord:
+        conversation = Conversation(
+            str(row[0]),
+            str(row[1]),
+            str(row[2]),
+            str(row[3]),
+            bool(row[4]),
+            str(row[5]),
+            row[6],
+        )
+        last_message = None
+        if row[10] is not None:
+            last_message = StoredMessage(
+                message_id=str(row[10]),
+                conversation_id=conversation.conversation_id,
+                platform_id=conversation.platform_id,
+                tenant_id=conversation.tenant_id,
+                sender_id=str(row[11]),
+                source=MessageSource(str(row[12])),
+                content_ref=str(row[13]),
+                content_sha256=str(row[14]),
+                byte_length=int(row[15]),
+                content_type=str(row[16]),
+                sequence_no=int(row[17]),
+                routing_depth=int(row[18]),
+                created_at=row[19],
+            )
+        return ConversationSummaryRecord(
+            conversation=conversation,
+            updated_at=row[6],
+            employee_id=str(row[7]),
+            employee_name=str(row[8]),
+            session_id=str(row[9]),
+            last_message=last_message,
+            last_run_id=str(row[20]) if row[20] is not None else None,
+            last_run_status=str(row[21]) if row[21] is not None else None,
+            pending_approval_count=int(row[22] or 0),
+        )

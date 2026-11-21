@@ -2,7 +2,13 @@
 
 `docs/migrations/` 是仓库中唯一的可执行 schema/migration SQL 目录。V001/V002 是历史迁移，禁止为补注释或兼容代码而修改；新增或修改表结构时必须新增 migration，并为每张新表和每个新建/变更字段添加中文 MySQL `COMMENT`。MySQL 集成测试读取 `information_schema.TABLES` 和 `information_schema.COLUMNS` 验证实际落库注释。
 
-当前迁移面向 MySQL 8.4、InnoDB 和 `utf8mb4_0900_ai_ci`。V003 是在首次共享环境应用前完成的控制面迁移。如果任何共享环境已经应用较早的 V003 草案，不得重写 V003，应先核对 schema/checksum 并制定向前兼容的 V004。当前 V004 是资源中心向前迁移，V005 增加 Skill `INLINE`/`FILE_PACKAGE` 模式与文件清单；Runner 会在检测到部分 V005 DDL 或版本标记不一致时 fail closed。
+当前迁移面向 MySQL 8.4、InnoDB 和 `utf8mb4_0900_ai_ci`。V003 是在首次共享环境应用前完成的控制面迁移。如果任何共享环境已经应用较早的 V003 草案，不得重写 V003，应先核对 schema/checksum 并制定向前兼容的 V004。V004 增加资源中心，V005 增加 Skill `INLINE`/`FILE_PACKAGE` 模式与文件清单，V006 增加 MCP Stdio Profile、一次性 Tool Approval、Run 提交者字段和审批等待状态，V007 增加每 Session Harness Home 执行租约；Runner 会在检测到部分 DDL 或版本标记不一致时 fail closed。
+
+V006 也为按 Session 读取最新 Run、按 Conversation 聚合 PENDING Approval 数新增复合索引，供员工工作台游标列表使用；并为 Worker 的平台级 QUEUED claim 增加 `(platform_id, state, created_at, run_id)` 索引。列表查询和更新时间推进不新增重复的 Conversation 索引表。
+
+V007 `session_runtime_leases` 为同一 Session Home 持有 ACTIVE 或 QUARANTINED 租约，租约唯一键使用 platform/tenant/session 范围。Run claim、Run heartbeat、Session lease heartbeat、确定终态释放和 UNKNOWN 隔离必须在事务中维护同一 fencing token。QUARANTINED 不自动过期，Session 转为 INTERRUPTED；管理员需要创建新的 Session 才能继续，不能让另一个 Worker 自动复用可能仍被旧 Harness 写入的 Home。
+
+升级到 V007 前先停止新 Run claim 并排空 Worker；迁移会把既有 STARTING/RUNNING/CANCELLING Run 的 lease 写入新表。如果同一 Session 仍有多个活动 Run，Session 主键冲突会使迁移停止，必须先人工核对这些 Run，不能由迁移任意选一个继续。
 
 ## 显式预检和迁移
 
@@ -34,7 +40,7 @@ python -m pytest tests/integration/test_production_control_plane_migration.py \
   tests/integration/test_mysql_migration_runner.py -q
 ```
 
-测试覆盖 V003 正向/回滚、V004 资源中心和 V005 Skill 文件包迁移、外键与租户联合键、中文表/字段注释、重复迁移、checksum 变化和失败停止。V005 文件包清单外键确保文件行与当前租户 Skill 版本和 MediaAsset 同平台同租户。运行版本和最终 checksum 记录在 [`../验证记录.md`](../验证记录.md)。
+测试覆盖 V003 正向/回滚、V004 资源中心、V005 Skill 文件包、V006 MCP/审批迁移、V007 Session lease、外键与租户联合键、中文表/字段注释、重复迁移、checksum 变化和失败停止。V006/V007 down 脚本只在 disposable database 验证；生产回滚保留增量 schema。运行版本和最终 checksum 记录在 [`../验证记录.md`](../验证记录.md)。
 
 ## 备份与回滚
 
@@ -43,7 +49,7 @@ python -m pytest tests/integration/test_production_control_plane_migration.py \
 ```bash
 mysqldump --single-transaction -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p \
   "$MYSQL_DATABASE" > /secure/backup/agent-platform.sql
-tar -C "$AGENT_PLATFORM_DATA_ROOT" -czf /secure/backup/agent-platform-objects.tgz objects
+tar -C "$AGENT_PLATFORM_DATA_ROOT" -czf /secure/backup/agent-platform-data.tgz objects harness-sessions
 ```
 
 [`V003__agent_platform_foundation.down.sql`](V003__agent_platform_foundation.down.sql) 仅用于 disposable database 验证；不得在有业务数据的环境执行。生产回滚采用兼容旧应用版本的代码回滚，并保留增量 schema。破坏性 DDL 需单独审批并先演练 DB/对象备份恢复。

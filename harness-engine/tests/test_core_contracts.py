@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, datetime
 
 import pytest
@@ -5,13 +6,16 @@ import pytest
 from harness_engine.core import (
     CancelResult,
     CancelStatus,
+    EmployeeContext,
     EngineCapabilities,
     EngineRequest,
     EngineResult,
     EngineState,
+    EngineToolDefinition,
     HarnessEvent,
     LifecycleEngine,
     SessionRef,
+    SkillFileContext,
     TenantContext,
     VisibleTextDelta,
 )
@@ -76,6 +80,80 @@ def test_request_rejects_conflicting_session_reference():
 
     with pytest.raises(ValueError, match="session_id"):
         EngineRequest(prompt="hello", session_id="session-2", session=session)
+
+
+def test_engine_request_carries_fixed_employee_context_and_only_read_preview_tools():
+    context = EmployeeContext(
+        employee_id="employee-1",
+        employee_version=7,
+        system_prompt="只执行数仓任务",
+        skill_refs=(("skill-1", 2),),
+        skill_instructions=("先检查项目，再生成预览",),
+        skill_files=(
+            SkillFileContext(
+                skill_id="skill-1",
+                skill_version=2,
+                path="SKILL.md",
+                content="创建工作流必须保持 OFFLINE",
+                content_sha256=hashlib.sha256(
+                    "创建工作流必须保持 OFFLINE".encode()
+                ).hexdigest(),
+            ),
+        ),
+        model_route_id="route-1",
+    )
+    read_tool = EngineToolDefinition(
+        tool_id="tool-projects",
+        tool_version=3,
+        name="projects_list",
+        description="列出当前项目",
+        input_schema={"type": "object", "properties": {}},
+        risk_level="READ",
+    )
+    preview_tool = EngineToolDefinition(
+        tool_id="tool-preview",
+        tool_version=4,
+        name="workflow_preview",
+        description="生成离线工作流预览",
+        input_schema={"type": "object", "properties": {}},
+        risk_level="PREVIEW",
+    )
+    request = EngineRequest(
+        prompt="生成 ODS 到 DWD 工作流",
+        employee_context=context,
+        tool_definitions=(read_tool, preview_tool),
+    )
+
+    assert request.employee_context is context
+    assert request.employee_context.skill_refs == (("skill-1", 2),)
+    assert [tool.name for tool in request.tool_definitions] == [
+        "projects_list", "workflow_preview"
+    ]
+    assert request.employee_context.skill_files[0].content == "创建工作流必须保持 OFFLINE"
+    with pytest.raises(ValueError, match="READ or PREVIEW"):
+        EngineRequest(
+            prompt="创建工作流",
+            employee_context=context,
+            tool_definitions=(
+                EngineToolDefinition(
+                    tool_id="tool-write",
+                    tool_version=1,
+                    name="workflow_create",
+                    description="创建工作流",
+                    input_schema={"type": "object"},
+                    risk_level="WRITE",
+                ),
+            ),
+        )
+
+
+def test_skill_file_context_rejects_content_that_does_not_match_its_run_snapshot_digest():
+    with pytest.raises(ValueError, match="content digest does not match"):
+        SkillFileContext(
+            path="SKILL.md",
+            content="actual content",
+            content_sha256="0" * 64,
+        )
 
 
 def test_cancel_result_and_event_are_engine_neutral():

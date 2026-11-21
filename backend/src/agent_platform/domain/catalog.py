@@ -12,6 +12,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from .common import DomainError
+from .mcp import McpRiskLevel
 
 
 class LifecycleStatus(StrEnum):
@@ -115,6 +116,19 @@ def _scope(tenant_id: str) -> str:
     return _text(tenant_id, "tenant_id")
 
 
+def compute_tool_input_schema_sha256(input_schema: Mapping[str, object]) -> str:
+    """计算输入 JSON Schema 的规范摘要，供 MCP 目录绑定使用。"""
+
+    serialized = json.dumps(
+        dict(input_schema),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ToolVersion:
     """可被 Skill 声明并由部署策略授权的工具版本。"""
@@ -130,6 +144,13 @@ class ToolVersion:
     protocol: str = "builtin"
     requires_recipient_credentials: bool = False
     auth_secret_ref: str | None = None
+    mcp_server_profile_id: str | None = None
+    mcp_server_profile_version: int | None = None
+    remote_tool_name: str | None = None
+    input_schema_sha256: str | None = None
+    preview_tool_name: str | None = None
+    mcp_risk_level: McpRiskLevel | str = McpRiskLevel.READ
+    idempotency_support: bool = False
 
     def __post_init__(self) -> None:
         _text(self.tool_id, "tool_id")
@@ -145,6 +166,40 @@ class ToolVersion:
             raise ValueError("version must be positive")
         if not isinstance(self.input_schema, Mapping):
             raise TypeError("input_schema must be an object")
+        risk_level = McpRiskLevel(self.mcp_risk_level)
+        object.__setattr__(self, "mcp_risk_level", risk_level)
+        mcp_fields = (
+            self.mcp_server_profile_id,
+            self.mcp_server_profile_version,
+            self.remote_tool_name,
+            self.input_schema_sha256,
+        )
+        has_mcp_binding = any(value is not None for value in mcp_fields)
+        if has_mcp_binding and self.protocol != "mcp":
+            raise ValueError("MCP profile fields require protocol=mcp")
+        if has_mcp_binding:
+            if self.mcp_server_profile_id is None or self.mcp_server_profile_version is None:
+                raise ValueError("MCP profile id and version must be supplied together")
+            if self.mcp_server_profile_version < 1:
+                raise ValueError("MCP server profile version must be positive")
+            if self.remote_tool_name is None:
+                raise ValueError("MCP profile binding requires a remote tool name")
+            object.__setattr__(
+                self, "mcp_server_profile_id", _text(self.mcp_server_profile_id, "mcp_server_profile_id")
+            )
+            object.__setattr__(self, "remote_tool_name", _text(self.remote_tool_name, "remote_tool_name"))
+            schema_digest = self.input_schema_sha256 or compute_tool_input_schema_sha256(
+                self.input_schema
+            )
+            if schema_digest != compute_tool_input_schema_sha256(self.input_schema):
+                raise ValueError("input_schema_sha256 does not match input_schema")
+            object.__setattr__(self, "input_schema_sha256", schema_digest)
+        if self.preview_tool_name is not None:
+            object.__setattr__(self, "preview_tool_name", _text(self.preview_tool_name, "preview_tool_name"))
+        if risk_level is McpRiskLevel.WRITE and self.preview_tool_name is None:
+            raise ValueError("WRITE MCP ToolVersion requires a preview_tool_name")
+        if risk_level is not McpRiskLevel.WRITE and self.preview_tool_name is not None:
+            raise ValueError("preview_tool_name is only valid for WRITE MCP ToolVersion")
 
     def publish(self) -> ToolVersion:
         self.assert_mutable()

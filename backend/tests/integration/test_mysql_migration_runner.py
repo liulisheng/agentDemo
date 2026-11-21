@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 from pathlib import Path
 
 import pytest
 
 mysql = pytest.importorskip("mysql.connector")
+
+
+def _has_chinese(value: str | None) -> bool:
+    """确认 information_schema 注释包含可见中文字符。"""
+
+    return isinstance(value, str) and any("\u4e00" <= character <= "\u9fff" for character in value)
 
 
 @pytest.fixture
@@ -56,16 +63,18 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
     second = runner.apply()
 
     assert first.action is PreflightAction.APPLY_MIGRATIONS
-    assert first.applied_migrations == ("V001", "V002", "V003", "V004", "V005")
+    assert first.applied_migrations == (
+        "V001", "V002", "V003", "V004", "V005", "V006", "V007"
+    )
     assert second.action is PreflightAction.UP_TO_DATE
     assert second.applied_migrations == ()
     connection = mysql.connect(**config, database=database)
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 5
+        assert cursor.fetchone()[0] == 7
         cursor.execute("SELECT version FROM schema_migration_history ORDER BY version")
-        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5]
+        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7]
     finally:
         cursor.close()
         connection.close()
@@ -98,7 +107,7 @@ def test_runner_blocks_checksum_mismatch_before_any_write(disposable_mysql_datab
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 5
+        assert cursor.fetchone()[0] == 7
     finally:
         cursor.close()
         connection.close()
@@ -176,3 +185,299 @@ def test_runner_refuses_to_apply_when_another_migration_holds_database_lock(disp
         lock_cursor.fetchone()
         lock_cursor.close()
         lock_connection.close()
+
+
+def test_v006_schema_has_tenant_keys_and_chinese_comments(disposable_mysql_database) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    MigrationRunner(
+        lambda: mysql.connect(**config, database=database),
+        Path(__file__).parents[3] / "docs" / "migrations",
+    ).apply()
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        expected_tables = {
+            "mcp_server_profiles",
+            "tool_approval_requests",
+            "tool_versions",
+            "runs",
+        }
+        table_placeholders = ",".join(["%s"] * len(expected_tables))
+        cursor.execute(
+            "SELECT table_name, table_comment FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name IN (" + table_placeholders + ")",
+            tuple(sorted(expected_tables)),
+        )
+        tables = {name: comment for name, comment in cursor.fetchall()}
+        assert expected_tables == tables.keys()
+        assert all(_has_chinese(comment) for comment in tables.values())
+
+        expected_columns = {
+            "mcp_server_profiles": {
+                "profile_id", "version", "transport", "command", "args_json",
+                "working_directory_ref", "environment_secret_refs_json",
+                "enabled_tool_names_json", "tool_catalog_sha256", "status",
+            },
+            "tool_approval_requests": {
+                "approval_id", "run_id", "requested_by", "approved_by", "rejected_by",
+                "tool_invocation_id", "arguments_ref", "arguments_sha256",
+                "preview_ref", "preview_sha256", "confirmation_idempotency_key",
+                "active_run_id", "state", "worker_id",
+                "fencing_token", "lease_expires_at",
+            },
+            "tool_versions": {
+                "mcp_server_profile_id", "mcp_server_profile_version",
+                "remote_tool_name", "input_schema_sha256", "preview_tool_name",
+                "mcp_risk_level", "idempotency_support",
+            },
+            "runs": {"submitted_by_user_id"},
+        }
+        for table, required in expected_columns.items():
+            cursor.execute(
+                "SELECT column_name, column_comment FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,),
+            )
+            columns = dict(cursor.fetchall())
+            assert required <= columns.keys()
+            comment_columns = columns if table in {
+                "mcp_server_profiles", "tool_approval_requests"
+            } else {column: columns[column] for column in required}
+            assert all(_has_chinese(comment) for comment in comment_columns.values())
+
+        assert "MCP 调用配置" in tables["tool_versions"]
+        assert "审批等待状态" in tables["runs"]
+
+        cursor.execute(
+            "SELECT column_name FROM information_schema.statistics "
+            "WHERE table_schema = DATABASE() AND table_name = 'runs' "
+            "AND index_name = 'idx_run_platform_claim' ORDER BY seq_in_index"
+        )
+        assert tuple(row[0] for row in cursor.fetchall()) == (
+            "platform_id", "state", "created_at", "run_id",
+        )
+
+        cursor.execute(
+            "SELECT CHECK_CLAUSE FROM information_schema.check_constraints "
+            "WHERE constraint_schema = DATABASE() AND constraint_name = 'ck_run_state'"
+        )
+        assert "AWAITING_APPROVAL" in cursor.fetchone()[0]
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v006_down_restores_the_v005_schema_boundary(disposable_mysql_database) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner, split_sql_statements
+
+    database, config = disposable_mysql_database
+    migration_directory = Path(__file__).parents[3] / "docs" / "migrations"
+    MigrationRunner(
+        lambda: mysql.connect(**config, database=database), migration_directory
+    ).apply()
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        v007_rollback = migration_directory.joinpath(
+            "V007__session_runtime_leases.down.sql"
+        ).read_text(encoding="utf-8")
+        for statement in split_sql_statements(v007_rollback):
+            cursor.execute(statement)
+        connection.commit()
+        rollback = migration_directory.joinpath(
+            "V006__mcp_profiles_and_approvals.down.sql"
+        ).read_text(encoding="utf-8")
+        for statement in split_sql_statements(rollback):
+            cursor.execute(statement)
+        connection.commit()
+
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        assert cursor.fetchone()[0] == 5
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() "
+            "AND table_name IN ('mcp_server_profiles','tool_approval_requests')"
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+            "AND ((table_name='runs' AND column_name='submitted_by_user_id') OR "
+            "(table_name='tool_versions' AND column_name='mcp_server_profile_id'))"
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() "
+            "AND table_name='runs' AND index_name IN "
+            "('idx_run_session_latest','idx_run_platform_claim')"
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT CHECK_CLAUSE FROM information_schema.check_constraints "
+            "WHERE constraint_schema=DATABASE() AND constraint_name='ck_run_state'"
+        )
+        assert "AWAITING_APPROVAL" not in cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() "
+            "AND table_name='skill_file_entries'"
+        )
+        assert cursor.fetchone()[0] == 1
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v007_schema_has_tenant_keys_and_chinese_comments(disposable_mysql_database) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    MigrationRunner(
+        lambda: mysql.connect(**config, database=database),
+        Path(__file__).parents[3] / "docs" / "migrations",
+    ).apply()
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT table_comment FROM information_schema.tables "
+            "WHERE table_schema=DATABASE() AND table_name='session_runtime_leases'"
+        )
+        table_comment = cursor.fetchone()[0]
+        assert _has_chinese(table_comment)
+        cursor.execute(
+            "SELECT column_name,column_comment FROM information_schema.columns "
+            "WHERE table_schema=DATABASE() AND table_name='session_runtime_leases'"
+        )
+        columns = dict(cursor.fetchall())
+        assert set(columns) == {
+            "platform_id", "tenant_id", "session_id", "run_id", "worker_id",
+            "fencing_token", "lease_expires_at", "state", "created_at", "updated_at",
+        }
+        assert all(_has_chinese(comment) for comment in columns.values())
+        cursor.execute(
+            "SELECT constraint_name,table_name,column_name,referenced_table_name "
+            "FROM information_schema.key_column_usage WHERE table_schema=DATABASE() "
+            "AND table_name='session_runtime_leases' AND referenced_table_name IS NOT NULL "
+            "ORDER BY constraint_name,ordinal_position"
+        )
+        references = {(name, table, column, target) for name, table, column, target in cursor.fetchall()}
+        assert {
+            ("fk_session_runtime_lease_session", "session_runtime_leases", "session_id", "sessions"),
+            ("fk_session_runtime_lease_run", "session_runtime_leases", "run_id", "runs"),
+        } <= references
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        assert cursor.fetchone()[0] == 7
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v007_down_restores_the_v006_schema_boundary(disposable_mysql_database) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner, split_sql_statements
+
+    database, config = disposable_mysql_database
+    migration_directory = Path(__file__).parents[3] / "docs" / "migrations"
+    MigrationRunner(
+        lambda: mysql.connect(**config, database=database), migration_directory
+    ).apply()
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        rollback = migration_directory.joinpath(
+            "V007__session_runtime_leases.down.sql"
+        ).read_text(encoding="utf-8")
+        for statement in split_sql_statements(rollback):
+            cursor.execute(statement)
+        connection.commit()
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        assert cursor.fetchone()[0] == 6
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() "
+            "AND table_name='session_runtime_leases'"
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() "
+            "AND table_name IN ('mcp_server_profiles','tool_approval_requests')"
+        )
+        assert cursor.fetchone()[0] == 2
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v007_backfills_an_inflight_session_home_before_worker_upgrade(
+    tmp_path: Path, disposable_mysql_database
+) -> None:
+    from agent_platform.domain.common import generate_database_id
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    migration_directory = Path(__file__).parents[3] / "docs" / "migrations"
+    v006_directory = tmp_path / "migrations-v006"
+    v006_directory.mkdir()
+    for version in range(1, 7):
+        migration = next(
+            path
+            for path in migration_directory.glob(f"V{version:03d}__*.sql")
+            if ".down." not in path.name
+        )
+        shutil.copyfile(migration, v006_directory / migration.name)
+    connection_factory = lambda: mysql.connect(**config, database=database)
+    MigrationRunner(connection_factory, v006_directory).apply()
+
+    session_id = generate_database_id()
+    run_id = generate_database_id()
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO platforms (platform_id,code,name,status) VALUES "
+            "('plt-local','local','本地平台','ACTIVE')"
+        )
+        cursor.execute(
+            "INSERT INTO tenants (platform_id,tenant_id,code,name,status) VALUES "
+            "('plt-local','tenant-a','tenant-a','租户 A','ACTIVE')"
+        )
+        cursor.execute(
+            "INSERT INTO users "
+            "(platform_id,tenant_id,user_id,external_subject,username,display_name,status) "
+            "VALUES ('plt-local','tenant-a','admin-local','subject-local','admin-local','管理员','ACTIVE')"
+        )
+        cursor.execute(
+            "INSERT INTO sessions "
+            "(platform_id,tenant_id,session_id,user_id,engine_name,engine_session_id,status,metadata_json) "
+            "VALUES ('plt-local','tenant-a',%s,'admin-local','deepseek','legacy-engine-session','ACTIVE','{}')",
+            (session_id,),
+        )
+        cursor.execute(
+            "INSERT INTO runs "
+            "(platform_id,tenant_id,run_id,session_id,idempotency_key,request_digest,state,"
+            "worker_id,fencing_token,lease_expires_at,submitted_by_user_id) "
+            "VALUES ('plt-local','tenant-a',%s,%s,'legacy-inflight',%s,'RUNNING','legacy-worker',"
+            "12,TIMESTAMPADD(SECOND,60,CURRENT_TIMESTAMP(6)),'admin-local')",
+            (run_id, session_id, "a" * 64),
+        )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
+
+    MigrationRunner(connection_factory, migration_directory).apply()
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT session_id,run_id,worker_id,fencing_token,state "
+            "FROM session_runtime_leases WHERE platform_id='plt-local' AND tenant_id='tenant-a'"
+        )
+        assert cursor.fetchone() == (
+            session_id,
+            run_id,
+            "legacy-worker",
+            12,
+            "ACTIVE",
+        )
+    finally:
+        cursor.close()
+        connection.close()

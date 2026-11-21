@@ -1,2 +1,4 @@
 # 可选的本地 Runtime 集成；控制面默认仍可离线使用 FakeRuntime。
 -e ../harness-engine
+mcp==2.3.0
+deepseek-harness-sdk==0.2.2rc2

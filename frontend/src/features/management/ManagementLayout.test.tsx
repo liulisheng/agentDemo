@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { expect, test } from 'vitest'
 
@@ -26,9 +26,11 @@ test('management shell exposes three top-level areas and keeps skills under empl
     </MemoryRouter>,
   )
 
-  expect(screen.getByRole('link', { name: '数字员工' })).toHaveAttribute('href', '/enterprise/employees')
-  expect(screen.getByRole('link', { name: '资源中心' })).toHaveAttribute('href', '/enterprise/resources')
-  expect(screen.getByRole('link', { name: '部署记录' })).toHaveAttribute('href', '/enterprise/deployments')
+  const managementNav = screen.getByRole('navigation', { name: '管理导航' })
+  expect(within(managementNav).getByRole('link', { name: '数字员工' })).toHaveAttribute('href', '/enterprise/employees')
+  expect(within(managementNav).getByRole('link', { name: '运行工作台' })).toHaveAttribute('href', '/enterprise/workbench')
+  expect(within(managementNav).getByRole('link', { name: '资源中心' })).toHaveAttribute('href', '/enterprise/resources')
+  expect(within(managementNav).getByRole('link', { name: '部署记录' })).toHaveAttribute('href', '/enterprise/deployments')
   expect(screen.queryByRole('link', { name: 'Skill 管理' })).not.toBeInTheDocument()
   expect(screen.getByText('员工目录内容')).toBeInTheDocument()
 

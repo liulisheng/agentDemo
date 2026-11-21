@@ -1,19 +1,19 @@
 # MySQL 持久化与租户边界
 
-状态：控制面核心表由 `docs/migrations/V001__core_schema.sql` 定义；对话消息索引、流分段、上传 intent 和内容清理队列由 `docs/migrations/V002__conversation_messages.sql` 定义。V001+V002、只读 doctor 和非流式 MySQL 消息仓储已于 2026-11-13 在一次性 MySQL 8.4.13 中验证。流式 chunk 仓储/恢复、GC worker、生产对象存储/KMS 尚未交付。日期：2026-11-13。
+状态：迁移链已定义到 V007；V006/V007 已在 MySQL 8.4 disposable database 验证 apply/down、information_schema 中文 COMMENT、租户 FK 与 Session lease。V001-V005 的历史验证记录保留。
 
 ## 数据库约定
 
 - 目标为 MySQL 8.4、InnoDB、`utf8mb4_0900_ai_ci`。
 - 平台级表以 `platform_id` 为键；租户级表使用 `(platform_id, tenant_id)` 复合键和外键。
-- 用户消息、助手可见回复、工作区正文、凭据和完整模型结果正文不写入控制面数据库。消息正文及 Harness 原生历史保存在租户隔离的加密持久化存储；MySQL 保存消息索引、不透明引用、哈希和大小。`request_digest` 只用于幂等核验，不能还原 prompt。
+- 用户消息、助手可见回复、工作区正文、凭据和完整模型结果正文不写入控制面数据库。消息正文和助手回复保存在租户隔离的加密对象存储；Harness 原生历史保存在稳定的 Session Home，开发环境默认位于 `AGENT_PLATFORM_DATA_ROOT/harness-sessions/` 并设置 0700 目录权限，但本地实现不提供静态加密。生产部署必须将 Harness Home 挂载到加密持久卷并纳入一致性备份；MySQL 保存消息索引、不透明引用、哈希和大小。`request_digest` 只用于幂等核验，不能还原 prompt。
 - 消息正文和会话级审计元数据默认长期保留，直到用户或管理员显式删除；不按时间自动过期。数据库和对象存储备份按部署的备份生命周期清除。
 - 用户密码、OIDC Provider、浏览器登录 session 和令牌签发由用户中心负责；V001 中的 `users` 是认证身份目录投影。
 - 所有租户数据访问都从显式 `TenantContext` 取得平台和租户范围，跨租户资源按不存在处理。
 
 ## Schema 版本
 
-`schema_version` 保存 canonical migration 已应用的版本。V001 插入版本 `1`，V002 插入版本 `2`；应用和 doctor 要求版本至少为 2，只读取版本，不自动修改 schema。部署 migration 应由独立迁移流程依序执行。一次性 MySQL 8.4.13 执行及代表性 V002 集成检查已通过；生产迁移流程仍需单独验证。
+`schema_version` 保存 canonical migration 已应用的版本。V001-V007 依序登记版本；应用和 doctor 只读取 schema 状态，不自动修改 schema。部署 migration 应由独立迁移流程显式执行。V006 增加 MCP Profile、审批动作表、ToolVersion MCP 绑定字段和 AWAITING_APPROVAL 状态约束；V007 串行保护 Session Harness Home。
 
 ## 表结构
 
@@ -37,9 +37,37 @@
 
 ### `runs`
 
-复合主键 `(platform_id, tenant_id, run_id)`，并以同样的租户范围外键关联 session。`idempotency_key` 在租户内唯一；`request_digest` 和 `request_digest_version` 保存 canonical JSON 的 SHA-256 摘要，不存 prompt。状态包括 `QUEUED`、`STARTING`、`RUNNING`、`CANCELLING`、`SUCCEEDED`、`FAILED`、`CANCELLED`、`UNKNOWN`。
+复合主键 `(platform_id, tenant_id, run_id)`，并以同样的租户范围外键关联 session。`idempotency_key` 在租户内唯一；`request_digest` 和 `request_digest_version` 保存 canonical JSON 的 SHA-256 摘要，不存 prompt。状态包括 `QUEUED`、`STARTING`、`RUNNING`、`AWAITING_APPROVAL`、`CANCELLING`、`SUCCEEDED`、`FAILED`、`CANCELLED`、`UNKNOWN`。
 
 `worker_id`、`fencing_token`、`lease_expires_at` 支持 worker 租约；`started_at`、`finished_at`、`error_code` 和 `result_ref` 记录运行结果元数据。`result_ref` 是外部对象引用，结果正文不写入数据库。
+
+V006 增加 `(platform_id, tenant_id, session_id, created_at, run_id)` 索引，供员工工作台按 AgentBinding Session 读取最新 Run；增加 `(platform_id, state, created_at, run_id)` 平台 claim 索引，供独立 Worker 用 `SKIP LOCKED` 跨租户领取最早 QUEUED Run。V007 `session_runtime_leases` 以 `(platform_id, tenant_id, session_id)` 唯一键串行一个 Session Home；Run lease、Session lease 和 Run fencing token 在 claim/heartbeat/终态事务内同步更新。UNKNOWN 将 lease 隔离、Session 标记 INTERRUPTED。Worker 领取后立即取得目标 tenant_id，后续查询和状态更新都恢复 platform_id + tenant_id 范围。每次 Run 状态迁移在同一事务内推进该 Session 绑定 Conversation 的 `updated_at`。
+
+### `session_runtime_leases`（V007）
+
+复合主键 `(platform_id, tenant_id, session_id)` 对同一 Session Home 仅允许一条 ACTIVE 或 QUARANTINED 记录；`run_id` 在租户内唯一并外键关联 Runs。ACTIVE 保存 `worker_id`、Run fencing token 和到期时间；确定结果后在同一 Run 终态事务删除 lease。过期或无法确认 Harness 已关闭时，Run 进入 UNKNOWN，lease 变为 QUARANTINED 且 `lease_expires_at` 为空，Session 标记 INTERRUPTED。QUARANTINED 不会自动被新 Worker 接管；新的对话必须建立新 Session Home。V007 migration 会把升级时尚在 STARTING/RUNNING/CANCELLING 的 Run 预置到租约表；如果同一 Session 有多条活动 Run，唯一键冲突使迁移停止。
+
+### `conversations`、`conversation_participants`、`agent_bindings`（V003）
+
+工作台列表按 Conversation 创建者/参与者、员工绑定和租户复合键授权。列表顺序固定为 `updated_at DESC, conversation_id DESC`；消息或 Run/Approval 状态变化会推进 `conversations.updated_at`，不额外维护冗余列表表。列表中的最后消息正文仍从 `messages.content_ref` 指向的租户对象存储读取。
+
+### `mcp_server_profiles`（V006）
+
+复合主键为 platform_id、tenant_id、profile_id、version；外键归属同租户。字段包含 transport、command、args_json、working_directory_ref、environment_secret_refs_json、enabled_tool_names_json、tool_catalog_sha256、startup_timeout_ms、tool_timeout_ms 和 status。transport 首期仅为 stdio；args_json 为参数数组；环境映射只存 SecretRef。Profile 发布后不可修改，启动目录和工具目录变更都需要新版本。
+
+### `tool_versions` MCP 扩展（V006）
+
+新增 mcp_server_profile_id/version、remote_tool_name、input_schema_sha256、preview_tool_name、mcp_risk_level 和 idempotency_support。mcp_risk_level 仅允许 READ/PREVIEW/WRITE；原 risk_policy 保持现有语义。Profile ID/version 必须同时为空或同时存在；Profile 绑定的 ToolVersion 必须使用 MCP 协议。
+
+### `tool_approval_requests`（V006）
+
+复合主键为 platform_id、tenant_id、approval_id；同租户 tool_invocation_id 和非空 confirmation_idempotency_key 唯一，Trace span 以 FK 关联。记录 Run/Session/Conversation、requested_by、approved_by、确认幂等键、精确 Tool/Profile 版本、参数与预览对象引用及 SHA-256、expires_at、动作状态和 Worker lease/fencing。approved_by 必须与 Run 提交者 requested_by 相同。状态包括 PENDING、APPROVED、REJECTED、EXPIRED、RUNNING、SUCCEEDED、FAILED、UNKNOWN；APPROVED 行由 Worker 领取。敏感参数和预览只存租户隔离对象存储中的加密正文，MySQL 保存引用和摘要。
+
+新表及新增 ToolVersion 字段均有中文 COMMENT。显式迁移及 disposable MySQL 校验方式见[migrations 约定](migrations/README.md)。
+
+`idx_tool_approval_conversation (platform_id, tenant_id, conversation_id, state)` 支持工作台待审批数量聚合；审批正文仍只通过 `preview_ref` 指向对象存储。
+
+Worker 对批准动作以 `state='APPROVED'` 原子领取并推进 fencing token/lease；续租必须匹配 worker_id 与 token。`RUNNING` lease 过期时，下一次 claim 把 Approval 和对应 Run 置为 `UNKNOWN`、递增 fencing token 并更新 Trace/审计，绝不重新领取该写动作。可信执行结果只通过 `runs.result_ref` 和 Trace 属性引用租户对象存储中的加密结果。
 
 ### `messages`（V002）
 

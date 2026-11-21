@@ -113,13 +113,14 @@ class SessionRecord:
     execution_profile_version: int = 1
     model_route_id: str | None = None
     runtime_session_ref: str | None = None
+    harness_home_ref: str | None = None
     status: str = "ACTIVE"
     span_id: str = ""
 
 
 @dataclass(slots=True)
 class RunRecord:
-    """一次同步 Run 的状态、结果和不可变版本快照。"""
+    """一次 Run 的提交者、状态、结果和不可变版本快照。"""
 
     run_id: str
     session_id: str
@@ -135,6 +136,7 @@ class RunRecord:
     error_category: str | None = None
     context_snapshot: ContextSnapshot | None = None
     span_id: str = ""
+    submitted_by_user_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

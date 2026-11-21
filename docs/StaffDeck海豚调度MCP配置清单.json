@@ -1,0 +1,1435 @@
+{
+  "export_version": 1,
+  "source": "StaffDeck Open API v1 MCP discovery",
+  "employee": {
+    "id": "agent_ad12b7a68c684c2f",
+    "name": "小刘",
+    "tenant_id": "tenant_demo"
+  },
+  "skill": {
+    "id": "genskill_80e15485ade04366",
+    "slug": "dolphinscheduler-dw-skill-2",
+    "name": "海豚调度数仓开发",
+    "status": "published",
+    "capability_scope": "general"
+  },
+  "mcp_server": {
+    "id": "mcpsrv_ab7353cd91a14456",
+    "name": "dolphin_ds",
+    "display_name": "DolphinScheduler 数仓工具",
+    "enabled": true,
+    "tool_count": 25,
+    "connection": {
+      "transport": "stdio",
+      "command": "/usr/local/bin/python3",
+      "args": [
+        "/data/mcp/dolphinscheduler_tools_server.py"
+      ],
+      "cwd": "/data/mcp",
+      "environment_aliases": [
+        "DOLPHINSCHEDULER_BASE_URL"
+      ],
+      "header_aliases": [],
+      "auth_field_names": []
+    }
+  },
+  "staffdeck_runtime_environment_aliases": [
+    "DOLPHINSCHEDULER_DS_PASSWORD_WAREHOUSE",
+    "DOLPHINSCHEDULER_PASSWORD",
+    "DOLPHINSCHEDULER_USERNAME"
+  ],
+  "employee_bound_remote_tool_names": [
+    "dolphinscheduler_datasource_create",
+    "dolphinscheduler_datasource_create_preview",
+    "dolphinscheduler_datasources_list",
+    "dolphinscheduler_project_create",
+    "dolphinscheduler_project_create_preview",
+    "dolphinscheduler_projects_list",
+    "dolphinscheduler_schedule_create",
+    "dolphinscheduler_schedule_create_preview",
+    "dolphinscheduler_schedule_set_state",
+    "dolphinscheduler_schedule_state_preview",
+    "dolphinscheduler_schedules_list",
+    "dolphinscheduler_workflow_create_multi",
+    "dolphinscheduler_workflow_create_multi_preview",
+    "dolphinscheduler_workflow_create_preview",
+    "dolphinscheduler_workflow_create_sql",
+    "dolphinscheduler_workflow_release_preview",
+    "dolphinscheduler_workflow_run_once",
+    "dolphinscheduler_workflow_run_preview",
+    "dolphinscheduler_workflow_set_release_state",
+    "dolphinscheduler_workflows_list"
+  ],
+  "catalog_sha256": "3598142049835c89ab091fc23bc404ca46aa2f953d693adc40d765a09f446484",
+  "employee_bound_catalog_sha256": "d88692f5413749580d80daa54461bb4d8cc1c73ed14cd423ddd9cd1698bf802c",
+  "tools": [
+    {
+      "name": "dolphinscheduler_projects_list",
+      "description": "列出当前 admin 可见项目。",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "READ",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_project_create_preview",
+      "description": "检查项目名并生成一次性确认码；不创建项目。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_name"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "PREVIEW",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_project_create",
+      "description": "仅凭 project_create_preview 返回的匹配确认码创建项目。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_name",
+          "confirmation_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "risk": "WRITE",
+      "preview_tool_name": "dolphinscheduler_project_create_preview",
+      "idempotency_support": false
+    },
+    {
+      "name": "dolphinscheduler_datasources_list",
+      "description": "按类型列出可见数据源。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "datasource_type": {
+            "type": "string",
+            "enum": [
+              "MYSQL",
+              "POSTGRESQL",
+              "HIVE",
+              "SPARK",
+              "CLICKHOUSE",
+              "ORACLE",
+              "SQLSERVER",
+              "DB2",
+              "PRESTO",
+              "H2",
+              "REDSHIFT",
+              "ATHENA",
+              "TRINO",
+              "STARROCKS",
+              "AZURESQL",
+              "DAMENG",
+              "OCEANBASE",
+              "SSH",
+              "KYUUBI",
+              "DATABEND",
+              "SNOWFLAKE",
+              "VERTICA",
+              "HANA",
+              "DORIS",
+              "ZEPPELIN",
+              "SAGEMAKER",
+              "K8S",
+              "ALIYUN_SERVERLESS_SPARK",
+              "DOLPHINDB"
+            ]
+          }
+        },
+        "required": [
+          "datasource_type"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "READ",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_datasource_create_preview",
+      "description": "校验同类型数据源名和密码环境变量，返回不含密码的预览及确认码；不创建数据源。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "datasource_type": {
+            "type": "string",
+            "enum": [
+              "MYSQL",
+              "POSTGRESQL",
+              "HIVE",
+              "SPARK",
+              "CLICKHOUSE",
+              "ORACLE",
+              "SQLSERVER",
+              "DB2",
+              "PRESTO",
+              "H2",
+              "REDSHIFT",
+              "ATHENA",
+              "TRINO",
+              "STARROCKS",
+              "AZURESQL",
+              "DAMENG",
+              "OCEANBASE",
+              "SSH",
+              "KYUUBI",
+              "DATABEND",
+              "SNOWFLAKE",
+              "VERTICA",
+              "HANA",
+              "DORIS",
+              "ZEPPELIN",
+              "SAGEMAKER",
+              "K8S",
+              "ALIYUN_SERVERLESS_SPARK",
+              "DOLPHINDB"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "database": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "host_and_port_by_address": {
+            "type": "string"
+          },
+          "password_env_alias": {
+            "type": "string",
+            "description": "读取 DOLPHINSCHEDULER_DS_PASSWORD_<ALIAS>；不要传密码本身。"
+          },
+          "other_env_alias": {
+            "type": "string",
+            "description": "可选；读取 DOLPHINSCHEDULER_DS_OTHER_<ALIAS> 中的 JSON 对象。"
+          }
+        },
+        "required": [
+          "datasource_type",
+          "name",
+          "password_env_alias"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "PREVIEW",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_datasource_create",
+      "description": "仅凭 datasource_create_preview 返回的匹配确认码创建数据源；密码从 StaffDeck 环境变量读取，结果不返回密码，也不测试连接。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "datasource_type": {
+            "type": "string",
+            "enum": [
+              "MYSQL",
+              "POSTGRESQL",
+              "HIVE",
+              "SPARK",
+              "CLICKHOUSE",
+              "ORACLE",
+              "SQLSERVER",
+              "DB2",
+              "PRESTO",
+              "H2",
+              "REDSHIFT",
+              "ATHENA",
+              "TRINO",
+              "STARROCKS",
+              "AZURESQL",
+              "DAMENG",
+              "OCEANBASE",
+              "SSH",
+              "KYUUBI",
+              "DATABEND",
+              "SNOWFLAKE",
+              "VERTICA",
+              "HANA",
+              "DORIS",
+              "ZEPPELIN",
+              "SAGEMAKER",
+              "K8S",
+              "ALIYUN_SERVERLESS_SPARK",
+              "DOLPHINDB"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "database": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "host_and_port_by_address": {
+            "type": "string"
+          },
+          "password_env_alias": {
+            "type": "string",
+            "description": "读取 DOLPHINSCHEDULER_DS_PASSWORD_<ALIAS>；不要传密码本身。"
+          },
+          "other_env_alias": {
+            "type": "string",
+            "description": "可选；读取 DOLPHINSCHEDULER_DS_OTHER_<ALIAS> 中的 JSON 对象。"
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "datasource_type",
+          "name",
+          "password_env_alias",
+          "confirmation_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "risk": "WRITE",
+      "preview_tool_name": "dolphinscheduler_datasource_create_preview",
+      "idempotency_support": false
+    },
+    {
+      "name": "dolphinscheduler_workflows_list",
+      "description": "列出项目中的工作流定义。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "READ",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_workflow_create_preview",
+      "description": "校验项目、数据源和重名，生成 SQL 工作流确认码；不创建工作流。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "task_name": {
+            "type": "string"
+          },
+          "datasource_type": {
+            "type": "string",
+            "enum": [
+              "MYSQL",
+              "POSTGRESQL",
+              "HIVE",
+              "SPARK",
+              "CLICKHOUSE",
+              "ORACLE",
+              "SQLSERVER",
+              "DB2",
+              "PRESTO",
+              "H2",
+              "REDSHIFT",
+              "ATHENA",
+              "TRINO",
+              "STARROCKS",
+              "AZURESQL",
+              "DAMENG",
+              "OCEANBASE",
+              "SSH",
+              "KYUUBI",
+              "DATABEND",
+              "SNOWFLAKE",
+              "VERTICA",
+              "HANA",
+              "DORIS",
+              "ZEPPELIN",
+              "SAGEMAKER",
+              "K8S",
+              "ALIYUN_SERVERLESS_SPARK",
+              "DOLPHINDB"
+            ]
+          },
+          "datasource_id": {
+            "type": "integer"
+          },
+          "sql_type": {
+            "type": "string",
+            "enum": [
+              "SELECT",
+              "NOT_SELECT"
+            ]
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_name",
+          "task_name",
+          "datasource_type",
+          "datasource_id",
+          "sql_type",
+          "sql"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "PREVIEW",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_workflow_create_sql",
+      "description": "仅凭 workflow_create_preview 返回的匹配确认码创建一个 SQL 节点工作流定义；不发布或运行。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "task_name": {
+            "type": "string"
+          },
+          "datasource_type": {
+            "type": "string",
+            "enum": [
+              "MYSQL",
+              "POSTGRESQL",
+              "HIVE",
+              "SPARK",
+              "CLICKHOUSE",
+              "ORACLE",
+              "SQLSERVER",
+              "DB2",
+              "PRESTO",
+              "H2",
+              "REDSHIFT",
+              "ATHENA",
+              "TRINO",
+              "STARROCKS",
+              "AZURESQL",
+              "DAMENG",
+              "OCEANBASE",
+              "SSH",
+              "KYUUBI",
+              "DATABEND",
+              "SNOWFLAKE",
+              "VERTICA",
+              "HANA",
+              "DORIS",
+              "ZEPPELIN",
+              "SAGEMAKER",
+              "K8S",
+              "ALIYUN_SERVERLESS_SPARK",
+              "DOLPHINDB"
+            ]
+          },
+          "datasource_id": {
+            "type": "integer"
+          },
+          "sql_type": {
+            "type": "string",
+            "enum": [
+              "SELECT",
+              "NOT_SELECT"
+            ]
+          },
+          "sql": {
+            "type": "string"
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_name",
+          "task_name",
+          "datasource_type",
+          "datasource_id",
+          "sql_type",
+          "sql",
+          "confirmation_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "risk": "WRITE",
+      "preview_tool_name": "dolphinscheduler_workflow_create_preview",
+      "idempotency_support": false
+    },
+    {
+      "name": "dolphinscheduler_workflow_create_multi_preview",
+      "description": "预览 2 到 20 个混合 DolphinScheduler 任务插件节点、参数、依赖和画布布局；校验项目、数据源及 DAG；返回确认码，不创建工作流。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node_id": {
+                  "type": "string",
+                  "description": "画布内唯一节点标识。"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "task_type": {
+                  "type": "string",
+                  "description": "DolphinScheduler 已安装的任务插件类型，使用其大写类型名，例如 SQL、SHELL、PYTHON、DATAX、HTTP。"
+                },
+                "task_params": {
+                  "type": "object",
+                  "description": "该 task_type 对应的完整任务参数 JSON 对象；字段由 DolphinScheduler 任务插件定义。敏感值使用 DOLPHINSCHEDULER_TASK_SECRET_<ALIAS> 环境引用。",
+                  "additionalProperties": true
+                },
+                "depends_on": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "依赖的 node_id 列表。省略时串接到前一个节点；显式 [] 表示根节点。"
+                },
+                "worker_group": {
+                  "type": "string"
+                },
+                "environment_code": {
+                  "type": "integer"
+                },
+                "task_execute_type": {
+                  "type": "string",
+                  "enum": [
+                    "BATCH",
+                    "STREAM"
+                  ]
+                },
+                "task_priority": {
+                  "type": "string",
+                  "enum": [
+                    "HIGHEST",
+                    "HIGH",
+                    "MEDIUM",
+                    "LOW",
+                    "LOWEST"
+                  ]
+                },
+                "fail_retry_times": {
+                  "type": "integer"
+                },
+                "fail_retry_interval": {
+                  "type": "integer"
+                },
+                "timeout_flag": {
+                  "type": "string",
+                  "enum": [
+                    "OPEN",
+                    "CLOSE"
+                  ]
+                },
+                "timeout": {
+                  "type": "integer"
+                },
+                "delay_time": {
+                  "type": "integer"
+                },
+                "resource_ids": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "node_id",
+                "name",
+                "task_type",
+                "task_params"
+              ]
+            },
+            "minItems": 2,
+            "maxItems": 20
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_name",
+          "nodes"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "PREVIEW",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_workflow_create_multi",
+      "description": "仅凭 multi_preview 返回的匹配确认码创建一个包含 2 到 20 个混合任务类型节点的离线工作流定义；不发布、调度或运行；写请求结果不确定时不重试。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node_id": {
+                  "type": "string",
+                  "description": "画布内唯一节点标识。"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "task_type": {
+                  "type": "string",
+                  "description": "DolphinScheduler 已安装的任务插件类型，使用其大写类型名，例如 SQL、SHELL、PYTHON、DATAX、HTTP。"
+                },
+                "task_params": {
+                  "type": "object",
+                  "description": "该 task_type 对应的完整任务参数 JSON 对象；字段由 DolphinScheduler 任务插件定义。敏感值使用 DOLPHINSCHEDULER_TASK_SECRET_<ALIAS> 环境引用。",
+                  "additionalProperties": true
+                },
+                "depends_on": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "依赖的 node_id 列表。省略时串接到前一个节点；显式 [] 表示根节点。"
+                },
+                "worker_group": {
+                  "type": "string"
+                },
+                "environment_code": {
+                  "type": "integer"
+                },
+                "task_execute_type": {
+                  "type": "string",
+                  "enum": [
+                    "BATCH",
+                    "STREAM"
+                  ]
+                },
+                "task_priority": {
+                  "type": "string",
+                  "enum": [
+                    "HIGHEST",
+                    "HIGH",
+                    "MEDIUM",
+                    "LOW",
+                    "LOWEST"
+                  ]
+                },
+                "fail_retry_times": {
+                  "type": "integer"
+                },
+                "fail_retry_interval": {
+                  "type": "integer"
+                },
+                "timeout_flag": {
+                  "type": "string",
+                  "enum": [
+                    "OPEN",
+                    "CLOSE"
+                  ]
+                },
+                "timeout": {
+                  "type": "integer"
+                },
+                "delay_time": {
+                  "type": "integer"
+                },
+                "resource_ids": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "node_id",
+                "name",
+                "task_type",
+                "task_params"
+              ]
+            },
+            "minItems": 2,
+            "maxItems": 20
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_name",
+          "nodes",
+          "confirmation_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "risk": "WRITE",
+      "preview_tool_name": "dolphinscheduler_workflow_create_multi_preview",
+      "idempotency_support": false
+    },
+    {
+      "name": "dolphinscheduler_workflow_release_preview",
+      "description": "读取工作流详情并预览 ONLINE/OFFLINE 变更；若已处于目标状态则返回无需变更；下线前检查在线调度。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_code": {
+            "type": "integer"
+          },
+          "release_state": {
+            "type": "string",
+            "enum": [
+              "ONLINE",
+              "OFFLINE"
+            ]
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_code",
+          "release_state"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "PREVIEW",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_workflow_set_release_state",
+      "description": "仅凭 release_preview 的匹配确认码发送一次上线/下线请求；状态已达成时无操作，之后最多进行 3 次详情只读核验，不重试写请求。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_code": {
+            "type": "integer"
+          },
+          "release_state": {
+            "type": "string",
+            "enum": [
+              "ONLINE",
+              "OFFLINE"
+            ]
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_code",
+          "release_state",
+          "confirmation_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "risk": "WRITE",
+      "preview_tool_name": "dolphinscheduler_workflow_release_preview",
+      "idempotency_support": false
+    },
+    {
+      "name": "dolphinscheduler_workflow_run_preview",
+      "description": "核对工作流处于 ONLINE 且没有待运行/运行中实例，预览启动一个实例；不启动工作流。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_code": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "PREVIEW",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_workflow_run_once",
+      "description": "仅凭 run_preview 返回的匹配确认码启动一个工作流实例；结果不确定时不重试。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_code": {
+            "type": "integer"
+          },
+          "schedule_time": {
+            "type": "string"
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_code",
+          "schedule_time",
+          "confirmation_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "risk": "WRITE",
+      "preview_tool_name": "dolphinscheduler_workflow_run_preview",
+      "idempotency_support": false
+    },
+    {
+      "name": "dolphinscheduler_schedules_list",
+      "description": "列出项目的调度及其在线状态、cron 和工作流定义。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "READ",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_schedule_create_preview",
+      "description": "校验工作流、同工作流重复调度并预览 cron 触发时间；创建出的调度初始为 OFFLINE。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_code": {
+            "type": "integer"
+          },
+          "start_time": {
+            "type": "string"
+          },
+          "end_time": {
+            "type": "string"
+          },
+          "crontab": {
+            "type": "string"
+          },
+          "timezone_id": {
+            "type": "string"
+          },
+          "missed_fire_policy": {
+            "type": "string",
+            "enum": [
+              "SKIP_MISSED",
+              "FIRE_ONCE_NOW",
+              "FIRE_ALL_MISSED"
+            ]
+          },
+          "failure_strategy": {
+            "type": "string",
+            "enum": [
+              "END",
+              "CONTINUE"
+            ]
+          },
+          "warning_type": {
+            "type": "string",
+            "enum": [
+              "NONE",
+              "SUCCESS",
+              "FAILURE",
+              "ALL"
+            ]
+          },
+          "warning_group_id": {
+            "type": "integer"
+          },
+          "workflow_instance_priority": {
+            "type": "string",
+            "enum": [
+              "HIGHEST",
+              "HIGH",
+              "MEDIUM",
+              "LOW",
+              "LOWEST"
+            ]
+          },
+          "worker_group": {
+            "type": "string"
+          },
+          "tenant_code": {
+            "type": "string"
+          },
+          "environment_code": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_code",
+          "start_time",
+          "end_time",
+          "crontab"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "PREVIEW",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_schedule_create",
+      "description": "仅凭 schedule_create_preview 返回的匹配确认码创建离线调度；不会自动上线或执行。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_code": {
+            "type": "integer"
+          },
+          "start_time": {
+            "type": "string"
+          },
+          "end_time": {
+            "type": "string"
+          },
+          "crontab": {
+            "type": "string"
+          },
+          "timezone_id": {
+            "type": "string"
+          },
+          "missed_fire_policy": {
+            "type": "string",
+            "enum": [
+              "SKIP_MISSED",
+              "FIRE_ONCE_NOW",
+              "FIRE_ALL_MISSED"
+            ]
+          },
+          "failure_strategy": {
+            "type": "string",
+            "enum": [
+              "END",
+              "CONTINUE"
+            ]
+          },
+          "warning_type": {
+            "type": "string",
+            "enum": [
+              "NONE",
+              "SUCCESS",
+              "FAILURE",
+              "ALL"
+            ]
+          },
+          "warning_group_id": {
+            "type": "integer"
+          },
+          "workflow_instance_priority": {
+            "type": "string",
+            "enum": [
+              "HIGHEST",
+              "HIGH",
+              "MEDIUM",
+              "LOW",
+              "LOWEST"
+            ]
+          },
+          "worker_group": {
+            "type": "string"
+          },
+          "tenant_code": {
+            "type": "string"
+          },
+          "environment_code": {
+            "type": "integer"
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_code",
+          "start_time",
+          "end_time",
+          "crontab",
+          "confirmation_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "risk": "WRITE",
+      "preview_tool_name": "dolphinscheduler_schedule_create_preview",
+      "idempotency_support": false
+    },
+    {
+      "name": "dolphinscheduler_schedule_state_preview",
+      "description": "预览已存在调度的 ONLINE/OFFLINE 状态变更；上线前检查工作流状态并列出后续触发时间。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "schedule_id": {
+            "type": "integer"
+          },
+          "release_state": {
+            "type": "string",
+            "enum": [
+              "ONLINE",
+              "OFFLINE"
+            ]
+          }
+        },
+        "required": [
+          "project_code",
+          "schedule_id",
+          "release_state"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "PREVIEW",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_schedule_set_state",
+      "description": "仅凭 schedule_state_preview 返回的匹配确认码上线或下线调度；下线不停止已运行实例。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "schedule_id": {
+            "type": "integer"
+          },
+          "release_state": {
+            "type": "string",
+            "enum": [
+              "ONLINE",
+              "OFFLINE"
+            ]
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_code",
+          "schedule_id",
+          "release_state",
+          "confirmation_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "risk": "WRITE",
+      "preview_tool_name": "dolphinscheduler_schedule_state_preview",
+      "idempotency_support": false
+    },
+    {
+      "name": "dolphinscheduler_workflow_instances_list",
+      "description": "分页查询工作流实例；只返回状态、时间和标识，不返回 commandParam 或参数池。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_code": {
+            "type": "integer"
+          },
+          "state_type": {
+            "type": "string",
+            "enum": [
+              "SUBMITTED_SUCCESS",
+              "RUNNING_EXECUTION",
+              "READY_PAUSE",
+              "PAUSE",
+              "READY_STOP",
+              "STOP",
+              "FAILURE",
+              "SUCCESS",
+              "SERIAL_WAIT",
+              "FAILOVER"
+            ]
+          },
+          "page_no": {
+            "type": "integer"
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "project_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "READ",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_task_instances_list",
+      "description": "分页查询任务实例；只返回任务状态、标识和运行信息，不返回 taskParams。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_instance_id": {
+            "type": "integer"
+          },
+          "task_name": {
+            "type": "string"
+          },
+          "state_type": {
+            "type": "string",
+            "enum": [
+              "SUBMITTED_SUCCESS",
+              "RUNNING_EXECUTION",
+              "PAUSE",
+              "FAILURE",
+              "SUCCESS",
+              "NEED_FAULT_TOLERANCE",
+              "KILL",
+              "DELAY_EXECUTION",
+              "FORCED_SUCCESS",
+              "DISPATCH"
+            ]
+          },
+          "page_no": {
+            "type": "integer"
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "project_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "READ",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_task_log_read",
+      "description": "读取指定任务实例的日志片段，限制行数并对常见密码、令牌和 JDBC 密钥模式脱敏。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_instance_id": {
+            "type": "integer"
+          },
+          "skip_line_num": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "required": [
+          "task_instance_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "READ",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_workflow_failure_recovery_preview",
+      "description": "校验 FAILURE 工作流实例并列出失败任务；预览 START_FAILURE_TASK_PROCESS 恢复动作，不执行。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_instance_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_instance_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "risk": "PREVIEW",
+      "preview_tool_name": null,
+      "idempotency_support": true
+    },
+    {
+      "name": "dolphinscheduler_workflow_recover_failed_tasks",
+      "description": "仅凭 recovery_preview 返回的确认码恢复失败实例；可能再次执行失败任务中的 SQL，结果不确定时不重试。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_code": {
+            "type": "integer"
+          },
+          "workflow_instance_id": {
+            "type": "integer"
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_code",
+          "workflow_instance_id",
+          "confirmation_code"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "risk": "WRITE",
+      "preview_tool_name": "dolphinscheduler_workflow_failure_recovery_preview",
+      "idempotency_support": false
+    }
+  ],
+  "secret_policy": "未导出凭据值；环境变量只记录别名名称。",
+  "exported_at": "2026-11-19"
+}

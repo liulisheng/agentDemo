@@ -1,0 +1,80 @@
+services:
+  worker:
+    environment:
+      PYTHONPATH: /app/backend/src:/app/harness-engine/src
+      AGENT_PLATFORM_RUNTIME_ENGINE: deepseek
+      AGENT_PLATFORM_DEEPSEEK_PROVIDER: local-acceptance
+      AGENT_PLATFORM_DEEPSEEK_MODEL: acceptance-model
+      AGENT_PLATFORM_DEEPSEEK_LOCAL_CONFIG: /run/agent-platform/local-provider.json
+      AGENT_PLATFORM_MCP_ALLOWED_COMMANDS: '["/usr/local/bin/python3"]'
+      AGENT_PLATFORM_MCP_ALLOWED_WORKING_DIRECTORY_ROOTS: '["/data/mcp"]'
+      DOLPHINSCHEDULER_BASE_URL: ${DOLPHINSCHEDULER_BASE_URL:-http://dolphinscheduler-agent:12345/dolphinscheduler}
+      DOLPHINSCHEDULER_MCP_WORKDIR: /data/mcp
+    env_file:
+      - ${STAFFDECK_DOLPHINSCHEDULER_ENV_FILE:?请设置 StaffDeck DolphinScheduler 脱敏环境文件路径}
+    volumes:
+      - type: volume
+        source: staffdeck_data
+        target: /data/mcp
+        read_only: true
+        volume:
+          subpath: mcp
+      - type: bind
+        source: ${AGENT_PLATFORM_LOCAL_MODEL_CONFIG:?请设置本地模型配置文件路径}
+        target: /run/agent-platform/local-provider.json
+        read_only: true
+      - type: bind
+        source: ${AGENT_PLATFORM_BACKEND_SOURCE:-../../backend/src}
+        target: /app/backend/src
+        read_only: true
+    networks:
+      - default
+      - dolphinscheduler_control
+
+  approval-worker:
+    environment:
+      PYTHONPATH: /app/backend/src:/app/harness-engine/src
+      AGENT_PLATFORM_MCP_ALLOWED_COMMANDS: '["/usr/local/bin/python3"]'
+      AGENT_PLATFORM_MCP_ALLOWED_WORKING_DIRECTORY_ROOTS: '["/data/mcp"]'
+      DOLPHINSCHEDULER_BASE_URL: ${DOLPHINSCHEDULER_BASE_URL:-http://dolphinscheduler-agent:12345/dolphinscheduler}
+      DOLPHINSCHEDULER_MCP_WORKDIR: /data/mcp
+    env_file:
+      - ${STAFFDECK_DOLPHINSCHEDULER_ENV_FILE:?请设置 StaffDeck DolphinScheduler 脱敏环境文件路径}
+    volumes:
+      - type: volume
+        source: staffdeck_data
+        target: /data/mcp
+        read_only: true
+        volume:
+          subpath: mcp
+      - type: bind
+        source: ${AGENT_PLATFORM_BACKEND_SOURCE:-../../backend/src}
+        target: /app/backend/src
+        read_only: true
+    networks:
+      - default
+      - dolphinscheduler_control
+
+  local-model-mock:
+    image: agent-platform/control-plane-api:local
+    entrypoint: ["python", "/run/agent-platform/mock-model-server.py"]
+    volumes:
+      - type: bind
+        source: ${AGENT_PLATFORM_MODEL_SERVER_SCRIPT:-./local_acceptance_model.py}
+        target: /run/agent-platform/mock-model-server.py
+        read_only: true
+    networks:
+      dolphinscheduler_control:
+        aliases:
+          - agentdemo-local-model
+    restart: unless-stopped
+
+volumes:
+  staffdeck_data:
+    external: true
+    name: staffdeck_staffdeck-data
+
+networks:
+  dolphinscheduler_control:
+    external: true
+    name: dolphinscheduler-control

@@ -14,10 +14,12 @@ from agent_platform.domain.catalog import (
     SkillContentFormat,
     SkillFileEntry,
     SkillVersion,
+    ToolVersion,
     compute_skill_file_manifest_sha256,
 )
 from agent_platform.domain.common import DomainError
 from agent_platform.domain.identity import IdentityContext
+from agent_platform.domain.mcp import McpProfileStatus, McpRiskLevel, McpServerProfile
 from agent_platform.domain.observability import (
     HubResourceSnapshot,
     RunSnapshot,
@@ -31,7 +33,9 @@ from agent_platform.domain.resource_center import (
     TenantImportStatus,
     TenantResourceImport,
 )
+from agent_platform.ports.mcp import McpRepository
 from agent_platform.ports.resource_center import ResourceCenterRepository
+from agent_platform.ports.runtime import RuntimeMcpServer, RuntimeSkillFile, RuntimeToolDefinition
 from agent_platform.ports.storage import ObjectStore, ObjectStoreError
 
 
@@ -44,6 +48,9 @@ class ResolvedAgent:
     skill_instructions: tuple[str, ...]
     allowed_tools: tuple[str, ...]
     skill_file_packages: tuple[SkillFilePackageSnapshot, ...] = ()
+    skill_file_contents: tuple[RuntimeSkillFile, ...] = ()
+    tool_definitions: tuple[RuntimeToolDefinition, ...] = ()
+    mcp_servers: tuple[RuntimeMcpServer, ...] = ()
 
 
 class HubResourceResolver:
@@ -202,9 +209,11 @@ class AgentResolver:
         catalog: CatalogService,
         resource_center_repository: ResourceCenterRepository | None = None,
         object_store: ObjectStore | None = None,
+        mcp_repository: McpRepository | None = None,
     ) -> None:
         self.catalog = catalog
         self.object_store = object_store
+        self.mcp_repository = mcp_repository
         self.hub = (
             HubResourceResolver(resource_center_repository)
             if resource_center_repository is not None
@@ -329,6 +338,7 @@ class AgentResolver:
 
         skill_instructions: list[str] = []
         skill_file_packages: list[SkillFilePackageSnapshot] = []
+        skill_file_contents: list[RuntimeSkillFile] = []
         for skill in resolved_skills:
             if skill.content_format is not SkillContentFormat.FILE_PACKAGE:
                 skill_instructions.append(skill.instruction)
@@ -442,6 +452,21 @@ class AgentResolver:
                         source_mode,
                     )
                 )
+                if file_path != entry_path:
+                    try:
+                        file_text = content.decode("utf-8")
+                    except UnicodeDecodeError:
+                        # 非文本辅助文件保留在 Snapshot manifest 中，但不伪装成模型指令。
+                        continue
+                    skill_file_contents.append(
+                        RuntimeSkillFile(
+                            skill_id=skill.skill_id,
+                            skill_version=skill.version,
+                            path=file_path,
+                            content=file_text,
+                            content_sha256=content_sha256,
+                        )
+                    )
                 if file_path == entry_path:
                     try:
                         entry_instruction = content.decode("utf-8-sig")
@@ -465,6 +490,7 @@ class AgentResolver:
             )
 
         tool_names: dict[str, str] = {}
+        resolved_tools: dict[str, tuple[ToolVersion, int]] = {}
         resolved_tool_refs: list[tuple[str, int]] = []
         employee_tool_refs = version.tool_version_refs or tuple(
             (tool_id, 1) for tool_id in version.tool_version_ids
@@ -478,6 +504,7 @@ class AgentResolver:
             )
             if tool_ref is not None:
                 source_refs.append(tool_ref)
+            resolved_tools[tool_id] = (tool, tool_version)
             if tool_package is not None:
                 content = self._reference_package(HubResourceType.TOOL, tool_package)
                 assert content is not None
@@ -513,17 +540,95 @@ class AgentResolver:
         declared_tool_ids = {
             tool_id for skill in resolved_skills for tool_id in skill.allowed_tool_ids
         }
-        employee_tool_ids = {tool_id for tool_id, _ in employee_tool_refs}
-        selected_ids = declared_tool_ids.intersection(employee_tool_ids)
-        selected_names = {
-            tool_id: tool_names[tool_id] for tool_id in selected_ids if tool_id in tool_names
-        }
+        selected_names: dict[str, str] = {}
+        for tool_id, _ in employee_tool_refs:
+            if tool_id in declared_tool_ids and tool_id in tool_names:
+                selected_names[tool_id] = tool_names[tool_id]
         if profile.tool_policy:
             selected_names = {
                 tool_id: name
                 for tool_id, name in selected_names.items()
                 if name in profile.tool_policy
             }
+
+        tool_definitions: list[RuntimeToolDefinition] = []
+        mcp_profile_bindings: dict[
+            tuple[str, int], tuple[McpServerProfile, dict[str, str]]
+        ] = {}
+        for tool_id, name in selected_names.items():
+            tool, tool_version = resolved_tools[tool_id]
+            risk_level = McpRiskLevel(tool.mcp_risk_level).value
+            if risk_level == McpRiskLevel.WRITE.value:
+                continue
+            tool_definitions.append(
+                RuntimeToolDefinition(
+                    tool_id=tool_id,
+                    tool_version=tool_version,
+                    name=name,
+                    description=tool.description,
+                    input_schema=tool.input_schema,
+                    risk_level=risk_level,
+                    remote_tool_name=tool.remote_tool_name,
+                )
+            )
+            if tool.protocol == "mcp":
+                if (
+                    self.mcp_repository is None
+                    or tool.mcp_server_profile_id is None
+                    or tool.mcp_server_profile_version is None
+                    or tool.remote_tool_name is None
+                    or tool.input_schema_sha256 is None
+                ):
+                    raise DomainError(
+                        "DEPENDENCY_VALIDATION_ERROR",
+                        "MCP ToolVersion 缺少租户 Profile、远端工具或 Schema 固定引用",
+                        {"tool_id": tool_id},
+                    )
+                profile_ref = (
+                    tool.mcp_server_profile_id,
+                    tool.mcp_server_profile_version,
+                )
+                binding = mcp_profile_bindings.get(profile_ref)
+                if binding is None:
+                    server_profile = self.mcp_repository.get_profile(
+                        identity, profile_ref[0], profile_ref[1]
+                    )
+                    if server_profile.status is not McpProfileStatus.ACTIVE:
+                        raise DomainError(
+                            "DEPENDENCY_VALIDATION_ERROR",
+                            "RunSnapshot 固定的 MCP Profile 版本不是 ACTIVE",
+                            {"profile_id": profile_ref[0], "version": profile_ref[1]},
+                        )
+                    allowed_remote_tools: dict[str, str] = {}
+                    mcp_profile_bindings[profile_ref] = (
+                        server_profile,
+                        allowed_remote_tools,
+                    )
+                else:
+                    server_profile, allowed_remote_tools = binding
+                if tool.remote_tool_name not in server_profile.enabled_tool_names:
+                    raise DomainError(
+                        "DEPENDENCY_VALIDATION_ERROR",
+                        "MCP ToolVersion 的远端工具不在固定 Profile 目录中",
+                        {"tool_id": tool_id},
+                    )
+                previous_digest = allowed_remote_tools.get(tool.remote_tool_name)
+                if previous_digest is not None and previous_digest != tool.input_schema_sha256:
+                    raise DomainError(
+                        "DEPENDENCY_VALIDATION_ERROR",
+                        "同一 MCP 远端工具被绑定到不同 Schema 摘要",
+                        {"tool_id": tool_id},
+                    )
+                allowed_remote_tools[tool.remote_tool_name] = tool.input_schema_sha256
+
+        mcp_servers = tuple(
+            RuntimeMcpServer(
+                profile=server_profile,
+                run_allowed_tool_names=tuple(allowed_remote_tools),
+                expected_tool_schema_sha256=allowed_remote_tools,
+            )
+            for _profile_ref, (server_profile, allowed_remote_tools) in mcp_profile_bindings.items()
+        )
 
         # 同一资源可能同时由 Employee 和 Skill 声明；RunSnapshot 每个 Hub 版本只记录一次。
         unique_refs: dict[tuple[str, int, str], HubResourceSnapshot] = {}
@@ -546,9 +651,41 @@ class AgentResolver:
             snapshot=snapshot,
             system_prompt=system_prompt,
             skill_instructions=tuple(skill_instructions),
-            allowed_tools=tuple(selected_names.values()),
+            allowed_tools=tuple(item.name for item in tool_definitions),
             skill_file_packages=tuple(skill_file_packages),
+            skill_file_contents=tuple(skill_file_contents),
+            tool_definitions=tuple(tool_definitions),
+            mcp_servers=mcp_servers,
         )
+
+    def resolve_snapshot(
+        self, identity: IdentityContext, snapshot: RunSnapshot
+    ) -> ResolvedAgent:
+        """按 Run 固定的员工版本重建执行上下文，并拒绝资源引用漂移。"""
+
+        version = self.catalog.repository.get_employee_version(
+            identity, snapshot.employee_id, snapshot.employee_version
+        )
+        if version.status not in (LifecycleStatus.PUBLISHED, LifecycleStatus.DEPRECATED):
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "RunSnapshot 固定的员工版本不再是已发布版本",
+                {"employee_id": snapshot.employee_id, "employee_version": snapshot.employee_version},
+            )
+        pinned_deployment = Deployment(
+            deployment_id="run-snapshot",
+            tenant_id=identity.tenant_id,
+            employee_id=version.employee_id,
+            employee_version=version,
+        )
+        resolved = self.resolve(identity, pinned_deployment)
+        if resolved.snapshot != snapshot:
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "RunSnapshot 资源引用与固定员工版本不一致",
+                {"employee_id": snapshot.employee_id, "employee_version": snapshot.employee_version},
+            )
+        return resolved
 
     def _validate_parent_bindings(
         self,

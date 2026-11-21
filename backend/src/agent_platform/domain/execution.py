@@ -7,9 +7,13 @@ from enum import StrEnum
 
 
 class RuntimeStatus(StrEnum):
-    """平台统一的 Runtime 执行状态。"""
+    """平台 Run 的排队、执行、审批和终态状态。"""
 
+    QUEUED = "queued"
+    STARTING = "starting"
     RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
+    CANCELLING = "cancelling"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"

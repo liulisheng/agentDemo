@@ -1,14 +1,19 @@
+import hashlib
+
 import pytest
 
 from harness_engine.core import (
     CancelStatus,
+    EmployeeContext,
     EngineNotStartedError,
     EngineRequest,
     EngineState,
+    EngineToolDefinition,
+    RunStatus,
     SessionMismatchError,
     SessionNotFoundError,
     SessionRef,
-    RunStatus,
+    SkillFileContext,
 )
 from harness_engine.engines.fake import FakeEngine
 
@@ -87,3 +92,44 @@ def test_fake_cleans_active_state_when_event_handler_fails():
         engine.run(EngineRequest(prompt="hello", session=session), on_event=fail)
 
     assert engine.cancel(session.session_id).status is CancelStatus.NOT_RUNNING
+
+
+def test_fake_engine_traces_employee_version_and_tool_names_without_context_bodies():
+    context = EmployeeContext(
+        employee_id="employee-1",
+        employee_version=4,
+        system_prompt="内部员工指令不进入 Trace",
+        skill_instructions=("内部 Skill 指令不进入 Trace",),
+        skill_files=(
+            SkillFileContext(
+                "SKILL.md",
+                "私有 Skill 文件正文",
+                hashlib.sha256("私有 Skill 文件正文".encode()).hexdigest(),
+            ),
+        ),
+    )
+    tool = EngineToolDefinition(
+        name="projects_list",
+        description="列出项目",
+        input_schema={"type": "object", "properties": {}},
+        risk_level="READ",
+    )
+    engine = FakeEngine()
+    engine.start()
+    events = []
+
+    engine.run(
+        EngineRequest(
+            prompt="查询项目",
+            employee_context=context,
+            tool_definitions=(tool,),
+        ),
+        on_event=events.append,
+    )
+
+    started = events[0].payload
+    assert started["employee_id"] == "employee-1"
+    assert started["employee_version"] == 4
+    assert started["allowed_tool_names"] == ("projects_list",)
+    assert "内部员工指令不进入 Trace" not in repr(started)
+    assert "私有 Skill 文件正文" not in repr(started)

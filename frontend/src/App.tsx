@@ -12,7 +12,7 @@ import { ResourceCenterPage } from './features/resources/ResourceCenterPage'
 import { ManagementLayout } from './features/management/ManagementLayout'
 import { TenantProvider } from './features/management/TenantContext'
 import { RunTracePage } from './features/runs/RunTrace'
-import { ChatWorkspace } from './features/platform/PlatformPages'
+import { ConversationWorkbenchPage } from './features/platform/ConversationWorkbenchPage'
 
 export function App() {
   // 资源中心管理租户 Skill/Tool，员工工作台负责把精确版本绑定到员工草稿。
@@ -26,7 +26,7 @@ export function App() {
           <Route path="/workspace/runs/:runId/trace" element={<RunTracePage />} />
           <Route path="/enterprise/dashboard" element={<Navigate to="/enterprise/employees" replace />} />
           <Route path="/enterprise/skills" element={<Navigate to="/enterprise/employees" replace />} />
-          <Route path="/workspace/chat" element={<ChatWorkspace />} />
+          <Route path="/workspace/chat" element={<ConversationWorkbenchPage />} />
           <Route path="/enterprise" element={<ManagementLayout />}>
             <Route index element={<Navigate to="employees" replace />} />
             <Route path="employees" element={<EmployeeListPage />} />
@@ -35,6 +35,7 @@ export function App() {
             <Route path="employees/:employeeId/skills/new" element={<SkillCreationPage />} />
             <Route path="employees/:employeeId/skills/:skillId/versions/:version/files" element={<SkillFileWorkspacePage />} />
             <Route path="employees/:employeeId/tools/:toolId" element={<ToolManagementPage />} />
+            <Route path="workbench" element={<ConversationWorkbenchPage />} />
             <Route path="resources/skills/:skillId/versions/:version/files" element={<SkillFileWorkspacePage />} />
             <Route path="resources" element={<ResourceCenterPage />} />
             <Route path="deployments" element={<DeploymentListPage />} />

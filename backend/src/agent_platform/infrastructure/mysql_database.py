@@ -47,6 +47,7 @@ class MySqlConnectionPool:
             autocommit=False,
             charset="utf8mb4",
             collation="utf8mb4_0900_ai_ci",
+            time_zone="+00:00",
         )
         self._closed = False
 

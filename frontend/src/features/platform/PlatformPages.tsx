@@ -1,4 +1,8 @@
-import { Card, Space, Typography } from 'antd'
+import { Card, Typography } from 'antd'
+import {
+  ConversationWorkbench,
+  type ConversationWorkbenchProps,
+} from './ConversationWorkbench'
 
 const { Paragraph, Title } = Typography
 
@@ -20,11 +24,6 @@ export function SkillList() {
   )
 }
 
-export function ChatWorkspace() {
-  return (
-    <Space direction="vertical">
-      <Title level={2}>对话工作区</Title>
-      <Paragraph>创建 Session、发送消息并打开 Run Trace。</Paragraph>
-    </Space>
-  )
+export function ChatWorkspace(props: ConversationWorkbenchProps = {}) {
+  return <ConversationWorkbench {...props} />
 }

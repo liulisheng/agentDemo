@@ -1,7 +1,9 @@
 # 后端与 Harness 引擎关系
 
-状态：第一批平台控制面已搭建，RuntimeAdapter 尚在后续任务中
-更新时间：2026-11-14
+状态：RuntimeAdapter 端口、Harness 适配原型和 MySQL 租约仓储已存在；生产 Worker 执行闭环尚未接通
+更新时间：2026-11-18
+
+本文前半部描述目标分层。当前实现状态、代码缺口、MCP Stdio、审批和工作台交互的统一方案见[Harness 数字员工执行闭环设计](Harness员工执行闭环设计.md)。
 
 ## 一、职责边界
 
@@ -75,6 +77,8 @@ flowchart LR
 
 ## 三、RuntimeAdapter 边界
 
+下列接口是目标边界的示意。当前 Protocol 定义位于 backend/src/agent_platform/ports/runtime.py，实际字段尚未完全覆盖 on_event 与创建 Session 的 request 参数。
+
 backend 使用统一的 RuntimeAdapter：
 
 ```python
@@ -98,13 +102,15 @@ class RuntimeAdapter(Protocol):
 
 适配器实现：
 
-```text
-backend/adapters/runtime/
-├── harness_engine.py     # 当前 DeepSeek/Fake 接入
-├── codex_app_server.py   # 后续接入
-├── hermes.py             # 后续接入
-└── generic_cli.py        # 后续接入
-```
+~~~text
+backend/src/agent_platform/adapters/runtime/
+├── harness.py            # Harness 适配原型
+├── fake.py               # 当前可用的 Fake Runtime
+├── cli.py                # CLI 适配边界
+└── registry.py           # Runtime 注册表原型
+~~~
+
+上方目录是现有文件位置；Harness 适配器当前尚未成为 MySQL 模式 API 的执行引擎。
 
 ## 四、平台 Session 与 Runtime Session
 
@@ -196,34 +202,26 @@ sequenceDiagram
 
 ## 七、当前代码状态
 
-当前已实现：
+已存在：
 
-- `backend/` Python 工程
-- Fake IdentityProvider
-- 租户范围数字员工 API
-- React Gallery 页面
-- `harness-engine` 现有独立 SDK 和 DeepSeek/Fake Runtime
+- RuntimeAdapter Protocol 和平台 RuntimeRequest / RuntimeResult 类型。
+- HarnessRuntimeAdapter 原型、FakeRuntimeAdapter 和 RuntimeRegistry。
+- Session、Run、RunSnapshot、Trace、Usage、MySQL 租约与 fencing 持久化。
+- DeepSeek/Fake Harness Engine 生命周期和 Stdio MCP Server 示例。
 
-当前尚未实现：
+尚未接通：
 
-- `backend` 到 `harness-engine` 的 RuntimeAdapter
-- Worker 调度和真实 Run 执行
-- Platform Session 与 Runtime Session 引用关联
-- Runtime 事件、Usage 和 Trace 接入
+- api/app.py 的 MySQL 模式仍固定注入 FakeRuntimeAdapter。
+- ControlPlaneService 的 Run 路径仍在请求调用链同步执行；workers 包没有 Worker 主循环。
+- HarnessRuntimeAdapter 使用动态请求对象，Session 恢复依赖本地集合；尚未以真正 EngineRequest 完整传递员工系统指令、Skill 文件和工具调用执行器。
+- DeepSeek 适配当前只把 prompt/session_id 传给 SDK；MCP Profile 未由 Worker 消费。
+- Conversation 列表、审批请求及批准后的一次性 MCP 写操作尚未实现。
 
-后续实现顺序：
-
-```text
-RuntimeAdapter 端口
-    -> HarnessEngineAdapter
-    -> Fake Runtime Adapter
-    -> Worker Run 执行
-    -> Session/Run 持久化
-    -> Trace/Usage 接入
-    -> Codex/Hermes/Generic CLI
-```
+实施方案、数据格式、状态转换、API 契约、各阶段验收和原型见[Harness 数字员工执行闭环设计](Harness员工执行闭环设计.md)。在 Worker、真实 Harness 输入和 MCP 隔离执行验证完成前，不得把适配器原型当作生产能力。
 
 ## 八、验证命令
+
+以下命令适用于已实现代码的回归；Harness Worker、真实 SDK 工具注入和 DolphinScheduler 写审批仍需后续集成验证。
 
 ```bash
 backend/.venv/bin/python -m pytest backend/tests -q
@@ -238,5 +236,5 @@ npm run build
 
 - [架构总览](架构总览.md)
 - [目录与模块说明](目录与模块说明.md)
-- [执行引擎规格](../openspec/changes/agent-platform-foundation/specs/execution-engines/spec.md)
+- [执行引擎规格](../openspec/changes/archive/2026-11-17-agent-platform-foundation/specs/execution-engines/spec.md)
 - [后端架构说明](backend-architecture.md)

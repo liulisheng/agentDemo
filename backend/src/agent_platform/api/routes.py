@@ -2,8 +2,22 @@
 
 from fastapi import APIRouter
 
-from .route_modules import catalog, conversations, deployments, resource_center, skill_files
+from .route_modules import (
+    catalog,
+    conversations,
+    deployments,
+    resource_center,
+    skill_files,
+    tool_approvals,
+)
 
 router = APIRouter(prefix="/api/v1")
-for route_group in (catalog.router, deployments.router, resource_center.router, skill_files.router, conversations.router):
+for route_group in (
+    catalog.router,
+    deployments.router,
+    resource_center.router,
+    skill_files.router,
+    conversations.router,
+    tool_approvals.router,
+):
     router.include_router(route_group)

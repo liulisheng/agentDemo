@@ -131,6 +131,21 @@ class MessageCreateRequest(TenantAwareRequest):
     routing_depth: int = 0
 
 
+class ConversationTurnRequest(TenantAwareRequest):
+    text: str = Field(min_length=1, max_length=65535)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+    employee_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class ToolApprovalApproveRequest(TenantAwareRequest):
+    preview_sha256: str = Field(min_length=64, max_length=64)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class ToolApprovalRejectRequest(TenantAwareRequest):
+    pass
+
+
 class DeliveryCreateRequest(TenantAwareRequest):
     body: str
     idempotency_key: str

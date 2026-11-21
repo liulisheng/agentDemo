@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
@@ -35,6 +36,7 @@ class Conversation:
     title: str
     is_group: bool = False
     status: str = "ACTIVE"
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(frozen=True, slots=True)

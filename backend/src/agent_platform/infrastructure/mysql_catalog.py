@@ -106,6 +106,15 @@ class MySqlCatalogRepository:
             protocol=str(row[8]),
             requires_recipient_credentials=bool(row[10]),
             auth_secret_ref=str(row[9]) if row[9] is not None else None,
+            mcp_server_profile_id=str(row[11]) if row[11] is not None else None,
+            mcp_server_profile_version=(
+                int(row[12]) if row[12] is not None else None
+            ),
+            remote_tool_name=str(row[13]) if row[13] is not None else None,
+            input_schema_sha256=str(row[14]) if row[14] is not None else None,
+            preview_tool_name=str(row[15]) if row[15] is not None else None,
+            mcp_risk_level=str(row[16]),
+            idempotency_support=bool(row[17]),
         )
 
     @staticmethod
@@ -113,7 +122,10 @@ class MySqlCatalogRepository:
         return (
             "SELECT tool_id, tenant_id, name, description, input_schema_json, "
             "version, status, handler_name, protocol, auth_secret_ref, "
-            "(requires_recipient_credentials OR auth_secret_ref IS NOT NULL) FROM tool_versions"
+            "(requires_recipient_credentials OR auth_secret_ref IS NOT NULL), "
+            "mcp_server_profile_id, mcp_server_profile_version, remote_tool_name, "
+            "input_schema_sha256, preview_tool_name, mcp_risk_level, idempotency_support "
+            "FROM tool_versions"
         )
 
     def save_tool(self, identity: IdentityContext, value: ToolVersion) -> None:
@@ -136,13 +148,20 @@ class MySqlCatalogRepository:
                 "(platform_id, tenant_id, tool_id, version, name, protocol, description, "
                 "input_schema_json, output_schema_json, auth_secret_ref, requires_recipient_credentials, "
                 "timeout_ms, retry_policy_json, "
-                "risk_policy, handler_name, status) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,30000,%s,'low',%s,%s) "
+                "risk_policy, handler_name, status, mcp_server_profile_id, "
+                "mcp_server_profile_version, remote_tool_name, input_schema_sha256, "
+                "preview_tool_name, mcp_risk_level, idempotency_support) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,30000,%s,'low',%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), "
                 "input_schema_json=VALUES(input_schema_json), output_schema_json=VALUES(output_schema_json), "
                 "retry_policy_json=VALUES(retry_policy_json), handler_name=VALUES(handler_name), "
                 "protocol=VALUES(protocol), auth_secret_ref=VALUES(auth_secret_ref), "
-                "requires_recipient_credentials=VALUES(requires_recipient_credentials), status=VALUES(status)",
+                "requires_recipient_credentials=VALUES(requires_recipient_credentials), status=VALUES(status), "
+                "mcp_server_profile_id=VALUES(mcp_server_profile_id), "
+                "mcp_server_profile_version=VALUES(mcp_server_profile_version), "
+                "remote_tool_name=VALUES(remote_tool_name), input_schema_sha256=VALUES(input_schema_sha256), "
+                "preview_tool_name=VALUES(preview_tool_name), mcp_risk_level=VALUES(mcp_risk_level), "
+                "idempotency_support=VALUES(idempotency_support)",
                 (
                     identity.platform_id,
                     identity.tenant_id,
@@ -158,6 +177,13 @@ class MySqlCatalogRepository:
                     _json_dump({"max_retries": 0}),
                     value.handler_name,
                     value.status.value,
+                    value.mcp_server_profile_id,
+                    value.mcp_server_profile_version,
+                    value.remote_tool_name,
+                    value.input_schema_sha256,
+                    value.preview_tool_name,
+                    value.mcp_risk_level.value,
+                    value.idempotency_support,
                 ),
             )
 

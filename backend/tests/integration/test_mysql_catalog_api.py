@@ -65,6 +65,7 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
     from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
     from agent_platform.infrastructure.mysql_conversations import MySqlConversationRepository
     from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
+    from agent_platform.infrastructure.mysql_mcp import MySqlMcpRepository
     from agent_platform.infrastructure.mysql_resource_center import MySqlResourceCenterRepository
     from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
     from agent_platform.ports.storage import LocalObjectStore
@@ -78,6 +79,7 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
             catalog_repository=MySqlCatalogRepository(connection_factory),
             execution_repository=MySqlExecutionRepository(connection_factory),
             conversation_repository=MySqlConversationRepository(connection_factory),
+            mcp_repository=MySqlMcpRepository(connection_factory),
             resource_center_repository=MySqlResourceCenterRepository(connection_factory),
             object_store=LocalObjectStore(
                 tmp_path / "api-objects",

@@ -1,6 +1,6 @@
 """Sandbox-neutral contracts and conservative container defaults."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 
@@ -29,7 +29,7 @@ class SandboxSpec:
     image: str
     cpu_millis: int
     memory_mb: int
-    security: ContainerSecurityPolicy = ContainerSecurityPolicy.default()
+    security: ContainerSecurityPolicy = field(default_factory=ContainerSecurityPolicy.default)
 
     def __post_init__(self) -> None:
         if "@sha256:" not in self.image:

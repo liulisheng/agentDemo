@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from agent_platform.domain.conversations import AgentBinding, Conversation, Message, MessageSource
@@ -25,6 +26,22 @@ class StoredMessage:
     content_type: str
     sequence_no: int
     routing_depth: int
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationSummaryRecord:
+    """员工工作台列表的授权聚合结果，不在 SQL DTO 内包含消息正文。"""
+
+    conversation: Conversation
+    updated_at: datetime
+    employee_id: str
+    employee_name: str
+    session_id: str
+    last_message: StoredMessage | None
+    last_run_id: str | None
+    last_run_status: str | None
+    pending_approval_count: int
 
 
 class ConversationRepository(Protocol):
@@ -33,6 +50,10 @@ class ConversationRepository(Protocol):
     def save_conversation(self, identity: IdentityContext, value: Conversation) -> None: ...
 
     def get_conversation(self, identity: IdentityContext, conversation_id: str) -> Conversation: ...
+
+    def get_conversation_id_for_run(self, identity: IdentityContext, run_id: str) -> str:
+        """通过 Run 绑定的用户消息读取 Conversation，避免跨表猜测会话归属。"""
+        ...
 
     def save_binding(self, identity: IdentityContext, value: AgentBinding) -> None: ...
 
@@ -55,3 +76,14 @@ class ConversationRepository(Protocol):
     def list_messages(
         self, identity: IdentityContext, conversation_id: str
     ) -> tuple[StoredMessage, ...]: ...
+
+    def list_conversation_summaries(
+        self,
+        identity: IdentityContext,
+        employee_id: str,
+        status: str,
+        cursor: tuple[datetime, str] | None,
+        limit: int,
+    ) -> tuple[ConversationSummaryRecord, ...]:
+        """按用户参与权、员工绑定和更新时间游标返回授权列表索引。"""
+        ...

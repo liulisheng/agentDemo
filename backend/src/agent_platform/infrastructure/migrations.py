@@ -38,6 +38,63 @@ V004_SENTINEL_OBJECTS = frozenset(
 )
 V005_SENTINEL_OBJECTS = frozenset({"skill_file_entries"})
 V005_SKILL_COLUMNS = frozenset({"content_format", "entry_path", "file_manifest_sha256"})
+V006_SENTINEL_OBJECTS = frozenset({"mcp_server_profiles", "tool_approval_requests"})
+V006_TOOL_COLUMNS = frozenset(
+    {
+        "mcp_server_profile_id",
+        "mcp_server_profile_version",
+        "remote_tool_name",
+        "input_schema_sha256",
+        "preview_tool_name",
+        "mcp_risk_level",
+        "idempotency_support",
+    }
+)
+V006_RUN_COLUMNS = frozenset({"submitted_by_user_id"})
+V006_APPROVAL_COLUMNS = frozenset(
+    {
+        "approval_id",
+        "run_id",
+        "session_id",
+        "conversation_id",
+        "requested_by",
+        "approved_by",
+        "rejected_by",
+        "tool_invocation_id",
+        "tool_id",
+        "tool_version",
+        "mcp_server_profile_id",
+        "mcp_server_profile_version",
+        "arguments_ref",
+        "arguments_sha256",
+        "preview_ref",
+        "preview_sha256",
+        "confirmation_idempotency_key",
+        "active_run_id",
+        "state",
+        "expires_at",
+        "worker_id",
+        "fencing_token",
+        "lease_expires_at",
+        "approved_at",
+        "consumed_at",
+        "finished_at",
+        "error_code",
+    }
+)
+V007_SENTINEL_OBJECTS = frozenset({"session_runtime_leases"})
+V007_LEASE_COLUMNS = frozenset(
+    {
+        "platform_id",
+        "tenant_id",
+        "session_id",
+        "run_id",
+        "worker_id",
+        "fencing_token",
+        "lease_expires_at",
+        "state",
+    }
+)
 V001_SENTINEL_OBJECTS = frozenset(
     {"schema_version", "platforms", "tenants", "users", "sessions", "runs", "audit_events"}
 )
@@ -333,10 +390,24 @@ class MigrationPreflight:
                     | V003_SENTINEL_OBJECTS
                     | V004_SENTINEL_OBJECTS
                     | V005_SENTINEL_OBJECTS
+                    | V006_SENTINEL_OBJECTS
+                    | V007_SENTINEL_OBJECTS
                 )
                 or baseline.schema_columns.get("skill_versions", frozenset()).intersection(
                     V005_SKILL_COLUMNS
                 )
+                or baseline.schema_columns.get("tool_versions", frozenset()).intersection(
+                    V006_TOOL_COLUMNS
+                )
+                or baseline.schema_columns.get(
+                    "tool_approval_requests", frozenset()
+                ).intersection(V006_APPROVAL_COLUMNS)
+                or baseline.schema_columns.get("runs", frozenset()).intersection(
+                    V006_RUN_COLUMNS
+                )
+                or baseline.schema_columns.get(
+                    "session_runtime_leases", frozenset()
+                ).intersection(V007_LEASE_COLUMNS)
             )
             if current is None and any_known_objects:
                 return MigrationPreflightResult(
@@ -421,6 +492,106 @@ class MigrationPreflight:
                 PreflightAction.BLOCK_PARTIAL_MIGRATION,
                 current,
                 errors=("v005_objects_present_without_schema_version",),
+            )
+
+        found_v006_objects = baseline.schema_objects.intersection(V006_SENTINEL_OBJECTS)
+        tool_columns = baseline.schema_columns.get("tool_versions", frozenset())
+        found_v006_columns = tool_columns.intersection(V006_TOOL_COLUMNS)
+        approval_columns = baseline.schema_columns.get(
+            "tool_approval_requests", frozenset()
+        )
+        found_v006_approval_columns = approval_columns.intersection(
+            V006_APPROVAL_COLUMNS
+        )
+        run_columns = baseline.schema_columns.get("runs", frozenset())
+        found_v006_run_columns = run_columns.intersection(V006_RUN_COLUMNS)
+        found_any_v006 = bool(
+            found_v006_objects
+            or found_v006_columns
+            or found_v006_approval_columns
+            or found_v006_run_columns
+        )
+        complete_v006 = (
+            found_v006_objects == V006_SENTINEL_OBJECTS
+            and found_v006_columns == V006_TOOL_COLUMNS
+            and found_v006_approval_columns == V006_APPROVAL_COLUMNS
+            and found_v006_run_columns == V006_RUN_COLUMNS
+        )
+        if found_any_v006 and not complete_v006:
+            missing = sorted(V006_SENTINEL_OBJECTS.difference(found_v006_objects))
+            missing.extend(sorted(V006_TOOL_COLUMNS.difference(found_v006_columns)))
+            missing.extend(
+                "tool_approval_requests." + column
+                for column in sorted(
+                    V006_APPROVAL_COLUMNS.difference(found_v006_approval_columns)
+                )
+            )
+            missing.extend(sorted("runs." + column for column in V006_RUN_COLUMNS.difference(found_v006_run_columns)))
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v006_schema:" + ",".join(missing),),
+            )
+        if complete_v006 and (current is None or current < 6):
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                errors=("v006_objects_present_without_schema_version",),
+            )
+        if current is not None and current >= 6 and not complete_v006:
+            missing = sorted(V006_SENTINEL_OBJECTS.difference(found_v006_objects))
+            missing.extend(sorted(V006_TOOL_COLUMNS.difference(found_v006_columns)))
+            missing.extend(
+                "tool_approval_requests." + column
+                for column in sorted(
+                    V006_APPROVAL_COLUMNS.difference(found_v006_approval_columns)
+                )
+            )
+            missing.extend(sorted("runs." + column for column in V006_RUN_COLUMNS.difference(found_v006_run_columns)))
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                errors=("partial_v006_schema:" + ",".join(missing),),
+            )
+
+        found_v007_objects = baseline.schema_objects.intersection(V007_SENTINEL_OBJECTS)
+        lease_columns = baseline.schema_columns.get("session_runtime_leases", frozenset())
+        found_v007_columns = lease_columns.intersection(V007_LEASE_COLUMNS)
+        found_any_v007 = bool(found_v007_objects or found_v007_columns)
+        complete_v007 = (
+            found_v007_objects == V007_SENTINEL_OBJECTS
+            and found_v007_columns == V007_LEASE_COLUMNS
+        )
+        if found_any_v007 and not complete_v007:
+            missing = sorted(V007_SENTINEL_OBJECTS.difference(found_v007_objects))
+            missing.extend(
+                "session_runtime_leases." + column
+                for column in sorted(V007_LEASE_COLUMNS.difference(found_v007_columns))
+            )
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v007_schema:" + ",".join(missing),),
+            )
+        if complete_v007 and (current is None or current < 7):
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                errors=("v007_objects_present_without_schema_version",),
+            )
+        if current is not None and current >= 7 and not complete_v007:
+            missing = sorted(V007_SENTINEL_OBJECTS.difference(found_v007_objects))
+            missing.extend(
+                "session_runtime_leases." + column
+                for column in sorted(V007_LEASE_COLUMNS.difference(found_v007_columns))
+            )
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v007_schema:" + ",".join(missing),),
             )
 
         v003_present = found_v003_objects == V003_SENTINEL_OBJECTS

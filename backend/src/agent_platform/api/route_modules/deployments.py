@@ -133,6 +133,13 @@ def create_run(
     )
 
 
+@router.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str, identity: Identity, service: ControlPlane) -> dict[str, object]:
+    """由 Run 提交者请求取消；已领取任务由持有租约的 Worker 执行取消。"""
+
+    return _run_response(service.request_run_cancellation(identity, run_id))
+
+
 @router.get("/runs/{run_id}")
 def get_run(run_id: str, identity: Identity, service: ControlPlane) -> dict[str, object]:
     return _run_response(service.get_run(identity, run_id))

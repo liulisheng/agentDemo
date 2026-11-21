@@ -316,7 +316,9 @@ export function SkillFileWorkspacePage() {
       <div className="management-page-header">
         <div>
           <Link to={returnPath}>← 返回{employeeId ? '员工详情' : '资源中心'}</Link>
-          <Text className="management-eyebrow">技能资源 / v{version}</Text>
+          <Text className="management-eyebrow">
+            {employeeId ? `员工 Skill / v${version}` : `技能资源 / v${version}`}
+          </Text>
           <Space align="center">
             <Title level={2}>Skill 文件工作区</Title>
             <Tag color={readOnly ? 'default' : 'blue'}>{readOnly ? '只读' : tree.status}</Tag>

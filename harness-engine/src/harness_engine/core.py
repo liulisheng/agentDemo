@@ -5,10 +5,13 @@ No SDK-specific type is allowed to cross this module boundary.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Protocol
 
 
@@ -119,6 +122,105 @@ class EngineCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillFileContext:
+    """Run 内存中的 Skill 文件内容；repr 不泄露文件正文。"""
+
+    path: str
+    content: str = field(repr=False)
+    content_sha256: str
+    skill_id: str | None = None
+    skill_version: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.path.strip() or "\x00" in self.path:
+            raise ValueError("Skill file path must be nonblank text")
+        if not isinstance(self.content, str):
+            raise TypeError("Skill file content must be text")
+        digest = self.content_sha256.lower()
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise ValueError("Skill file digest must be a SHA-256 hex value")
+        actual_digest = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+        if actual_digest != digest:
+            raise ValueError("Skill file content digest does not match its content")
+        if (self.skill_id is None) != (self.skill_version is None):
+            raise ValueError("Skill file resource id and version must be provided together")
+        if self.skill_id is not None and (
+            not self.skill_id.strip() or self.skill_version is None or self.skill_version < 1
+        ):
+            raise ValueError("Skill file must reference a positive Skill version")
+        object.__setattr__(self, "content_sha256", digest)
+
+
+@dataclass(frozen=True, slots=True)
+class EmployeeContext:
+    """RunSnapshot 固定的员工、系统指令和 Skill 输入，不含租户凭据。"""
+
+    employee_id: str
+    employee_version: int
+    system_prompt: str = field(repr=False)
+    skill_refs: tuple[tuple[str, int], ...] = ()
+    skill_instructions: tuple[str, ...] = field(default=(), repr=False)
+    skill_files: tuple[SkillFileContext, ...] = ()
+    model_route_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.employee_id.strip() or self.employee_version < 1:
+            raise ValueError("Employee context requires a fixed employee version")
+        if not self.system_prompt.strip():
+            raise ValueError("Employee system_prompt must not be blank")
+        instructions = tuple(self.skill_instructions)
+        if any(not isinstance(item, str) or not item.strip() for item in instructions):
+            raise ValueError("Skill instructions must be nonblank text")
+        files = tuple(self.skill_files)
+        if any(not isinstance(item, SkillFileContext) for item in files):
+            raise TypeError("skill_files must contain SkillFileContext values")
+        if self.model_route_id is not None and not self.model_route_id.strip():
+            raise ValueError("model_route_id must be nonblank when provided")
+        refs = tuple((str(skill_id), int(version)) for skill_id, version in self.skill_refs)
+        if any(not skill_id.strip() or version < 1 for skill_id, version in refs):
+            raise ValueError("skill_refs must contain positive fixed versions")
+        if len({skill_id for skill_id, _ in refs}) != len(refs):
+            raise ValueError("skill_refs must contain unique Skill ids")
+        object.__setattr__(self, "skill_refs", refs)
+        object.__setattr__(self, "skill_instructions", instructions)
+        object.__setattr__(self, "skill_files", files)
+
+
+@dataclass(frozen=True, slots=True)
+class EngineToolDefinition:
+    """模型可见工具的 JSON Schema；写工具不能进入 EngineRequest。"""
+
+    name: str
+    description: str
+    input_schema: Mapping[str, Any]
+    risk_level: str
+    tool_id: str | None = None
+    tool_version: int | None = None
+    remote_tool_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.name.strip() or any(character.isspace() for character in self.name):
+            raise ValueError("tool name must be a nonblank token")
+        if not self.description.strip():
+            raise ValueError("tool description must not be blank")
+        if not isinstance(self.input_schema, Mapping):
+            raise TypeError("tool input_schema must be an object")
+        risk_level = self.risk_level.upper().strip()
+        if risk_level not in {"READ", "PREVIEW"}:
+            raise ValueError("risk_level must be READ or PREVIEW")
+        if (self.tool_id is None) != (self.tool_version is None):
+            raise ValueError("Tool id and version must be provided together")
+        if self.tool_id is not None and (
+            not self.tool_id.strip() or self.tool_version is None or self.tool_version < 1
+        ):
+            raise ValueError("Tool definition must reference a positive ToolVersion")
+        if self.remote_tool_name is not None and not self.remote_tool_name.strip():
+            raise ValueError("remote_tool_name must be nonblank when provided")
+        object.__setattr__(self, "risk_level", risk_level)
+        object.__setattr__(self, "input_schema", MappingProxyType(dict(self.input_schema)))
+
+
+@dataclass(frozen=True, slots=True)
 class EngineRequest:
     prompt: str
     session_id: str | None = None
@@ -126,12 +228,19 @@ class EngineRequest:
     session: SessionRef | None = None
     run_id: str | None = None
     parent_run_id: str | None = None
+    employee_context: EmployeeContext | None = None
+    tool_definitions: tuple[EngineToolDefinition, ...] = ()
+    harness_home_ref: str | None = None
 
     def __post_init__(self) -> None:
         if not self.prompt.strip():
             raise ValueError("prompt must not be blank")
         if self.session_id is not None and not self.session_id.strip():
             raise ValueError("session_id must not be blank")
+        if self.harness_home_ref is not None and re.fullmatch(
+            r"harness-session:[0-9a-f]{64}", self.harness_home_ref
+        ) is None:
+            raise ValueError("harness_home_ref must be an opaque harness-session reference")
         if (
             self.session is not None
             and self.session_id is not None
@@ -142,6 +251,16 @@ class EngineRequest:
             value = getattr(self, name)
             if value is not None and not value.strip():
                 raise ValueError(f"{name} must not be blank")
+        definitions = tuple(self.tool_definitions)
+        if any(not isinstance(item, EngineToolDefinition) for item in definitions):
+            raise TypeError("tool_definitions must contain EngineToolDefinition values")
+        if len({item.name for item in definitions}) != len(definitions):
+            raise ValueError("tool definition names must be unique")
+        if self.employee_context is not None and not isinstance(
+            self.employee_context, EmployeeContext
+        ):
+            raise TypeError("employee_context must be an EmployeeContext value")
+        object.__setattr__(self, "tool_definitions", definitions)
 
     @property
     def resolved_session_id(self) -> str | None:
@@ -191,7 +310,7 @@ class HarnessEvent:
     event_type: str
     session_id: str | None = None
     run_id: str | None = None
-    payload: Mapping[str, Any] = field(default_factory=dict)
+    payload: Mapping[str, Any] = field(default_factory=dict, repr=False)
     occurred_at: datetime = field(
         default_factory=lambda: datetime.now(UTC)
     )

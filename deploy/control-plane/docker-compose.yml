@@ -36,6 +36,10 @@ services:
       MYSQL_USER: ${MYSQL_USER:-agent_platform}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请先配置 deploy/control-plane/.env}
       MYSQL_POOL_SIZE: 8
+      AGENT_PLATFORM_OBJECT_ENCRYPTION_REQUIRED: ${AGENT_PLATFORM_OBJECT_ENCRYPTION_REQUIRED:-0}
+      AGENT_PLATFORM_STORAGE_SECRET_REF: ${AGENT_PLATFORM_STORAGE_SECRET_REF:-}
+      AGENT_PLATFORM_STORAGE_KEY_VERSION: ${AGENT_PLATFORM_STORAGE_KEY_VERSION:-}
+      AGENT_PLATFORM_STORAGE_KEY_B64: ${AGENT_PLATFORM_STORAGE_KEY_B64:-}
     command: ["sh", "-ec", "agent-platform-migration apply && agent-platform-seed-fake-identity"]
     depends_on:
       mysql:
@@ -62,6 +66,42 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+
+  worker:
+    image: agent-platform/control-plane-api:local
+    restart: unless-stopped
+    environment:
+      <<: *backend_environment
+      AGENT_PLATFORM_ID: ${AGENT_PLATFORM_ID:-plt-local}
+      AGENT_PLATFORM_WORKER_POLL_SECONDS: ${AGENT_PLATFORM_WORKER_POLL_SECONDS:-1}
+      AGENT_PLATFORM_WORKER_LEASE_SECONDS: ${AGENT_PLATFORM_WORKER_LEASE_SECONDS:-30}
+      AGENT_PLATFORM_WORKER_HEARTBEAT_SECONDS: ${AGENT_PLATFORM_WORKER_HEARTBEAT_SECONDS:-10}
+      AGENT_PLATFORM_WORKER_CANCEL_GRACE_SECONDS: ${AGENT_PLATFORM_WORKER_CANCEL_GRACE_SECONDS:-10}
+    command: ["agent-platform-run-worker"]
+    volumes:
+      - control_plane_objects:/var/lib/agent-platform
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  approval-worker:
+    image: agent-platform/control-plane-api:local
+    restart: unless-stopped
+    environment:
+      <<: *backend_environment
+      AGENT_PLATFORM_ID: ${AGENT_PLATFORM_ID:-plt-local}
+      AGENT_PLATFORM_TENANT_ID: ${AGENT_PLATFORM_TENANT_ID:-tenant-a}
+      AGENT_PLATFORM_APPROVAL_WORKER_ID: ${AGENT_PLATFORM_APPROVAL_WORKER_ID:-approval-worker-local}
+      AGENT_PLATFORM_APPROVAL_LEASE_SECONDS: ${AGENT_PLATFORM_APPROVAL_LEASE_SECONDS:-30}
+      AGENT_PLATFORM_APPROVAL_POLL_SECONDS: ${AGENT_PLATFORM_APPROVAL_POLL_SECONDS:-1}
+      AGENT_PLATFORM_MCP_ALLOWED_COMMANDS: ${AGENT_PLATFORM_MCP_ALLOWED_COMMANDS:-[]}
+      AGENT_PLATFORM_MCP_ALLOWED_WORKING_DIRECTORY_ROOTS: ${AGENT_PLATFORM_MCP_ALLOWED_WORKING_DIRECTORY_ROOTS:-[]}
+    command: ["agent-platform-approval-worker"]
+    volumes:
+      - control_plane_objects:/var/lib/agent-platform
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
 
   web:
     image: agent-platform/control-plane-web:local

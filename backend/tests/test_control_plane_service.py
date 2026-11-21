@@ -1,3 +1,5 @@
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
@@ -10,6 +12,7 @@ from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.domain.catalog import SkillType
 from agent_platform.domain.common import DomainError
 from agent_platform.domain.observability import SpanType
+from agent_platform.ports.runtime import RuntimeEvent
 
 
 def _published_service() -> tuple[ControlPlaneService, object, object]:
@@ -38,6 +41,7 @@ def test_run_persists_snapshot_and_ordered_trace() -> None:
 
     run = service.create_run(identity, session.session_id, "echo: hello", "idem-1")
     assert len(run.run_id) == 26
+    assert run.submitted_by_user_id == identity.user_id
     trace = service.get_trace(identity, run.run_id)
 
     assert run.status.value == "succeeded"
@@ -68,6 +72,34 @@ def test_run_idempotency_replays_and_conflicts() -> None:
     with pytest.raises(DomainError) as error:
         service.create_run(identity, session.session_id, "changed", "idem-1")
     assert error.value.code == "IDEMPOTENCY_CONFLICT"
+
+
+def test_prepared_conversation_turn_is_queued_and_idempotent_without_running_runtime() -> None:
+    service, identity, deployment = _published_service()
+    session = service.create_session(identity, deployment.deployment_id)
+
+    first = service.prepare_conversation_turn(
+        identity, session.session_id, "conversation-1", "生成离线工作流"
+    )
+    assert first.status.value == "queued"
+    assert first.submitted_by_user_id == identity.user_id
+
+    queued = service.queue_prepared_run(identity, first, "turn-1")
+    assert queued.run_id == first.run_id
+    assert service.get_run(identity, first.run_id).status.value == "queued"
+
+    replay_candidate = service.prepare_conversation_turn(
+        identity, session.session_id, "conversation-1", "生成离线工作流"
+    )
+    replay = service.queue_prepared_run(identity, replay_candidate, "turn-1")
+    assert replay.run_id == first.run_id
+
+    changed = service.prepare_conversation_turn(
+        identity, session.session_id, "conversation-1", "创建另一个工作流"
+    )
+    with pytest.raises(DomainError) as conflict:
+        service.queue_prepared_run(identity, changed, "turn-1")
+    assert conflict.value.code == "IDEMPOTENCY_CONFLICT"
 
 
 def test_run_started_before_deployment_disable_can_finish_and_replay() -> None:
@@ -149,3 +181,58 @@ def test_control_plane_can_persist_run_snapshot_and_runtime_refs() -> None:
     run = integrated.create_run(identity, session.session_id, "hello", "persist-1")
     persisted = persistence.get_run(identity, run.run_id)
     assert persisted["runtime_refs"]["runtime_session_ref"].startswith("fake-session-")
+
+
+def test_tool_trace_keeps_only_safe_metadata_and_payload_digests() -> None:
+    service, identity, deployment = _published_service()
+    session = service.create_session(identity, deployment.deployment_id)
+    run = service.create_run(identity, session.session_id, "普通验收输入", "trace-safe-1")
+    arguments = '{"datasource_type":"MYSQL","password_env_alias":"WAREHOUSE"}'
+    result_text = '{"preview":{"name":"warehouse"},"confirmation_code":"one-time-secret"}'
+    call_event = RuntimeEvent(
+        "tool/call",
+        "TOOL",
+        {
+            "data": {
+                "callId": "call-safe-1",
+                "name": "mcp__dolphin__dolphinscheduler_datasource_create_preview",
+                "arguments": arguments,
+                "step": 1,
+                "turn": 1,
+            }
+        },
+    )
+    result_event = RuntimeEvent(
+        "tool/result",
+        "TOOL",
+        {
+            "data": {
+                "step": 1,
+                "turn": 1,
+                "message": {
+                    "toolCallId": "call-safe-1",
+                    "isError": False,
+                    "content": [{"type": "text", "text": result_text}],
+                },
+            }
+        },
+    )
+
+    call_span = service._event_to_span(session.trace_id, run, call_event)
+    result_span = service._event_to_span(session.trace_id, run, result_event)
+
+    assert call_span is not None and call_span.span_type is SpanType.TOOL
+    assert call_span.attributes["tool_name"] == "mcp__dolphin__dolphinscheduler_datasource_create_preview"
+    assert call_span.attributes["call_id"] == "call-safe-1"
+    assert call_span.attributes["arguments_sha256"] == hashlib.sha256(arguments.encode()).hexdigest()
+    assert "arguments" not in call_span.attributes
+    assert result_span is not None and result_span.span_type is SpanType.TOOL
+    assert result_span.attributes["tool_call_id"] == "call-safe-1"
+    assert result_span.attributes["result_sha256"] == hashlib.sha256(result_text.encode()).hexdigest()
+    serialized = json.dumps(
+        {"call": call_span.attributes, "result": result_span.attributes},
+        ensure_ascii=False,
+    )
+    assert "one-time-secret" not in serialized
+    assert arguments not in serialized
+    assert "one-time-secret" not in repr(result_event)

@@ -22,11 +22,14 @@ dev = [
   "ruff>=0.8,<1",
 ]
 mysql = ["mysql-connector-python==9.7.0"]
+mcp = ["mcp==2.3.0"]
 
 [project.scripts]
 agent-platform-migration = "agent_platform.infrastructure.migrations:main"
 agent-platform-seed-fake-identity = "agent_platform.infrastructure.seed_fake_identity:main"
 agent-platform-object-gc = "agent_platform.infrastructure.object_gc:main"
+agent-platform-run-worker = "agent_platform.workers.run_worker:main"
+agent-platform-approval-worker = "agent_platform.workers.approval_worker:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

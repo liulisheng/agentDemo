@@ -877,3 +877,155 @@ export interface RunTrace {
 export async function getRunTrace(runId: string, fakeUser = DEFAULT_FAKE_USER): Promise<RunTrace> {
   return request(`/api/v1/runs/${encodeURIComponent(runId)}/trace`, fakeUser)
 }
+
+export interface ConversationApiSummary {
+  conversation_id: string
+  title: string
+  employee: { employee_id: string; employee_name: string }
+  session_id: string
+  last_message: { message_id: string; preview: string; source: string; created_at?: string } | null
+  last_run: { run_id: string; status: string } | null
+  pending_approval_count: number
+  updated_at: string
+}
+
+export interface ConversationMessage {
+  id: string
+  conversation_id: string
+  sender_id: string
+  source: string
+  text: string
+  routing_depth?: number
+}
+
+export interface RunDetails {
+  id: string
+  session_id: string
+  trace_id?: string
+  status: string
+  result: string
+  result_ref?: string | null
+  error_category?: string | null
+  snapshot: {
+    employee_id?: string
+    employee_version: number
+    skill_ids: string[]
+    tool_ids: string[]
+    execution_profile_id?: string
+  }
+}
+
+export interface ToolApprovalPreview {
+  approval_id: string
+  run_id: string
+  session_id: string
+  conversation_id: string
+  requested_by: string
+  tool_id: string
+  tool_version: number
+  mcp_server_profile_id: string
+  mcp_server_profile_version: number
+  preview: string
+  preview_sha256: string
+  expires_at: string
+  state: string
+}
+
+/** 按员工和租户授权范围读取可恢复的对话摘要页。 */
+export async function listConversations(
+  employeeId: string,
+  query: { cursor?: string | null; limit?: number } = {},
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<Page<ConversationApiSummary>> {
+  return request(
+    `/api/v1/conversations${queryString({ employee_id: employeeId, ...query })}`,
+    fakeUser,
+  )
+}
+
+/** 为新工作台对话创建受租户约束的控制面对象。 */
+export async function createConversation(
+  input: { title: string; is_group: boolean },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ id: string; title: string; is_group: boolean; status: string }> {
+  return request('/api/v1/conversations', fakeUser, { method: 'POST', body: jsonBody(input) })
+}
+
+/** 从选定的 ACTIVE 部署创建固定版本 Session。 */
+export async function createSession(
+  deploymentId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ id: string; deployment_id: string; employee_version: number; trace_id: string }> {
+  return request('/api/v1/sessions', fakeUser, {
+    method: 'POST',
+    body: jsonBody({ deployment_id: deploymentId }),
+  })
+}
+
+/** 将新 Session 绑定到新建对话中的一个员工。 */
+export async function bindConversationAgent(
+  conversationId: string,
+  input: { employee_id: string; employee_name: string; session_id: string },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ employee_id: string; employee_name: string; session_id: string; status: string }> {
+  return request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/bindings`, fakeUser, {
+    method: 'POST',
+    body: jsonBody(input),
+  })
+}
+
+/** 读取已授权 Conversation 的消息正文；API 会按参与者和租户校验。 */
+export async function listConversationMessages(
+  conversationId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<Page<ConversationMessage>> {
+  return request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`, fakeUser)
+}
+
+/** 幂等提交 Conversation turn，API 立即返回 QUEUED Run 标识。 */
+export async function submitConversationTurn(
+  conversationId: string,
+  input: { text: string; employee_id: string; idempotency_key: string },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ conversation_id: string; message_id: string; run_id: string; status: string; replayed: boolean }> {
+  return request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/turns`, fakeUser, {
+    method: 'POST',
+    body: jsonBody(input),
+  })
+}
+
+/** 查询一个已授权 Run 的状态和创建时固定的资源快照。 */
+export async function getRun(runId: string, fakeUser = DEFAULT_FAKE_USER): Promise<RunDetails> {
+  return request(`/api/v1/runs/${encodeURIComponent(runId)}`, fakeUser)
+}
+
+/** 读取审批预览；服务端仅向原 Run 提交者返回正文。 */
+export async function getToolApproval(
+  approvalId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ToolApprovalPreview> {
+  return request(`/api/v1/tool-approvals/${encodeURIComponent(approvalId)}`, fakeUser)
+}
+
+/** 确认并排队精确预览绑定的一次写操作。 */
+export async function approveToolApproval(
+  approvalId: string,
+  input: { preview_sha256: string; idempotency_key: string },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ approval_id: string; run_id: string; state: string; approved_by?: string; approved_at?: string }> {
+  return request(`/api/v1/tool-approvals/${encodeURIComponent(approvalId)}/approve`, fakeUser, {
+    method: 'POST',
+    body: jsonBody(input),
+  })
+}
+
+/** 拒绝当前一次性预览，不触发远端写调用。 */
+export async function rejectToolApproval(
+  approvalId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ approval_id: string; run_id: string; state: string; rejected_by?: string; finished_at?: string }> {
+  return request(`/api/v1/tool-approvals/${encodeURIComponent(approvalId)}/reject`, fakeUser, {
+    method: 'POST',
+    body: jsonBody({}),
+  })
+}
