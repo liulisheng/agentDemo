@@ -7,6 +7,7 @@ from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversation_turns import ConversationTurnService
 from agent_platform.application.conversations import ConversationService
+from agent_platform.application.model_management import ModelManagementService
 from agent_platform.application.model_routes import ModelRouteService
 from agent_platform.application.resource_center import ResourceCenterService
 from agent_platform.application.skill_files import SkillFilePackageService
@@ -57,6 +58,12 @@ def model_route_service(request: Request) -> ModelRouteService:
     """读取应用启动时注入的模型路由服务。"""
 
     return request.app.state.model_route_service
+
+
+def model_management_service(request: Request) -> ModelManagementService:
+    """读取租户模型连接、目录、测试任务与可用路由管理服务。"""
+
+    return request.app.state.model_management_service
 
 
 def resource_center_service(request: Request) -> ResourceCenterService:

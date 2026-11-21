@@ -12,17 +12,24 @@ import pytest
 mysql = pytest.importorskip("mysql.connector")
 
 
+class _RedactedMySqlConfig(dict[str, object]):
+    """避免 pytest 失败回溯打印测试库密码。"""
+
+    def __repr__(self) -> str:
+        return "MySQL catalog test config(<redacted>)"
+
+
 @pytest.fixture
 def mysql_catalog_database():
     if os.environ.get("AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE") != "1":
         pytest.skip("set AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE=1 for disposable MySQL integration")
     database = f"agent_platform_catalog_test_{secrets.token_hex(5)}"
-    config = {
+    config = _RedactedMySqlConfig({
         "host": os.environ.get("MYSQL_HOST", "127.0.0.1"),
         "port": int(os.environ.get("MYSQL_PORT", "3306")),
         "user": os.environ.get("MYSQL_USER", "root"),
         "password": os.environ.get("MYSQL_PASSWORD", ""),
-    }
+    })
     root = mysql.connect(**config)
     cursor = root.cursor()
     try:
@@ -83,7 +90,14 @@ def test_mysql_catalog_repository_round_trips_versioned_resources_and_tenant_sco
         ToolVersion,
     )
     from agent_platform.domain.common import DomainError
-    from agent_platform.domain.model_routes import ModelProfile, ModelRoute, SecretRef
+    from agent_platform.domain.model_routes import (
+        ModelCatalogItem,
+        ModelCatalogSource,
+        ModelConnection,
+        ModelProfile,
+        ModelRoute,
+        SecretRef,
+    )
     from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
     from agent_platform.ports.workspaces import SandboxProfile, WorkspaceMode, WorkspaceProfile
 
@@ -135,6 +149,40 @@ def test_mysql_catalog_repository_round_trips_versioned_resources_and_tenant_sco
         ("skill", skill.skill_id, 1), ("tool", tool.tool_id, 1)
     ]
 
+    connection = ModelConnection(
+        connection_id="connection-model-000001",
+        tenant_id=identity.tenant_id,
+        name="Fake Model Connection",
+        provider_kind="fake",
+        protocol="openai-compatible",
+        endpoint="fake://model",
+        secret_ref=SecretRef("secret-ref-1"),
+        catalog_mode="MANUAL",
+    )
+    repository.save_model_connection(identity, connection)
+    assert repository.get_model_connection(identity, connection.connection_id) == connection
+    assert repository.list_model_connections(identity) == (connection,)
+
+    model_a = ModelCatalogItem(
+        connection_id=connection.connection_id,
+        tenant_id=identity.tenant_id,
+        model_id="fake-model",
+        display_name="Fake Model",
+        capabilities={"chat": True},
+        catalog_source=ModelCatalogSource.MANUAL,
+    )
+    model_b = ModelCatalogItem(
+        connection_id=connection.connection_id,
+        tenant_id=identity.tenant_id,
+        model_id="fake-reasoning-model",
+        display_name="Fake Reasoning Model",
+        capabilities={"chat": True, "reasoning": True},
+        catalog_source=ModelCatalogSource.MANUAL,
+    )
+    repository.save_model_catalog_item(identity, model_a)
+    repository.save_model_catalog_item(identity, model_b)
+    assert repository.list_model_catalog_items(identity, connection.connection_id) == (model_a, model_b)
+
     route = ModelRoute(
         "route-000000000001",
         identity.tenant_id,
@@ -146,10 +194,32 @@ def test_mysql_catalog_repository_round_trips_versioned_resources_and_tenant_sco
             "fake",
             "fake://model",
             secret_ref=SecretRef("secret-ref-1"),
+            connection_id=connection.connection_id,
+            catalog_model_id="fake-model",
         ),
     )
     repository.save_model_route(identity, route)
     assert repository.get_model_route(identity, route.route_id) == route
+
+    legacy_route = ModelRoute(
+        "route-000000000002",
+        identity.tenant_id,
+        "legacy-direct-route",
+        ModelProfile(
+            "model-profile-route-000000000002",
+            identity.tenant_id,
+            "legacy-model",
+            "legacy-openai-compatible",
+            "http://legacy.example/v1",
+        ),
+    )
+    repository.save_model_route(identity, legacy_route)
+    migrated_route = repository.get_model_route(identity, legacy_route.route_id)
+    assert migrated_route.profile.connection_id is not None
+    assert migrated_route.profile.catalog_model_id == "legacy-model"
+    assert repository.get_model_connection(
+        identity, migrated_route.profile.connection_id
+    ).endpoint == "http://legacy.example/v1"
 
     workspace = WorkspaceProfile(
         "workspace-000000001",
@@ -203,6 +273,32 @@ def test_mysql_catalog_repository_round_trips_versioned_resources_and_tenant_sco
     with pytest.raises(DomainError) as error:
         repository.get_employee(other, employee.employee_id)
     assert error.value.code == "RESOURCE_NOT_FOUND"
+    assert repository.list_model_connections(other) == ()
+    with pytest.raises(DomainError) as hidden_catalog:
+        repository.list_model_catalog_items(other, connection.connection_id)
+    assert hidden_catalog.value.code == "RESOURCE_NOT_FOUND"
+    with pytest.raises(DomainError) as hidden_model_connection:
+        repository.get_model_connection(other, connection.connection_id)
+    assert hidden_model_connection.value.code == "RESOURCE_NOT_FOUND"
+    with pytest.raises(DomainError) as cross_tenant_connection:
+        repository.save_model_connection(other, connection)
+    assert cross_tenant_connection.value.code == "AUTHORIZATION_DENIED"
+    with pytest.raises(DomainError) as cross_tenant_catalog:
+        repository.save_model_catalog_item(
+            other,
+            ModelCatalogItem(
+                connection_id=connection.connection_id,
+                tenant_id=identity.tenant_id,
+                model_id="model-cross-tenant",
+                display_name="跨租户模型",
+            ),
+        )
+    assert cross_tenant_catalog.value.code == "AUTHORIZATION_DENIED"
+    other_platform = replace(identity, platform_id="plt-other")
+    assert repository.list_model_connections(other_platform) == ()
+    with pytest.raises(DomainError) as hidden_platform_connection:
+        repository.get_model_connection(other_platform, connection.connection_id)
+    assert hidden_platform_connection.value.code == "RESOURCE_NOT_FOUND"
 
 
 def test_backend_database_ids_round_trip_through_v001_v002_char26_keys(mysql_catalog_database) -> None:
@@ -262,3 +358,116 @@ def test_backend_database_ids_round_trip_through_v001_v002_char26_keys(mysql_cat
     finally:
         cursor.close()
         connection.close()
+
+
+def test_mysql_model_test_queue_claims_and_fences_terminal_result(mysql_catalog_database) -> None:
+    from agent_platform.adapters.identity.fake import FakeIdentityProvider
+    from agent_platform.domain.common import generate_database_id
+    from agent_platform.domain.identity import IdentityContext
+    from agent_platform.domain.model_routes import (
+        ModelConnection,
+        ModelTestKind,
+        ModelTestRecord,
+        ModelTestResult,
+        ModelTestState,
+        UsageStatus,
+    )
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+
+    database, config = mysql_catalog_database
+    identity = FakeIdentityProvider().resolve_identity("admin-local")
+    repository = MySqlCatalogRepository(lambda: mysql.connect(**config, database=database))
+    connection = ModelConnection(
+        connection_id=generate_database_id(),
+        tenant_id=identity.tenant_id,
+        name="Worker queue connection",
+        provider_kind="openai-compatible",
+        protocol="openai-chat-completions",
+        endpoint="http://localhost:63072/v1",
+    )
+    repository.save_model_connection(identity, connection)
+    queued = ModelTestRecord(
+        test_id=generate_database_id(),
+        tenant_id=identity.tenant_id,
+        connection_id=connection.connection_id,
+        test_kind=ModelTestKind.CONNECTION,
+        state=ModelTestState.QUEUED,
+        snapshot={"operation": "SYNC_MODELS"},
+        created_by_user_id=identity.user_id,
+    )
+    repository.save_model_test_record(identity, queued)
+
+    claimed = repository.claim_next_model_test(
+        identity.platform_id, "worker-model-test", lease_seconds=30
+    )
+    assert claimed is not None
+    assert claimed.test_id == queued.test_id
+    assert claimed.state is ModelTestState.RUNNING
+    assert claimed.worker_id == "worker-model-test"
+    assert claimed.fencing_token == 1
+    worker_identity = IdentityContext(
+        identity.platform_id,
+        identity.tenant_id,
+        "worker-model-test",
+        frozenset(),
+        auth_source="worker",
+    )
+    assert repository.heartbeat_model_test(
+        worker_identity,
+        claimed.test_id,
+        "worker-model-test",
+        claimed.fencing_token,
+        lease_seconds=30,
+    )
+    result = ModelTestResult(
+        ModelTestState.SUCCEEDED,
+        latency_ms=31,
+        provider_request_id="catalog-request-1",
+        usage_status=UsageStatus.EXACT,
+    )
+    assert not repository.finish_model_test(
+        worker_identity,
+        replace(claimed, fencing_token=claimed.fencing_token + 1),
+        result,
+    )
+    assert repository.finish_model_test(worker_identity, claimed, result)
+    finished = repository.get_model_test_record(identity, queued.test_id)
+    assert finished.state is ModelTestState.SUCCEEDED
+    assert finished.provider_request_id == "catalog-request-1"
+    assert finished.lease_expires_at is None
+    assert not repository.finish_model_test(worker_identity, claimed, result)
+
+    uncertain = replace(
+        queued,
+        test_id=generate_database_id(),
+        state=ModelTestState.QUEUED,
+        worker_id=None,
+        fencing_token=0,
+        lease_expires_at=None,
+        started_at=None,
+        finished_at=None,
+    )
+    repository.save_model_test_record(identity, uncertain)
+    old_claim = repository.claim_next_model_test(
+        identity.platform_id, "worker-expired", lease_seconds=30
+    )
+    assert old_claim is not None and old_claim.test_id == uncertain.test_id
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "UPDATE model_test_records SET lease_expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND "
+            "WHERE platform_id=%s AND tenant_id=%s AND test_id=%s",
+            (identity.platform_id, identity.tenant_id, uncertain.test_id),
+        )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
+    assert repository.claim_next_model_test(
+        identity.platform_id, "worker-replacement", lease_seconds=30
+    ) is None
+    expired = repository.get_model_test_record(identity, uncertain.test_id)
+    assert expired.state is ModelTestState.UNKNOWN
+    assert expired.error_category == "WORKER_LEASE_EXPIRED"
+    assert expired.fencing_token == old_claim.fencing_token + 1

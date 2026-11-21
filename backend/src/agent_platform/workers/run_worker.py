@@ -6,10 +6,13 @@ import asyncio
 import hashlib
 import hmac
 import logging
+from collections.abc import Callable
 
 from agent_platform.domain.common import DomainError
 from agent_platform.domain.execution import RuntimeStatus
 from agent_platform.domain.identity import IdentityContext
+from agent_platform.domain.model_routes import ModelTestRecord, ModelTestResult
+from agent_platform.ports.catalog_repository import CatalogRepository
 from agent_platform.ports.execution_repository import ExecutionRepository, RunClaim
 from agent_platform.ports.storage import ObjectStore
 
@@ -38,6 +41,8 @@ class RunWorker:
         heartbeat_interval_seconds: float | None = None,
         poll_interval_seconds: float = 1.0,
         cancellation_grace_seconds: float = 10.0,
+        model_test_repository: CatalogRepository | None = None,
+        model_test_executor: Callable[[ModelTestRecord], ModelTestResult] | None = None,
     ) -> None:
         if not platform_id.strip() or not worker_id.strip():
             raise ValueError("platform_id 和 worker_id 必须非空")
@@ -61,9 +66,17 @@ class RunWorker:
         self.heartbeat_interval_seconds = heartbeat_interval
         self.poll_interval_seconds = poll_interval_seconds
         self.cancellation_grace_seconds = cancellation_grace_seconds
+        self.model_test_repository = model_test_repository
+        self.model_test_executor = model_test_executor
+        self._prefer_model_test = False
 
     async def run_once(self) -> bool:
-        """领取并处理一个 Run；本轮没有 QUEUED Run 时返回 False。"""
+        """在 Run 与模型测试之间轮换领取，避免持续 Run 队列饿死测试任务。"""
+
+        if self._prefer_model_test:
+            self._prefer_model_test = False
+            if await self._run_next_model_test():
+                return True
 
         claim = self.repository.claim_next_queued_run(
             self.platform_id,
@@ -71,7 +84,10 @@ class RunWorker:
             lease_seconds=self.lease_seconds,
         )
         if claim is None:
-            return False
+            return await self._run_next_model_test()
+        self._prefer_model_test = (
+            self.model_test_repository is not None and self.model_test_executor is not None
+        )
         identity = self._worker_identity(claim)
         run = self.repository.get_run(identity, claim.run_id)
         session = self.repository.get_session(identity, run.session_id)
@@ -132,11 +148,15 @@ class RunWorker:
         except asyncio.CancelledError:
             if not lease_lost.is_set():
                 raise
-        except Exception:  # ControlPlane 已先写 UNKNOWN；失败时再做一次 fenced 收敛
+        except Exception:  # noqa: BLE001 — 失败的出站结果需要围栏为 UNKNOWN
             current = self.repository.get_run(identity, claim.run_id)
             if current.status not in _TERMINAL_STATES:
                 self.repository.mark_unknown(identity, claim.run_id, claim.fencing_token)
-            logger.exception("Run Worker 执行失败并已收敛租户 Run 状态")
+            # Provider 异常可能包含 URL、响应片段或认证信息；只记录任务引用，不记录异常正文。
+            logger.error(
+                "Run Worker 执行失败并已收敛租户 Run 状态 run_id=%s",
+                claim.run_id,
+            )
         finally:
             stop_heartbeat.set()
             heartbeat_task.cancel()
@@ -145,6 +165,89 @@ class RunWorker:
             except asyncio.CancelledError:
                 pass
         return True
+
+    async def _run_next_model_test(self) -> bool:
+        repository = self.model_test_repository
+        executor = self.model_test_executor
+        if repository is None or executor is None:
+            return False
+        claimed = repository.claim_next_model_test(
+            self.platform_id,
+            self.worker_id,
+            lease_seconds=self.lease_seconds,
+        )
+        if claimed is None:
+            return False
+        identity = IdentityContext(
+            platform_id=self.platform_id,
+            tenant_id=claimed.tenant_id,
+            user_id=self.worker_id,
+            roles=frozenset(),
+            auth_source="worker",
+        )
+        stop_heartbeat = asyncio.Event()
+        result_task = asyncio.create_task(asyncio.to_thread(executor, claimed))
+        heartbeat_task = asyncio.create_task(
+            self._maintain_model_test_lease(
+                identity,
+                claimed,
+                result_task,
+                stop_heartbeat,
+            )
+        )
+        try:
+            try:
+                result = await result_task
+                if not isinstance(result, ModelTestResult):
+                    raise TypeError("model test executor must return a ModelTestResult")
+            except Exception:  # noqa: BLE001 — 出站后异常无法判断供应商是否已接收请求
+                # Unknown outcomes are terminal: replaying could send a second paid request.
+                result = ModelTestResult(
+                    state="UNKNOWN",
+                    error_category="MODEL_TEST_OUTCOME_UNKNOWN",
+                )
+            if not repository.finish_model_test(identity, claimed, result):
+                logger.warning(
+                    "模型测试结果未写入，租约已失效 test_id=%s",
+                    claimed.test_id,
+                )
+            return True
+        finally:
+            stop_heartbeat.set()
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _maintain_model_test_lease(
+        self,
+        identity: IdentityContext,
+        claimed: ModelTestRecord,
+        result_task: asyncio.Task[ModelTestResult],
+        stop: asyncio.Event,
+    ) -> None:
+        repository = self.model_test_repository
+        if repository is None or claimed.worker_id is None:
+            return
+        while not stop.is_set() and not result_task.done():
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=self.heartbeat_interval_seconds
+                )
+                return
+            except TimeoutError:
+                pass
+            renewed = await asyncio.to_thread(
+                repository.heartbeat_model_test,
+                identity,
+                claimed.test_id,
+                claimed.worker_id,
+                claimed.fencing_token,
+                lease_seconds=self.lease_seconds,
+            )
+            if not renewed:
+                return
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         """持续 claim；收到进程停止信号后不再领取新 Run。"""
@@ -348,6 +451,8 @@ def main() -> int:
         cancellation_grace_seconds=float(
             os.environ.get("AGENT_PLATFORM_WORKER_CANCEL_GRACE_SECONDS", "10")
         ),
+        model_test_repository=control_plane.catalog.repository,
+        model_test_executor=getattr(app.state, "model_test_executor", None),
     )
 
     async def _run() -> None:

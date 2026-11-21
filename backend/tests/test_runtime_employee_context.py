@@ -215,3 +215,102 @@ def test_resolver_loads_verified_text_skill_support_files_into_runtime_context()
     assert resolved.skill_file_contents[0].skill_id == skill.skill_id
     assert resolved.skill_file_contents[0].path == "references.md"
     assert resolved.skill_file_contents[0].content == "OFFLINE 工作流参考字段。"
+
+
+def test_run_snapshot_pins_model_connection_and_route_before_later_edits() -> None:
+    from dataclasses import replace
+
+    from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
+    from agent_platform.application.control_plane import ControlPlaneService
+    from agent_platform.application.model_routes import ModelRouteService
+    from agent_platform.domain.model_routes import ModelCatalogItem, ModelConnection, SecretRef
+    from agent_platform.domain.observability import SpanType
+
+    identity = FakeIdentityProvider().resolve_identity("admin-local")
+    repository = InMemoryCatalogRepository()
+    catalog = CatalogService(repository)
+    connection = ModelConnection(
+        connection_id="connection-snapshot",
+        tenant_id=identity.tenant_id,
+        name="本地模型",
+        provider_kind="openai-compatible",
+        protocol="openai-chat-completions",
+        endpoint="http://host.docker.internal:63072/v1",
+        secret_ref=SecretRef("model-key-ref", scope=identity.tenant_id, provider="environment"),
+        version=4,
+    )
+    repository.save_model_connection(identity, connection)
+    repository.save_model_catalog_item(
+        identity,
+        ModelCatalogItem(
+            connection_id=connection.connection_id,
+            tenant_id=identity.tenant_id,
+            model_id="local-model-a",
+            display_name="Local Model A",
+        ),
+    )
+    routes = ModelRouteService(repository)
+    route = routes.create_from_catalog(
+        identity,
+        alias="assistant-model",
+        connection_id=connection.connection_id,
+        model_id="local-model-a",
+        parameters={"temperature": 0.2},
+    )
+    profile = catalog.create_profile(
+        identity, "deepseek", "assistant-model", model_route_id=route.route_id
+    )
+    skill = catalog.create_skill(identity, "空 Skill", SkillType.INSTRUCTION, "回答问题", [])
+    catalog.publish_skill(identity, skill.skill_id)
+    employee = catalog.create_employee(identity, "快照助手", "助手", "模型快照")
+    version = catalog.create_employee_version(
+        identity,
+        employee.employee_id,
+        "根据用户问题回答。",
+        [skill.skill_id],
+        [],
+        execution_profile_id=profile.profile_id,
+        model_route_id=route.route_id,
+    )
+    published = catalog.publish_employee_version(identity, employee.employee_id, version.version)
+    deployment = catalog.deploy(identity, employee.employee_id, published.version)
+    resolver = AgentResolver(catalog)
+
+    submitted = resolver.resolve(identity, deployment)
+    snapshot = submitted.snapshot
+    model_snapshot = getattr(snapshot, "model_route_snapshot", None)
+    assert model_snapshot is not None, "RunSnapshot must pin the resolved model route"
+    assert model_snapshot.endpoint == "http://host.docker.internal:63072/v1"
+    assert model_snapshot.connection_version == 4
+    assert model_snapshot.route_version == 1
+    assert model_snapshot.model_id == "local-model-a"
+    assert model_snapshot.provider_kind == "openai-compatible"
+    assert model_snapshot.protocol == "openai-chat-completions"
+    assert model_snapshot.parameters == {"temperature": 0.2}
+    assert model_snapshot.secret_ref.secret_id == "model-key-ref"
+
+    control_plane = ControlPlaneService(catalog, FakeRuntimeAdapter())
+    session = control_plane.create_session(identity, deployment.deployment_id)
+    run = control_plane.create_run(identity, session.session_id, "检查模型路由", "model-trace-1")
+    model_span = next(
+        span
+        for span in control_plane.get_trace(identity, run.run_id).spans
+        if span.span_type is SpanType.MODEL
+    )
+    assert model_span.attributes["model"] == "local-model-a"
+    assert model_span.attributes["model_alias"] == "assistant-model"
+    assert model_span.attributes["provider"] == "openai-compatible"
+
+    repository.save_model_connection(
+        identity,
+        replace(connection, endpoint="http://host.docker.internal:63073/v1", version=5),
+    )
+    routes.update(identity, route.route_id, alias="assistant-model-v2", parameters={"temperature": 0.8})
+
+    resumed = resolver.resolve_snapshot(identity, snapshot)
+    assert resumed.snapshot == snapshot
+    assert resumed.snapshot.model_route_snapshot.endpoint == "http://host.docker.internal:63072/v1"
+    assert resumed.snapshot.model_route_snapshot.connection_version == 4
+    assert resumed.snapshot.model_route_snapshot.route_version == 1
+    assert resumed.snapshot.model_route_snapshot.parameters == {"temperature": 0.2}
+    assert "raw-model-api-key" not in repr(resumed.snapshot.model_route_snapshot)

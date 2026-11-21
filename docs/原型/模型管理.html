@@ -454,6 +454,29 @@
 
     .footer-note { margin-top: 23px; color: #8a9aa5; text-align: center; font-size: 9px; }
 
+    .test-job-panel {
+      display: none;
+      gap: 10px;
+      margin: 0 0 18px;
+      padding: 13px 15px;
+      border: 1px solid #d8e7e4;
+      border-left: 4px solid var(--sea);
+      border-radius: 9px;
+      background: #fff;
+    }
+    .test-job-panel.visible { display: grid; }
+    .test-job-panel.running { border-left-color: var(--blue); }
+    .test-job-panel.failed { border-left-color: var(--red); }
+    .test-job-panel.unknown { border-left-color: var(--amber); }
+    .test-job-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .test-job-title { color: #294558; font-size: 11px; font-weight: 650; }
+    .test-job-caption { margin-top: 4px; color: var(--muted); font-size: 9px; }
+    .test-job-meta { display: flex; flex-wrap: wrap; gap: 14px 22px; color: #788b98; font-size: 9px; }
+    .test-job-meta strong { display: block; margin-top: 3px; color: #40596a; font-size: 10px; font-weight: 620; }
+    .test-job-error { color: var(--red); font-size: 10px; }
+    .test-job-disclaimer { color: #81919c; font-size: 9px; }
+    .model-test-warning { padding: 10px 11px; border: 1px solid #f0dfc3; border-radius: 7px; background: #fffaf1; color: #805c2a; font-size: 9px; line-height: 1.6; }
+
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -601,6 +624,16 @@
           <div class="prototype-flag">交互原型 · 不会发送真实请求</div>
         </div>
 
+        <section class="test-job-panel" id="prototype-test-result" aria-live="polite">
+          <div class="test-job-heading">
+            <div><div class="test-job-title" id="prototype-test-title">模型测试</div><div class="test-job-caption" id="prototype-test-caption">Worker 异步处理</div></div>
+            <span class="status neutral" id="prototype-test-status">排队中</span>
+          </div>
+          <div class="test-job-meta" id="prototype-test-meta"></div>
+          <div class="test-job-error" id="prototype-test-error" hidden></div>
+          <div class="test-job-disclaimer">此处仅模拟界面状态；原型不会向任何模型端点发送请求。</div>
+        </section>
+
         <section class="journey" aria-label="模型配置关系">
           <div class="journey-step">
             <div class="journey-number">1</div>
@@ -637,7 +670,7 @@
             <section class="panel" aria-label="模型连接列表">
               <div class="panel-head">
                 <div><div class="panel-title">连接列表</div><div class="panel-subtitle">租户 A 的连接</div></div>
-                <span class="status neutral">1 个连接</span>
+                      <span class="status neutral">1 个连接</span>
               </div>
               <div class="panel-body">
                 <div class="connection-row" aria-current="true">
@@ -646,7 +679,7 @@
                     <div class="connection-name">本地模型接口</div>
                     <div class="connection-url mono">http://host.docker.internal:63072/v1</div>
                     <div class="connection-meta">
-                      <span class="status warning">需要有效凭据</span>
+                      <span class="status success">连接已启用</span>
                       <span class="tenant-scope">OpenAI 兼容 · 租户 A</span>
                     </div>
                   </div>
@@ -663,7 +696,7 @@
               <div class="connection-detail">
                 <div>
                   <div class="detail-name">本地模型接口</div>
-                  <div class="detail-caption">连接可达；需要有效凭据才能读取模型目录和调用模型。</div>
+                  <div class="detail-caption">连接已启用；目录模型可分别创建路由并测试。</div>
                 </div>
                 <div class="detail-actions">
                   <button class="button small" data-action="edit-connection">编辑连接</button>
@@ -672,22 +705,39 @@
               </div>
               <div class="detail-grid">
                 <div class="detail-item"><div class="detail-label">接口协议</div><div class="detail-value">OpenAI Chat Completions</div></div>
-                <div class="detail-item"><div class="detail-label">凭据引用</div><div class="detail-value mono">尚未绑定</div></div>
-                <div class="detail-item"><div class="detail-label">最近检查</div><div class="detail-value">未通过 · HTTP 401</div></div>
+                <div class="detail-item"><div class="detail-label">凭据引用</div><div class="detail-value mono">local-model-key</div></div>
+                <div class="detail-item"><div class="detail-label">最近连接测试</div><div class="detail-value">成功 · 412 ms</div></div>
               </div>
-              <div class="notice"><span class="notice-mark">!</span><span>Worker 在 Docker 中运行。宿主机服务应使用 <span class="mono">host.docker.internal</span>；本机接口当前需要 API Key，密钥只通过 SecretRef 提供给 Worker。</span></div>
+              <div class="notice"><span class="notice-mark">!</span><span>Worker 在 Docker 中运行。宿主机服务应使用 <span class="mono">host.docker.internal</span>；页面只管理凭据引用，API Key 由 Worker 在调用时解析。</span></div>
 
               <div class="catalog-section">
                 <div class="catalog-heading" style="padding:0 17px">
-                  <div><h3>连接下的模型</h3><p>认证成功后可同步多个模型，并分别创建路由。</p></div>
-                  <button class="button small" data-action="sync-models">同步模型</button>
-                </div>
-                <div class="empty-catalog">
-                  <div class="empty-icon" aria-hidden="true">⌕</div>
-                  <div>
-                    <div class="empty-title">还没有读取到模型</div>
-                    <div class="empty-copy">绑定有效的凭据引用后，平台会尝试读取模型目录。若接口不支持目录读取，也可以手工录入模型 ID。</div>
+                  <div><h3>连接下的模型</h3><p>同一个 URL 可以包含多个模型 ID，每个模型可单独建路由。</p></div>
+                  <div class="route-tools">
+                    <button class="button small" data-action="add-model">手工添加模型</button>
+                    <button class="button small" data-action="sync-models">同步模型</button>
                   </div>
+                </div>
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>模型名称 / ID</th><th>能力</th><th>目录来源</th><th>状态</th><th style="text-align:right">操作</th></tr></thead>
+                    <tbody id="catalog-table-body">
+                      <tr>
+                        <td><div class="model-name">本地对话模型</div><div class="model-id">local-model-a</div></td>
+                        <td><span class="capability">Chat</span></td>
+                        <td><span class="muted">手工维护</span></td>
+                        <td><span class="status success">可用</span></td>
+                        <td><div class="row-actions"><button class="button ghost small" data-action="create-route" data-model="local-model-a">创建路由</button></div></td>
+                      </tr>
+                      <tr>
+                        <td><div class="model-name">本地推理模型</div><div class="model-id">local-model-b</div></td>
+                        <td><span class="capability">Chat</span> <span class="capability">Reasoning</span></td>
+                        <td><span class="muted">远端发现</span></td>
+                        <td><span class="status success">可用</span></td>
+                        <td><div class="row-actions"><button class="button ghost small" data-action="create-route" data-model="local-model-b">创建路由</button></div></td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </section>
@@ -721,22 +771,22 @@
             <div class="table-wrap">
               <table>
                 <thead><tr><th>路由别名</th><th>模型 ID</th><th>连接</th><th>使用范围</th><th>状态</th><th style="text-align:right">操作</th></tr></thead>
-                <tbody>
+                <tbody id="route-table-body">
                   <tr>
                     <td><div class="route-cell"><span class="route-glyph">A</span><span class="model-name">通用助手模型</span></div></td>
-                    <td><span class="muted">尚未选择模型</span></td>
+                    <td><span class="model-id">local-model-a</span></td>
                     <td><span class="muted">本地模型接口</span></td>
-                    <td><span class="scope-label">租户 A</span></td>
-                    <td><span class="status neutral">待配置</span></td>
-                    <td><div class="row-actions"><button class="button ghost small" data-action="test-model">测试模型</button><button class="button ghost small" data-action="edit-route">配置</button></div></td>
+                    <td><span class="scope-label">平台授权</span></td>
+                    <td><span class="status success">启用中</span></td>
+                    <td><div class="row-actions"><button class="button ghost small" data-action="test-model" data-route="route-a" data-model="local-model-a">测试模型</button><button class="button ghost small" data-action="edit-route" data-route="route-a">配置</button></div></td>
                   </tr>
                   <tr>
                     <td><div class="route-cell"><span class="route-glyph blue">B</span><span class="model-name">分析模型</span></div></td>
-                    <td><span class="muted">尚未选择模型</span></td>
+                    <td><span class="model-id">local-model-b</span></td>
                     <td><span class="muted">本地模型接口</span></td>
-                    <td><span class="scope-label">租户 A</span></td>
-                    <td><span class="status neutral">待配置</span></td>
-                    <td><div class="row-actions"><button class="button ghost small" data-action="test-model">测试模型</button><button class="button ghost small" data-action="edit-route">配置</button></div></td>
+                    <td><span class="scope-label">平台授权</span></td>
+                    <td><span class="status success">启用中</span></td>
+                    <td><div class="row-actions"><button class="button ghost small" data-action="test-model" data-route="route-b" data-model="local-model-b">测试模型</button><button class="button ghost small" data-action="edit-route" data-route="route-b">配置</button></div></td>
                   </tr>
                 </tbody>
               </table>
@@ -781,13 +831,63 @@
       <form id="connection-form">
         <div class="modal-body">
           <div class="field"><label for="connection-name">连接名称</label><input id="connection-name" value="本地模型接口" required></div>
-          <div class="field"><label for="connection-protocol">接口协议</label><select id="connection-protocol"><option>OpenAI Chat Completions</option><option>OpenAI Responses</option></select></div>
+          <div class="field"><label for="connection-protocol">接口协议</label><select id="connection-protocol"><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Completions</option></select></div>
           <div class="field"><label for="connection-url">Base URL</label><input id="connection-url" value="http://host.docker.internal:63072/v1" required><div class="field-help">Worker 在 Docker Desktop 中运行时，使用 host.docker.internal 访问宿主机端口。</div></div>
-          <div class="field"><label for="connection-secret">凭据引用</label><input id="connection-secret" placeholder="例如 secret://tenant-a/local-model-api-key"><div class="field-help">只填已配置的 SecretRef；不要把 API Key 写进模型路由。</div></div>
+          <div class="field"><label for="connection-secret">凭据引用 ID</label><input id="connection-secret" placeholder="例如 local-model-key"><div class="field-help">只管理 SecretRef；真实 API Key 不会显示在页面或写入连接表。</div></div>
+          <div class="field"><label for="connection-catalog-mode">模型目录方式</label><select id="connection-catalog-mode"><option value="REMOTE">远端发现（GET /models）</option><option value="MANUAL">手工维护模型 ID</option></select></div>
           <div class="modal-callout"><span aria-hidden="true">i</span><span>保存后可先测试连接，再同步模型目录。一个连接下可以选择多个 model ID。</span></div>
         </div>
         <div class="modal-foot"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="submit">保存连接</button></div>
       </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="manual-model-modal" role="dialog" aria-modal="true" aria-labelledby="manual-model-title">
+    <div class="modal">
+      <div class="modal-head">
+        <div><h2 id="manual-model-title">手工添加模型</h2><p>只录入供应商实际使用的模型 ID，不会发起推理请求。</p></div>
+        <button class="icon-button" aria-label="关闭" data-close-modal>×</button>
+      </div>
+      <form id="manual-model-form">
+        <div class="modal-body">
+          <div class="field"><label for="manual-model-id">模型 ID</label><input id="manual-model-id" placeholder="例如 local-model-c" required></div>
+          <div class="field"><label for="manual-model-name">显示名称</label><input id="manual-model-name" placeholder="例如 本地模型 C" required></div>
+          <div class="field"><label for="manual-model-context">上下文长度（可选）</label><input id="manual-model-context" inputmode="numeric" type="number" min="1" placeholder="32768"></div>
+        </div>
+        <div class="modal-foot"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="submit">添加模型</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="route-modal" role="dialog" aria-modal="true" aria-labelledby="route-modal-title">
+    <div class="modal">
+      <div class="modal-head">
+        <div><h2 id="route-modal-title">创建模型路由</h2><p>路由固定到当前租户连接下的一个模型 ID。</p></div>
+        <button class="icon-button" aria-label="关闭" data-close-modal>×</button>
+      </div>
+      <form id="route-form">
+        <div class="modal-body">
+          <div class="field"><label for="route-alias">路由别名</label><input id="route-alias" placeholder="例如 客服主模型" required></div>
+          <div class="field"><label for="route-model-id">模型 ID</label><select id="route-model-id"><option value="local-model-a">local-model-a</option><option value="local-model-b">local-model-b</option></select></div>
+          <div class="field"><label for="route-temperature">Temperature（可选）</label><input id="route-temperature" type="number" min="0" max="2" step="0.1" placeholder="不设置"></div>
+        </div>
+        <div class="modal-foot"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="submit">创建路由</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="model-test-modal" role="dialog" aria-modal="true" aria-labelledby="model-test-title">
+    <div class="modal">
+      <div class="modal-head">
+        <div><h2 id="model-test-title">确认测试模型</h2><p>本次测试会实际调用所选模型。</p></div>
+        <button class="icon-button" aria-label="关闭" data-close-modal>×</button>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label>测试目标</label><div class="detail-value" id="test-target-model">local-model-a</div></div>
+        <div class="model-test-warning">平台会向所选模型发送固定的合成提示，不使用员工提示词或工具，最多生成 16 个 Token。真实请求可能产生供应商费用。</div>
+        <div class="field-help">关闭或取消不会创建测试任务。确认后由 Run Worker 执行一次，不自动重试结果不确定的请求。</div>
+      </div>
+      <div class="modal-foot"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="button" id="confirm-model-test">确认并测试模型</button></div>
     </div>
   </div>
 
@@ -797,9 +897,24 @@
     (function () {
       var tabs = Array.from(document.querySelectorAll(".tab"));
       var views = Array.from(document.querySelectorAll(".view"));
-      var modal = document.getElementById("connection-modal");
       var toast = document.getElementById("toast");
       var toastTimer;
+
+      var modalIds = ["connection-modal", "manual-model-modal", "route-modal", "model-test-modal"];
+
+      function openModal(id, focusId) {
+        var modal = document.getElementById(id);
+        if (!modal) return;
+        modal.classList.add("open");
+        if (focusId) window.setTimeout(function () {
+          var field = document.getElementById(focusId);
+          if (field) field.focus();
+        }, 0);
+      }
+
+      function closeModal(modal) {
+        if (modal) modal.classList.remove("open");
+      }
 
       function showToast(message, isError) {
         toast.textContent = message;
@@ -823,46 +938,203 @@
 
       document.querySelectorAll("[data-open-modal]").forEach(function (button) {
         button.addEventListener("click", function () {
-          modal.classList.add("open");
-          document.getElementById("connection-name").focus();
+          openModal(button.getAttribute("data-open-modal"), "connection-name");
         });
       });
 
       document.querySelectorAll("[data-close-modal]").forEach(function (button) {
-        button.addEventListener("click", function () { modal.classList.remove("open"); });
+        button.addEventListener("click", function () {
+          closeModal(button.closest(".modal-backdrop"));
+        });
       });
 
-      modal.addEventListener("click", function (event) {
-        if (event.target === modal) modal.classList.remove("open");
+      modalIds.forEach(function (id) {
+        var backdrop = document.getElementById(id);
+        backdrop.addEventListener("click", function (event) {
+          if (event.target === backdrop) closeModal(backdrop);
+        });
       });
 
       document.addEventListener("keydown", function (event) {
-        if (event.key === "Escape") modal.classList.remove("open");
+        if (event.key === "Escape") {
+          modalIds.forEach(function (id) { closeModal(document.getElementById(id)); });
+        }
       });
 
       document.getElementById("connection-form").addEventListener("submit", function (event) {
         event.preventDefault();
-        modal.classList.remove("open");
-        showToast("原型演示：连接信息已提交，尚未写入后端。", false);
+        closeModal(document.getElementById("connection-modal"));
+        showToast("原型演示：连接信息已通过表单校验；不会写入后端。", false);
       });
 
-      document.querySelectorAll("[data-action]").forEach(function (button) {
-        button.addEventListener("click", function () {
+      function addTableCell(row, node) {
+        var cell = document.createElement("td");
+        cell.appendChild(node);
+        row.appendChild(cell);
+        return cell;
+      }
+
+      function modelActionButton(label, action, modelId) {
+        var wrapper = document.createElement("div");
+        wrapper.className = "row-actions";
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "button ghost small";
+        button.setAttribute("data-action", action);
+        button.setAttribute("data-model", modelId);
+        button.textContent = label;
+        wrapper.appendChild(button);
+        return wrapper;
+      }
+
+      document.getElementById("manual-model-form").addEventListener("submit", function (event) {
+        event.preventDefault();
+        var modelId = document.getElementById("manual-model-id").value.trim();
+        var displayName = document.getElementById("manual-model-name").value.trim();
+        if (!modelId || !displayName) return;
+        var row = document.createElement("tr");
+        var modelCell = document.createElement("div");
+        var name = document.createElement("div");
+        name.className = "model-name";
+        name.textContent = displayName;
+        var id = document.createElement("div");
+        id.className = "model-id";
+        id.textContent = modelId;
+        modelCell.append(name, id);
+        addTableCell(row, modelCell);
+        addTableCell(row, Object.assign(document.createElement("span"), { className: "capability", textContent: "Chat" }));
+        addTableCell(row, Object.assign(document.createElement("span"), { className: "muted", textContent: "手工维护" }));
+        addTableCell(row, Object.assign(document.createElement("span"), { className: "status success", textContent: "可用" }));
+        addTableCell(row, modelActionButton("创建路由", "create-route", modelId));
+        document.getElementById("catalog-table-body").appendChild(row);
+        closeModal(document.getElementById("manual-model-modal"));
+        document.getElementById("manual-model-form").reset();
+        showToast("原型演示：模型 ID 已加入连接目录；不会写入后端。", false);
+      });
+
+      function openRouteModal(modelId) {
+        var select = document.getElementById("route-model-id");
+        if (modelId && !Array.from(select.options).some(function (option) { return option.value === modelId; })) {
+          var option = document.createElement("option");
+          option.value = modelId;
+          option.textContent = modelId;
+          select.appendChild(option);
+        }
+        if (modelId) select.value = modelId;
+        document.getElementById("route-alias").value = modelId || "";
+        openModal("route-modal", "route-alias");
+      }
+
+      document.getElementById("route-form").addEventListener("submit", function (event) {
+        event.preventDefault();
+        var alias = document.getElementById("route-alias").value.trim();
+        var modelId = document.getElementById("route-model-id").value;
+        if (!alias || !modelId) return;
+        var row = document.createElement("tr");
+        var routeCell = document.createElement("div");
+        routeCell.className = "route-cell";
+        var glyph = document.createElement("span");
+        glyph.className = "route-glyph";
+        glyph.textContent = alias.slice(0, 1);
+        var routeName = document.createElement("span");
+        routeName.className = "model-name";
+        routeName.textContent = alias;
+        routeCell.append(glyph, routeName);
+        addTableCell(row, routeCell);
+        var modelLabel = document.createElement("span");
+        modelLabel.className = "model-id";
+        modelLabel.textContent = modelId;
+        addTableCell(row, modelLabel);
+        addTableCell(row, Object.assign(document.createElement("span"), { className: "muted", textContent: "本地模型接口" }));
+        addTableCell(row, Object.assign(document.createElement("span"), { className: "scope-label", textContent: "平台授权" }));
+        addTableCell(row, Object.assign(document.createElement("span"), { className: "status success", textContent: "启用中" }));
+        var actionCell = document.createElement("div");
+        actionCell.className = "row-actions";
+        var testButton = document.createElement("button");
+        testButton.type = "button";
+        testButton.className = "button ghost small";
+        testButton.setAttribute("data-action", "test-model");
+        testButton.setAttribute("data-model", modelId);
+        testButton.textContent = "测试模型";
+        actionCell.appendChild(testButton);
+        addTableCell(row, actionCell);
+        document.getElementById("route-table-body").appendChild(row);
+        closeModal(document.getElementById("route-modal"));
+        document.getElementById("route-form").reset();
+        showToast("原型演示：路由已固定到所选模型 ID；不会写入后端。", false);
+      });
+
+      function renderTestResult(kind, modelId, state, details) {
+        var panel = document.getElementById("prototype-test-result");
+        var status = document.getElementById("prototype-test-status");
+        var meta = document.getElementById("prototype-test-meta");
+        var error = document.getElementById("prototype-test-error");
+        var labels = { QUEUED: "排队中", RUNNING: "测试中", SUCCEEDED: "成功", FAILED: "失败", UNKNOWN: "结果待确认" };
+        var classes = { QUEUED: "neutral", RUNNING: "", SUCCEEDED: "success", FAILED: "danger", UNKNOWN: "warning" };
+        panel.className = "test-job-panel visible" + (state === "RUNNING" ? " running" : "") + (state === "FAILED" ? " failed" : "") + (state === "UNKNOWN" ? " unknown" : "");
+        document.getElementById("prototype-test-title").textContent = kind === "MODEL" ? "模型推理测试 · " + modelId : "连接测试 · 本地模型接口";
+        document.getElementById("prototype-test-caption").textContent = "测试任务由 Worker 异步处理；响应正文不会保留。";
+        status.className = "status " + classes[state];
+        status.textContent = labels[state];
+        meta.replaceChildren();
+        error.hidden = !details.error;
+        error.textContent = details.error || "";
+        Object.keys(details.values || {}).forEach(function (label) {
+          var item = document.createElement("span");
+          var value = document.createElement("strong");
+          item.textContent = label;
+          value.textContent = details.values[label];
+          item.appendChild(value);
+          meta.appendChild(item);
+        });
+      }
+
+      function simulateConnectionTest() {
+        renderTestResult("CONNECTION", "", "RUNNING", { values: {} });
+        window.setTimeout(function () {
+          renderTestResult("CONNECTION", "", "SUCCEEDED", { values: { "连接耗时": "412 ms" } });
+          showToast("原型演示：连接测试成功；没有发送网络请求。", false);
+        }, 600);
+      }
+
+      function simulateModelTest() {
+        var modelId = document.getElementById("test-target-model").textContent;
+        closeModal(document.getElementById("model-test-modal"));
+        renderTestResult("MODEL", modelId, "RUNNING", { values: {} });
+        window.setTimeout(function () {
+          renderTestResult("MODEL", modelId, "SUCCEEDED", {
+            values: { "延迟": "830 ms", "用量": "ESTIMATED", "Token": "入 18 / 出 2" },
+          });
+          showToast("原型演示：模型测试成功；没有发送网络请求。", false);
+        }, 800);
+      }
+
+      document.addEventListener("click", function (event) {
+          var target = event.target;
+          var button = target && target.closest ? target.closest("[data-action]") : null;
+          if (!button) return;
           var action = button.getAttribute("data-action");
           if (action === "test-connection") {
-            showToast("接口可达，但当前未提供有效 API Key（HTTP 401）。绑定 SecretRef 后重试。", true);
+            simulateConnectionTest();
           } else if (action === "sync-models") {
-            showToast("请先绑定有效凭据引用，再同步这个连接下的模型目录。", true);
+            renderTestResult("CONNECTION", "", "RUNNING", { values: {} });
+            window.setTimeout(function () {
+              renderTestResult("CONNECTION", "", "SUCCEEDED", { values: { "发现模型": "2 个", "同步": "完成" } });
+              showToast("原型演示：模型目录同步完成；没有发送网络请求。", false);
+            }, 600);
+          } else if (action === "add-model") {
+            openModal("manual-model-modal", "manual-model-id");
+          } else if (action === "create-route" || action === "new-route" || action === "edit-route") {
+            openRouteModal(button.getAttribute("data-model"));
           } else if (action === "test-model") {
-            showToast("原型演示：实际模型测试会由 Worker 发送无工具短提示；本页未发送请求。", false);
-          } else if (action === "new-route" || action === "edit-route") {
-            showToast("先完成连接凭据和模型目录，再创建绑定具体 model ID 的路由。", false);
+            document.getElementById("test-target-model").textContent = button.getAttribute("data-model") || "local-model-a";
+            openModal("model-test-modal");
           } else if (action === "edit-connection") {
-            modal.classList.add("open");
-            document.getElementById("connection-name").focus();
+            openModal("connection-modal", "connection-name");
           }
-        });
       });
+
+      document.getElementById("confirm-model-test").addEventListener("click", simulateModelTest);
     }());
   </script>
 </body>

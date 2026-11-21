@@ -10,6 +10,7 @@ from threading import Event, RLock
 from uuid import uuid4
 
 from agent_platform.domain.execution import RuntimeStatus, UsageRecord
+from agent_platform.domain.model_routes import UsageStatus, normalize_usage
 from agent_platform.ports.runtime import (
     RuntimeCapabilities,
     RuntimeEvent,
@@ -92,7 +93,12 @@ class HarnessRuntimeAdapter:
             engine_events: list[object] = []
             result = engine.run(engine_request, on_event=engine_events.append)
             text = str(getattr(result, "text", ""))
-            result_ref = str(getattr(result, "result_ref", f"{self._engine_name}-result"))
+            raw_result_ref = getattr(result, "result_ref", None)
+            result_ref = (
+                str(raw_result_ref)
+                if raw_result_ref is not None and str(raw_result_ref).strip()
+                else f"{self._engine_name}-result"
+            )
             status = self._result_status(result)
             result_session = getattr(result, "session", None)
             resolved_session = getattr(result_session, "session_id", None) or session_ref
@@ -105,7 +111,7 @@ class HarnessRuntimeAdapter:
                 events = (
                     RuntimeEvent("run_finished", "RESULT", {"status": status.value}),
                 )
-            usage = self._estimated_usage(request.prompt, text)
+            usage = self._normalized_usage(request.prompt, text, result)
             return RuntimeResult(
                 text=text,
                 status=status,
@@ -167,6 +173,7 @@ class HarnessRuntimeAdapter:
         try:
             from harness_engine.core import (
                 EmployeeContext,
+                EngineModelConfig,
                 EngineRequest,
                 EngineToolDefinition,
                 SkillFileContext,
@@ -214,6 +221,21 @@ class HarnessRuntimeAdapter:
             )
             for item in request.tool_definitions
         )
+        model_config = None
+        if request.model_route_snapshot is not None:
+            snapshot = request.model_route_snapshot
+            model_config = EngineModelConfig(
+                tenant_id=snapshot.tenant_id,
+                route_id=snapshot.route_id,
+                route_version=snapshot.route_version,
+                connection_id=snapshot.connection_id,
+                connection_version=snapshot.connection_version,
+                provider_kind=snapshot.provider_kind,
+                model_id=snapshot.model_id,
+                protocol=snapshot.protocol,
+                endpoint=snapshot.endpoint,
+                parameters=snapshot.parameters,
+            )
         return EngineRequest(
             prompt=request.prompt,
             session_id=session_ref,
@@ -222,6 +244,8 @@ class HarnessRuntimeAdapter:
             metadata=dict(request.metadata),
             employee_context=employee_context,
             tool_definitions=tool_definitions,
+            model_config=model_config,
+            max_tokens=request.max_tokens,
         )
 
     @staticmethod
@@ -332,4 +356,63 @@ class HarnessRuntimeAdapter:
             input_tokens,
             output_tokens,
             input_tokens + output_tokens,
+            source="ESTIMATED",
+            estimated=True,
+            pricing_version="estimated-v1",
+        )
+
+    @staticmethod
+    def _normalized_usage(prompt: str, text: str, result: object) -> UsageRecord:
+        """优先保留上游精确用量和请求 ID；缺失时显式回退到词数估算。"""
+
+        raw_usage = getattr(result, "usage", None)
+        usage_mapping: Mapping[str, object] | None = None
+        if isinstance(raw_usage, Mapping):
+            usage_mapping = raw_usage
+        elif raw_usage is not None:
+            candidate = {
+                name: getattr(raw_usage, name)
+                for name in (
+                    "input_tokens",
+                    "output_tokens",
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                )
+                if getattr(raw_usage, name, None) is not None
+            }
+            usage_mapping = candidate or None
+        request_id = next(
+            (
+                str(value)
+                for name in ("provider_request_id", "request_id", "id")
+                if (value := getattr(result, name, None)) is not None and str(value).strip()
+            ),
+            None,
+        )
+        if usage_mapping is None:
+            estimated = HarnessRuntimeAdapter._estimated_usage(prompt, text)
+            return UsageRecord(
+                estimated.input_tokens,
+                estimated.output_tokens,
+                estimated.total_tokens,
+                source=estimated.source,
+                estimated=estimated.estimated,
+                pricing_version=estimated.pricing_version,
+                provider_request_id=request_id,
+            )
+        normalized = normalize_usage(
+            usage_mapping,
+            estimation_method="harness-estimated:v1",
+            provider_request_id=request_id,
+        )
+        exact = normalized.usage_status is UsageStatus.EXACT
+        return UsageRecord(
+            normalized.input_tokens,
+            normalized.output_tokens,
+            normalized.total_tokens,
+            source="UPSTREAM" if exact else "ESTIMATED",
+            estimated=not exact,
+            pricing_version="unpriced-v1",
+            provider_request_id=request_id,
         )

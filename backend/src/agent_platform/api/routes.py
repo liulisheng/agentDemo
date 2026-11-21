@@ -6,6 +6,7 @@ from .route_modules import (
     catalog,
     conversations,
     deployments,
+    model_management,
     resource_center,
     skill_files,
     tool_approvals,
@@ -13,6 +14,7 @@ from .route_modules import (
 
 router = APIRouter(prefix="/api/v1")
 for route_group in (
+    model_management.router,
     catalog.router,
     deployments.router,
     resource_center.router,

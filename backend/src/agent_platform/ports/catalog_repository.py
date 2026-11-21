@@ -17,7 +17,13 @@ from agent_platform.domain.catalog import (
 )
 from agent_platform.domain.conversations import CapabilityBinding
 from agent_platform.domain.identity import IdentityContext
-from agent_platform.domain.model_routes import ModelRoute
+from agent_platform.domain.model_routes import (
+    ModelCatalogItem,
+    ModelConnection,
+    ModelRoute,
+    ModelTestRecord,
+    ModelTestResult,
+)
 from agent_platform.ports.workspaces import SandboxProfile, WorkspaceProfile
 
 
@@ -109,6 +115,47 @@ class CatalogRepository(Protocol):
     def save_model_route(self, identity: IdentityContext, value: ModelRoute) -> None: ...
 
     def get_model_route(self, identity: IdentityContext, route_id: str) -> ModelRoute: ...
+
+    def save_model_connection(self, identity: IdentityContext, value: ModelConnection) -> None: ...
+
+    def get_model_connection(self, identity: IdentityContext, connection_id: str) -> ModelConnection: ...
+
+    def list_model_connections(self, identity: IdentityContext) -> tuple[ModelConnection, ...]: ...
+
+    def save_model_catalog_item(self, identity: IdentityContext, value: ModelCatalogItem) -> None: ...
+
+    def get_model_catalog_item(
+        self, identity: IdentityContext, connection_id: str, model_id: str
+    ) -> ModelCatalogItem: ...
+
+    def list_model_catalog_items(
+        self, identity: IdentityContext, connection_id: str
+    ) -> tuple[ModelCatalogItem, ...]: ...
+
+    def save_model_test_record(self, identity: IdentityContext, value: ModelTestRecord) -> None: ...
+
+    def get_model_test_record(self, identity: IdentityContext, test_id: str) -> ModelTestRecord: ...
+
+    def claim_next_model_test(
+        self, platform_id: str, worker_id: str, *, lease_seconds: int
+    ) -> ModelTestRecord | None: ...
+
+    def heartbeat_model_test(
+        self,
+        identity: IdentityContext,
+        test_id: str,
+        worker_id: str,
+        fencing_token: int,
+        *,
+        lease_seconds: int,
+    ) -> bool: ...
+
+    def finish_model_test(
+        self,
+        identity: IdentityContext,
+        claimed: ModelTestRecord,
+        result: ModelTestResult,
+    ) -> bool: ...
 
     def save_workspace_profile(
         self, identity: IdentityContext, value: WorkspaceProfile, *, version: int = 1

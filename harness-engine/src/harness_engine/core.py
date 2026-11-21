@@ -221,6 +221,40 @@ class EngineToolDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class EngineModelConfig:
+    """本次 Engine 调用固定使用的非敏感模型路由配置，不包含 SecretRef 或密钥。"""
+
+    tenant_id: str
+    route_id: str
+    route_version: int
+    connection_id: str
+    connection_version: int
+    provider_kind: str
+    model_id: str
+    protocol: str
+    endpoint: str
+    parameters: Mapping[str, object] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "tenant_id",
+            "route_id",
+            "connection_id",
+            "provider_kind",
+            "model_id",
+            "protocol",
+            "endpoint",
+        ):
+            if not getattr(self, name).strip():
+                raise ValueError(f"{name} must not be blank")
+        if self.route_version < 1 or self.connection_version < 1:
+            raise ValueError("model route and connection versions must be positive")
+        if not isinstance(self.parameters, Mapping):
+            raise TypeError("model parameters must be a mapping")
+        object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
+
+
+@dataclass(frozen=True, slots=True)
 class EngineRequest:
     prompt: str
     session_id: str | None = None
@@ -231,6 +265,8 @@ class EngineRequest:
     employee_context: EmployeeContext | None = None
     tool_definitions: tuple[EngineToolDefinition, ...] = ()
     harness_home_ref: str | None = None
+    model_config: EngineModelConfig | None = None
+    max_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if not self.prompt.strip():
@@ -260,6 +296,10 @@ class EngineRequest:
             self.employee_context, EmployeeContext
         ):
             raise TypeError("employee_context must be an EmployeeContext value")
+        if self.model_config is not None and not isinstance(self.model_config, EngineModelConfig):
+            raise TypeError("model_config must be an EngineModelConfig value")
+        if self.max_tokens is not None and self.max_tokens < 1:
+            raise ValueError("max_tokens must be positive when provided")
         object.__setattr__(self, "tool_definitions", definitions)
 
     @property
@@ -279,10 +319,18 @@ class EngineResult:
     session: SessionRef | None = None
     status: RunStatus = RunStatus.SUCCEEDED
     result_ref: str | None = None
+    usage: Mapping[str, object] | None = None
+    provider_request_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.result_ref is not None and not self.result_ref.strip():
             raise ValueError("result_ref must not be blank when provided")
+        if self.usage is not None:
+            if not isinstance(self.usage, Mapping):
+                raise TypeError("usage must be a mapping when provided")
+            object.__setattr__(self, "usage", MappingProxyType(dict(self.usage)))
+        if self.provider_request_id is not None and not self.provider_request_id.strip():
+            raise ValueError("provider_request_id must not be blank when provided")
 
 
 RunResult = EngineResult

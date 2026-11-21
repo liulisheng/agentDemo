@@ -24,7 +24,7 @@ import {
   getEmployeeVersion,
   listDeployments,
   listExecutionProfiles,
-  listModelRoutes,
+  listSelectableModelRoutes,
   listSkills,
   listTools,
   publishEmployeeVersion,
@@ -251,8 +251,8 @@ export function EmployeeVersionEditorPage() {
     queryFn: () => listExecutionProfiles(fakeUser),
   })
   const modelRoutes = useQuery({
-    queryKey: ['model-routes', fakeUser],
-    queryFn: () => listModelRoutes(fakeUser),
+    queryKey: ['selectable-model-routes', fakeUser],
+    queryFn: () => listSelectableModelRoutes(fakeUser),
   })
 
   useEffect(() => {
@@ -591,11 +591,12 @@ export function EmployeeVersionEditorPage() {
               <Form.Item name="model_route_id" label="ModelRoute">
                 <Select
                   allowClear
+                  loading={modelRoutes.isPending}
                   options={(modelRoutes.data?.items ?? []).map((route: ModelRouteSummary) => ({
                     value: route.route_id,
-                    label: `${route.alias} · ${route.profile.model_name}`,
+                    label: `${route.alias} · ${route.profile.catalog_model_id ?? route.profile.model_name} · ${route.authorization_source === 'dadi' ? 'Dadi 授权' : '平台授权'}`,
                   }))}
-                  placeholder="使用执行配置默认路由"
+                  placeholder="选择当前身份可用的路由"
                 />
               </Form.Item>
               <Form.Item name="approval_policy" label="审批策略">
@@ -606,6 +607,26 @@ export function EmployeeVersionEditorPage() {
                 ]} />
               </Form.Item>
             </div>
+            {modelRoutes.isError && (
+              <Alert
+                type="error"
+                showIcon
+                message="无法读取可用模型路由"
+                description={(modelRoutes.error as Error).message}
+                action={<Button onClick={() => void modelRoutes.refetch()}>重试</Button>}
+              />
+            )}
+            {version.data?.model_route_id &&
+              modelRoutes.isSuccess &&
+              !modelRoutes.data.items.some((route) => route.route_id === version.data?.model_route_id) && (
+                <Alert
+                  className="employee-model-route-warning"
+                  type="warning"
+                  showIcon
+                  message="当前绑定的模型路由已不可用"
+                  description="该路由已停用或当前身份没有使用授权。请重新选择可用路由后保存。"
+                />
+              )}
             <Collapse
               className="employee-runtime-advanced"
               items={[{

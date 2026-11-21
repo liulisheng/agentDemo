@@ -10,6 +10,7 @@ const navigation = [
   { path: '/enterprise/employees', label: '数字员工' },
   { path: '/enterprise/workbench', label: '运行工作台' },
   { path: '/enterprise/resources', label: '资源中心' },
+  { path: '/enterprise/models', label: '模型管理' },
   { path: '/enterprise/deployments', label: '部署记录' },
 ]
 

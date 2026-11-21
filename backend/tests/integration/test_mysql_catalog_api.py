@@ -12,17 +12,24 @@ from fastapi.testclient import TestClient
 mysql = pytest.importorskip("mysql.connector")
 
 
+class _RedactedMySqlConfig(dict[str, object]):
+    """避免 pytest 失败回溯打印测试库密码。"""
+
+    def __repr__(self) -> str:
+        return "MySQL catalog API test config(<redacted>)"
+
+
 @pytest.fixture
 def mysql_catalog_api_database():
     if os.environ.get("AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE") != "1":
         pytest.skip("set AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE=1 for disposable MySQL integration")
     database = f"agent_platform_api_test_{secrets.token_hex(5)}"
-    config = {
+    config = _RedactedMySqlConfig({
         "host": os.environ.get("MYSQL_HOST", "127.0.0.1"),
         "port": int(os.environ.get("MYSQL_PORT", "3306")),
         "user": os.environ.get("MYSQL_USER", "root"),
         "password": os.environ.get("MYSQL_PASSWORD", ""),
-    }
+    })
     connection = mysql.connect(**config)
     cursor = connection.cursor()
     try:
@@ -88,6 +95,74 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
         )
 
     client = TestClient(create_mysql_app())
+    connection = client.post(
+        "/api/v1/model-connections",
+        headers=headers,
+        json={
+            "name": "本地模型连接",
+            "provider_kind": "openai-compatible",
+            "protocol": "openai-chat-completions",
+            "endpoint": "http://host.docker.internal:63072/v1",
+            "secret_id": "local-model-key-ref",
+            "catalog_mode": "REMOTE",
+        },
+    )
+    assert connection.status_code == 201
+    connection_id = connection.json()["connection_id"]
+    assert connection.json()["secret_ref"]["secret_id"] == "local-model-key-ref"
+    manual_model = client.post(
+        f"/api/v1/model-connections/{connection_id}/models",
+        headers=headers,
+        json={"model_id": "local-model-a", "display_name": "本地模型 A"},
+    )
+    assert manual_model.status_code == 201
+    catalog_route = client.post(
+        "/api/v1/model-routes",
+        headers=headers,
+        json={
+            "alias": "catalog-backed-route",
+            "connection_id": connection_id,
+            "catalog_model_id": "local-model-a",
+            "model_name": "local-model-a",
+        },
+    )
+    assert catalog_route.status_code == 201
+    catalog_route_id = catalog_route.json()["route_id"]
+    assert client.post(
+        "/api/v1/model-routes",
+        headers={"X-Fake-User": "admin-other"},
+        json={
+            "alias": "cross-tenant-route",
+            "connection_id": connection_id,
+            "catalog_model_id": "local-model-a",
+            "model_name": "local-model-a",
+        },
+    ).status_code == 404
+    updated_route = client.put(
+        f"/api/v1/model-routes/{catalog_route_id}",
+        headers=headers,
+        json={"alias": "catalog-backed-route-v2"},
+    )
+    assert updated_route.status_code == 200
+    assert updated_route.json()["route_version"] == 2
+    assert client.post(
+        f"/api/v1/model-routes/{catalog_route_id}/disable", headers=headers
+    ).json()["route_version"] == 3
+    assert all(
+        item["route_id"] != catalog_route_id
+        for item in client.get("/api/v1/model-routes/selectable", headers=headers).json()["items"]
+    )
+    enabled_route = client.post(
+        f"/api/v1/model-routes/{catalog_route_id}/enable", headers=headers
+    )
+    assert enabled_route.status_code == 200
+    assert enabled_route.json()["route_version"] == 4
+    queued_sync = client.post(
+        f"/api/v1/model-connections/{connection_id}/sync-models", headers=headers
+    )
+    assert queued_sync.status_code == 202
+    test_id = queued_sync.json()["test_id"]
+
     route = client.post(
         "/api/v1/model-routes",
         headers=headers,
@@ -174,11 +249,26 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
     client.close()
 
     restarted = TestClient(create_mysql_app())
+    assert any(
+        item["connection_id"] == connection_id
+        for item in restarted.get("/api/v1/model-connections", headers=headers).json()["items"]
+    )
+    assert restarted.get(
+        f"/api/v1/model-connections/{connection_id}/models", headers=headers
+    ).json()["items"][0]["model_id"] == "local-model-a"
+    assert restarted.get(f"/api/v1/model-tests/{test_id}", headers=headers).json()["state"] == "QUEUED"
+    assert any(
+        item["route_id"] == catalog_route_id
+        for item in restarted.get("/api/v1/model-routes/selectable", headers=headers).json()["items"]
+    )
     assert restarted.get("/api/v1/tools", headers=headers).json()["items"][0]["id"] == tool_id
     assert restarted.get("/api/v1/skills", headers=headers).json()["items"][0]["id"] == skill_id
     assert any(item["id"] == employee_id for item in restarted.get("/api/v1/digital-employees", headers=headers).json()["items"])
     assert any(item["id"] == deployment_id for item in restarted.get("/api/v1/deployments", headers=headers).json()["items"])
-    assert restarted.get("/api/v1/model-routes", headers=headers).json()["items"][0]["route_id"] == route_id
+    assert route_id in {
+        item["route_id"]
+        for item in restarted.get("/api/v1/model-routes", headers=headers).json()["items"]
+    }
     assert any(
         item["id"] == profile_id
         for item in restarted.get("/api/v1/execution-profiles", headers=headers).json()["items"]

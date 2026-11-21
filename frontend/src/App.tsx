@@ -13,6 +13,7 @@ import { ManagementLayout } from './features/management/ManagementLayout'
 import { TenantProvider } from './features/management/TenantContext'
 import { RunTracePage } from './features/runs/RunTrace'
 import { ConversationWorkbenchPage } from './features/platform/ConversationWorkbenchPage'
+import { ModelManagementPage } from './features/models/ModelManagementPage'
 
 export function App() {
   // 资源中心管理租户 Skill/Tool，员工工作台负责把精确版本绑定到员工草稿。
@@ -39,6 +40,7 @@ export function App() {
             <Route path="resources/skills/:skillId/versions/:version/files" element={<SkillFileWorkspacePage />} />
             <Route path="resources" element={<ResourceCenterPage />} />
             <Route path="deployments" element={<DeploymentListPage />} />
+            <Route path="models" element={<ModelManagementPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/enterprise/employees" replace />} />
         </Routes>

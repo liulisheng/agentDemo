@@ -33,6 +33,7 @@ from agent_platform.domain.observability import (
 from agent_platform.ports.conversation_repository import ConversationRepository
 from agent_platform.ports.execution_repository import ExecutionRepository
 from agent_platform.ports.mcp import McpRepository
+from agent_platform.ports.model_provider import ModelAuthorizationProvider
 from agent_platform.ports.resource_center import ResourceCenterRepository
 from agent_platform.ports.runtime import (
     RuntimeAdapter,
@@ -56,6 +57,7 @@ class ControlPlaneService:
         resource_center_repository: ResourceCenterRepository | None = None,
         mcp_repository: McpRepository | None = None,
         conversation_repository: ConversationRepository | None = None,
+        model_authorization_provider: ModelAuthorizationProvider | None = None,
     ) -> None:
         self.catalog = catalog
         self.runtime = runtime
@@ -68,6 +70,7 @@ class ControlPlaneService:
             resource_center_repository,
             object_store=object_store,
             mcp_repository=mcp_repository,
+            model_authorization_provider=model_authorization_provider,
         )
         self.context_assembler = BusinessContextAssembler(BusinessContextPolicy())
         self._sessions: dict[tuple[str, str, str], SessionRecord] = {}
@@ -869,6 +872,7 @@ class ControlPlaneService:
                     ),
                     tool_definitions=resolved_agent.tool_definitions,
                     mcp_servers=resolved_agent.mcp_servers,
+                    model_route_snapshot=snapshot.model_route_snapshot,
                 )
             )
         except Exception:
@@ -911,17 +915,32 @@ class ControlPlaneService:
         )
         for event in result.events:
             self._event_to_span(session.trace_id, run, event)
+        engine_name = str(getattr(self.runtime, "engine_name", "runtime"))
+        model_snapshot = run.snapshot.model_route_snapshot
+        model_attributes: dict[str, object] = {
+            "engine": engine_name,
+            "usage_source": result.usage.source,
+        }
+        if model_snapshot is not None:
+            model_attributes.update(
+                {
+                    "model_alias": model_snapshot.route_alias,
+                    "model": model_snapshot.model_id,
+                    "provider": model_snapshot.provider_kind,
+                    "model_route_id": model_snapshot.route_id,
+                    "model_route_version": model_snapshot.route_version,
+                    "connection_id": model_snapshot.connection_id,
+                }
+            )
+        elif engine_name == "fake":
+            model_attributes["model_alias"] = "fake-model"
         self._append_span(
             session.trace_id,
             run_id=run.run_id,
             span_type=SpanType.MODEL,
             status="succeeded" if result.status is RuntimeStatus.SUCCEEDED else "failed",
             parent_span_id=run.span_id,
-            attributes={
-                "engine": "fake",
-                "model_alias": "fake-model",
-                "usage_source": result.usage.source,
-            },
+            attributes=model_attributes,
         )
         self._append_span(
             session.trace_id,
@@ -1104,7 +1123,20 @@ class ControlPlaneService:
             return lose_claimed_lease()
 
         try:
-            resolved_agent = self.agent_resolver.resolve_snapshot(identity, run.snapshot)
+            # Worker 使用已持久化的提交用户作为模型授权主体；其角色保持 Worker 权限集，避免伪造 API 角色。
+            authorization_identity = IdentityContext(
+                platform_id=identity.platform_id,
+                tenant_id=identity.tenant_id,
+                user_id=run.submitted_by_user_id,
+                roles=identity.roles,
+                scopes=identity.scopes,
+                auth_source="worker",
+            )
+            resolved_agent = self.agent_resolver.resolve_snapshot(
+                identity,
+                run.snapshot,
+                authorization_identity=authorization_identity,
+            )
         except Exception as error:  # noqa: BLE001 — 固定资源解析失败发生在 Runtime 出站前
             error_code = error.code if isinstance(error, DomainError) else "RUN_PREPARATION_FAILED"
             return finish_before_runtime(RuntimeStatus.FAILED, error_code)

@@ -115,12 +115,64 @@ export interface ModelRouteSummary {
   tenant_id?: string
   alias: string
   status: string
+  route_version?: number
+  authorization_source?: string
   profile: {
     model_name: string
     provider: string
     endpoint: string
+    protocol?: string
+    connection_id?: string | null
+    catalog_model_id?: string | null
+    parameters?: Record<string, unknown>
     secret_ref?: { secret_id: string } | null
   }
+}
+
+export interface ModelConnectionSummary {
+  connection_id: string
+  tenant_id: string
+  name: string
+  provider_kind: string
+  protocol: string
+  endpoint: string
+  secret_ref: { secret_id: string; scope: string; provider: string } | null
+  catalog_mode: 'REMOTE' | 'MANUAL'
+  status: 'ACTIVE' | 'DISABLED'
+  version: number
+}
+
+export interface ModelCatalogSummary {
+  connection_id: string
+  tenant_id: string
+  model_id: string
+  display_name: string
+  capabilities: Record<string, boolean | string | number>
+  context_window: number | null
+  catalog_source: 'REMOTE' | 'MANUAL' | 'BACKFILL'
+  status: 'ACTIVE' | 'DISABLED'
+  last_seen_at: string | null
+}
+
+export interface ModelTestRecord {
+  test_id: string
+  tenant_id: string
+  connection_id: string
+  route_id: string | null
+  model_id: string | null
+  test_kind: 'CONNECTION' | 'MODEL'
+  state: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN'
+  started_at: string | null
+  finished_at: string | null
+  latency_ms: number | null
+  provider_request_id: string | null
+  input_tokens: number | null
+  output_tokens: number | null
+  total_tokens: number | null
+  usage_status: 'EXACT' | 'ESTIMATED' | 'UNAVAILABLE' | null
+  error_category: string | null
+  created_at: string
+  updated_at: string
 }
 
 /** 部署列表和状态转换返回的部署及其固定版本摘要。 */
@@ -556,6 +608,149 @@ export async function listExecutionProfiles(
 
 export async function listModelRoutes(fakeUser = DEFAULT_FAKE_USER): Promise<Page<ModelRouteSummary>> {
   return request('/api/v1/model-routes', fakeUser)
+}
+
+export async function listSelectableModelRoutes(
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<Page<ModelRouteSummary>> {
+  return request('/api/v1/model-routes/selectable', fakeUser)
+}
+
+export async function listModelConnections(
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<Page<ModelConnectionSummary>> {
+  return request('/api/v1/model-connections', fakeUser)
+}
+
+export async function createModelConnection(
+  input: {
+    name: string
+    provider_kind: string
+    protocol: string
+    endpoint: string
+    secret_id?: string
+    catalog_mode: 'REMOTE' | 'MANUAL'
+  },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ModelConnectionSummary> {
+  return request('/api/v1/model-connections', fakeUser, {
+    method: 'POST',
+    body: jsonBody(input),
+  })
+}
+
+export async function updateModelConnection(
+  connectionId: string,
+  input: Partial<{
+    name: string
+    provider_kind: string
+    protocol: string
+    endpoint: string
+    secret_id: string | null
+    catalog_mode: 'REMOTE' | 'MANUAL'
+    status: 'ACTIVE' | 'DISABLED'
+  }>,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ModelConnectionSummary> {
+  return request(`/api/v1/model-connections/${encodeURIComponent(connectionId)}`, fakeUser, {
+    method: 'PUT',
+    body: jsonBody(input),
+  })
+}
+
+export async function listConnectionModels(
+  connectionId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<Page<ModelCatalogSummary>> {
+  return request(
+    `/api/v1/model-connections/${encodeURIComponent(connectionId)}/models`,
+    fakeUser,
+  )
+}
+
+export async function addManualModel(
+  connectionId: string,
+  input: {
+    model_id: string
+    display_name: string
+    capabilities?: Record<string, unknown>
+    context_window?: number
+  },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ModelCatalogSummary> {
+  return request(
+    `/api/v1/model-connections/${encodeURIComponent(connectionId)}/models`,
+    fakeUser,
+    { method: 'POST', body: jsonBody(input) },
+  )
+}
+
+export async function syncConnectionModels(
+  connectionId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ test_id: string; state: ModelTestRecord['state'] }> {
+  return request(
+    `/api/v1/model-connections/${encodeURIComponent(connectionId)}/sync-models`,
+    fakeUser,
+    { method: 'POST' },
+  )
+}
+
+export async function queueConnectionTest(
+  connectionId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ test_id: string; state: ModelTestRecord['state'] }> {
+  return request(
+    `/api/v1/model-connections/${encodeURIComponent(connectionId)}/tests`,
+    fakeUser,
+    { method: 'POST' },
+  )
+}
+
+export async function queueModelRouteTest(
+  routeId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ test_id: string; state: ModelTestRecord['state'] }> {
+  return request(
+    `/api/v1/model-routes/${encodeURIComponent(routeId)}/tests`,
+    fakeUser,
+    { method: 'POST', body: jsonBody({ confirmed_cost: true }) },
+  )
+}
+
+export async function getModelTest(
+  testId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ModelTestRecord> {
+  return request(`/api/v1/model-tests/${encodeURIComponent(testId)}`, fakeUser)
+}
+
+export async function createModelRoute(
+  input: {
+    alias: string
+    connection_id: string
+    catalog_model_id: string
+    model_name: string
+    parameters?: Record<string, unknown>
+  },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ModelRouteSummary> {
+  return request('/api/v1/model-routes', fakeUser, {
+    method: 'POST',
+    body: jsonBody(input),
+  })
+}
+
+export async function setModelRouteStatus(
+  routeId: string,
+  enabled: boolean,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ModelRouteSummary> {
+  return request(
+    `/api/v1/model-routes/${encodeURIComponent(routeId)}/${enabled ? 'enable' : 'disable'}`,
+    fakeUser,
+    { method: 'POST' },
+  )
 }
 
 export interface DeploymentQuery {

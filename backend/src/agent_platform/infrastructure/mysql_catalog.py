@@ -25,7 +25,16 @@ from agent_platform.domain.catalog import (
 from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.conversations import CapabilityBinding
 from agent_platform.domain.identity import IdentityContext
-from agent_platform.domain.model_routes import ModelProfile, ModelRoute, SecretRef
+from agent_platform.domain.model_routes import (
+    ModelCatalogItem,
+    ModelConnection,
+    ModelProfile,
+    ModelRoute,
+    ModelTestRecord,
+    ModelTestResult,
+    SecretRef,
+    legacy_model_connection_id,
+)
 from agent_platform.ports.workspaces import SandboxProfile, WorkspaceMode, WorkspaceProfile
 
 
@@ -1204,19 +1213,451 @@ class MySqlCatalogRepository:
             latest.setdefault(str(row[0]), self._load_profile(row))
         return tuple(latest.values())
 
+    @staticmethod
+    def _model_connection_from_row(row: tuple[Any, ...]) -> ModelConnection:
+        secret = SecretRef(str(row[6]), str(row[7]), str(row[8])) if row[6] is not None else None
+        return ModelConnection(
+            connection_id=str(row[0]),
+            tenant_id=str(row[1]),
+            name=str(row[2]),
+            provider_kind=str(row[3]),
+            protocol=str(row[4]),
+            endpoint=str(row[5]),
+            secret_ref=secret,
+            catalog_mode=str(row[9]),
+            status=str(row[10]),
+            version=int(row[11]),
+        )
+
+    @staticmethod
+    def _model_catalog_item_from_row(row: tuple[Any, ...]) -> ModelCatalogItem:
+        return ModelCatalogItem(
+            connection_id=str(row[0]),
+            tenant_id=str(row[1]),
+            model_id=str(row[2]),
+            display_name=str(row[3]),
+            capabilities=_json_load(row[4], {}),
+            context_window=int(row[5]) if row[5] is not None else None,
+            catalog_source=str(row[6]),
+            status=str(row[7]),
+            last_seen_at=row[8],
+        )
+
+    def save_model_connection(self, identity: IdentityContext, value: ModelConnection) -> None:
+        if value.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型连接不属于当前租户")
+        secret = value.secret_ref
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "INSERT INTO model_connections "
+                "(platform_id,tenant_id,connection_id,name,provider_kind,protocol,endpoint,"
+                "auth_secret_ref,auth_secret_scope,auth_secret_provider,catalog_mode,status,version) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON DUPLICATE KEY UPDATE name=VALUES(name),provider_kind=VALUES(provider_kind),"
+                "protocol=VALUES(protocol),endpoint=VALUES(endpoint),auth_secret_ref=VALUES(auth_secret_ref),"
+                "auth_secret_scope=VALUES(auth_secret_scope),auth_secret_provider=VALUES(auth_secret_provider),"
+                "catalog_mode=VALUES(catalog_mode),status=VALUES(status),version=VALUES(version)",
+                (
+                    identity.platform_id,
+                    identity.tenant_id,
+                    value.connection_id,
+                    value.name,
+                    value.provider_kind,
+                    value.protocol,
+                    value.endpoint,
+                    secret.secret_id if secret else None,
+                    secret.scope if secret else None,
+                    secret.provider if secret else None,
+                    value.catalog_mode.value,
+                    value.status.value,
+                    value.version,
+                ),
+            )
+
+    def get_model_connection(self, identity: IdentityContext, connection_id: str) -> ModelConnection:
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT connection_id,tenant_id,name,provider_kind,protocol,endpoint,auth_secret_ref,"
+                "auth_secret_scope,auth_secret_provider,catalog_mode,status,version "
+                "FROM model_connections WHERE platform_id=%s AND tenant_id=%s AND connection_id=%s",
+                (identity.platform_id, identity.tenant_id, connection_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise self._not_found("model_connection")
+        return self._model_connection_from_row(row)
+
+    def list_model_connections(self, identity: IdentityContext) -> tuple[ModelConnection, ...]:
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT connection_id,tenant_id,name,provider_kind,protocol,endpoint,auth_secret_ref,"
+                "auth_secret_scope,auth_secret_provider,catalog_mode,status,version "
+                "FROM model_connections WHERE platform_id=%s AND tenant_id=%s ORDER BY name,connection_id",
+                (identity.platform_id, identity.tenant_id),
+            )
+            rows = cursor.fetchall()
+        return tuple(self._model_connection_from_row(row) for row in rows)
+
+    def save_model_catalog_item(self, identity: IdentityContext, value: ModelCatalogItem) -> None:
+        if value.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型目录项不属于当前租户")
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "SELECT 1 FROM model_connections WHERE platform_id=%s AND tenant_id=%s AND connection_id=%s",
+                (identity.platform_id, identity.tenant_id, value.connection_id),
+            )
+            if cursor.fetchone() is None:
+                raise self._not_found("model_connection")
+            cursor.execute(
+                "INSERT INTO model_catalog_items "
+                "(platform_id,tenant_id,connection_id,model_id,display_name,capabilities_json,"
+                "context_window,catalog_source,status,last_seen_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON DUPLICATE KEY UPDATE display_name=VALUES(display_name),"
+                "capabilities_json=VALUES(capabilities_json),context_window=VALUES(context_window),"
+                "catalog_source=VALUES(catalog_source),status=VALUES(status),last_seen_at=VALUES(last_seen_at)",
+                (
+                    identity.platform_id,
+                    identity.tenant_id,
+                    value.connection_id,
+                    value.model_id,
+                    value.display_name,
+                    _json_dump(dict(value.capabilities)),
+                    value.context_window,
+                    value.catalog_source.value,
+                    value.status.value,
+                    value.last_seen_at,
+                ),
+            )
+
+    def get_model_catalog_item(
+        self, identity: IdentityContext, connection_id: str, model_id: str
+    ) -> ModelCatalogItem:
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT connection_id,tenant_id,model_id,display_name,capabilities_json,"
+                "context_window,catalog_source,status,last_seen_at FROM model_catalog_items "
+                "WHERE platform_id=%s AND tenant_id=%s AND connection_id=%s AND model_id=%s",
+                (identity.platform_id, identity.tenant_id, connection_id, model_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise self._not_found("model_catalog_item")
+        return self._model_catalog_item_from_row(row)
+
+    def list_model_catalog_items(
+        self, identity: IdentityContext, connection_id: str
+    ) -> tuple[ModelCatalogItem, ...]:
+        self.get_model_connection(identity, connection_id)
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT connection_id,tenant_id,model_id,display_name,capabilities_json,"
+                "context_window,catalog_source,status,last_seen_at FROM model_catalog_items "
+                "WHERE platform_id=%s AND tenant_id=%s AND connection_id=%s ORDER BY model_id",
+                (identity.platform_id, identity.tenant_id, connection_id),
+            )
+            rows = cursor.fetchall()
+        return tuple(self._model_catalog_item_from_row(row) for row in rows)
+
+    @staticmethod
+    def _model_test_record_from_row(row: tuple[Any, ...]) -> ModelTestRecord:
+        return ModelTestRecord(
+            test_id=str(row[0]),
+            tenant_id=str(row[1]),
+            connection_id=str(row[2]),
+            route_id=str(row[3]) if row[3] is not None else None,
+            model_id=str(row[4]) if row[4] is not None else None,
+            test_kind=str(row[5]),
+            state=str(row[6]),
+            snapshot=_json_load(row[7], {}),
+            created_by_user_id=str(row[8]),
+            worker_id=str(row[9]) if row[9] is not None else None,
+            fencing_token=int(row[10]),
+            lease_expires_at=row[11],
+            started_at=row[12],
+            finished_at=row[13],
+            latency_ms=int(row[14]) if row[14] is not None else None,
+            provider_request_id=str(row[15]) if row[15] is not None else None,
+            input_tokens=int(row[16]) if row[16] is not None else None,
+            output_tokens=int(row[17]) if row[17] is not None else None,
+            total_tokens=int(row[18]) if row[18] is not None else None,
+            usage_status=str(row[19]) if row[19] is not None else None,
+            error_category=str(row[20]) if row[20] is not None else None,
+            created_at=row[21],
+            updated_at=row[22],
+        )
+
+    def save_model_test_record(self, identity: IdentityContext, value: ModelTestRecord) -> None:
+        if value.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型测试记录不属于当前租户")
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "INSERT INTO model_test_records "
+                "(platform_id,tenant_id,test_id,connection_id,route_id,model_id,test_kind,state,"
+                "snapshot_json,created_by_user_id,worker_id,fencing_token,lease_expires_at,started_at,"
+                "finished_at,latency_ms,provider_request_id,input_tokens,output_tokens,total_tokens,"
+                "usage_status,error_category) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    identity.platform_id,
+                    identity.tenant_id,
+                    value.test_id,
+                    value.connection_id,
+                    value.route_id,
+                    value.model_id,
+                    value.test_kind.value,
+                    value.state.value,
+                    _json_dump(dict(value.snapshot)),
+                    value.created_by_user_id,
+                    value.worker_id,
+                    value.fencing_token,
+                    value.lease_expires_at,
+                    value.started_at,
+                    value.finished_at,
+                    value.latency_ms,
+                    value.provider_request_id,
+                    value.input_tokens,
+                    value.output_tokens,
+                    value.total_tokens,
+                    value.usage_status.value if value.usage_status else None,
+                    value.error_category,
+                ),
+            )
+
+    def claim_next_model_test(
+        self, platform_id: str, worker_id: str, *, lease_seconds: int
+    ) -> ModelTestRecord | None:
+        if not platform_id.strip() or not worker_id.strip() or lease_seconds < 1:
+            raise ValueError("model test claim requires platform, worker and positive lease")
+        columns = (
+            "test_id,tenant_id,connection_id,route_id,model_id,test_kind,state,snapshot_json,"
+            "created_by_user_id,worker_id,fencing_token,lease_expires_at,started_at,finished_at,"
+            "latency_ms,provider_request_id,input_tokens,output_tokens,total_tokens,usage_status,"
+            "error_category,created_at,updated_at"
+        )
+        with self._transaction() as (_, cursor):
+            # 过期 RUNNING 任务结果不确定，先终结并围栏旧执行，绝不重新放回队列。
+            cursor.execute(
+                "UPDATE model_test_records SET state='UNKNOWN',"
+                "error_category='WORKER_LEASE_EXPIRED',finished_at=UTC_TIMESTAMP(6),"
+                "lease_expires_at=NULL,fencing_token=fencing_token+1,updated_at=UTC_TIMESTAMP(6) "
+                "WHERE platform_id=%s AND state='RUNNING' AND lease_expires_at<=UTC_TIMESTAMP(6)",
+                (platform_id,),
+            )
+            cursor.execute(
+                "SELECT test_id,tenant_id FROM model_test_records "
+                "WHERE platform_id=%s AND state='QUEUED' "
+                "ORDER BY created_at,test_id LIMIT 1 FOR UPDATE SKIP LOCKED",
+                (platform_id,),
+            )
+            selected = cursor.fetchone()
+            if selected is None:
+                return None
+            test_id, tenant_id = str(selected[0]), str(selected[1])
+            cursor.execute(
+                "UPDATE model_test_records SET state='RUNNING',worker_id=%s,"
+                "fencing_token=fencing_token+1,lease_expires_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL %s SECOND),"
+                "started_at=UTC_TIMESTAMP(6),updated_at=UTC_TIMESTAMP(6) "
+                "WHERE platform_id=%s AND tenant_id=%s AND test_id=%s AND state='QUEUED'",
+                (worker_id, lease_seconds, platform_id, tenant_id, test_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            cursor.execute(
+                f"SELECT {columns} FROM model_test_records "
+                "WHERE platform_id=%s AND tenant_id=%s AND test_id=%s",
+                (platform_id, tenant_id, test_id),
+            )
+            row = cursor.fetchone()
+        return self._model_test_record_from_row(row) if row is not None else None
+
+    def heartbeat_model_test(
+        self,
+        identity: IdentityContext,
+        test_id: str,
+        worker_id: str,
+        fencing_token: int,
+        *,
+        lease_seconds: int,
+    ) -> bool:
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "UPDATE model_test_records SET "
+                "lease_expires_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL %s SECOND),"
+                "updated_at=UTC_TIMESTAMP(6) WHERE platform_id=%s AND tenant_id=%s AND test_id=%s "
+                "AND state='RUNNING' AND worker_id=%s AND fencing_token=%s "
+                "AND lease_expires_at>UTC_TIMESTAMP(6)",
+                (
+                    lease_seconds,
+                    identity.platform_id,
+                    identity.tenant_id,
+                    test_id,
+                    worker_id,
+                    fencing_token,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def finish_model_test(
+        self,
+        identity: IdentityContext,
+        claimed: ModelTestRecord,
+        result: ModelTestResult,
+    ) -> bool:
+        if claimed.tenant_id != identity.tenant_id or claimed.worker_id is None:
+            raise DomainError("AUTHORIZATION_DENIED", "模型测试租约不属于当前 Worker 租户")
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "UPDATE model_test_records SET state=%s,lease_expires_at=NULL,"
+                "finished_at=UTC_TIMESTAMP(6),latency_ms=%s,provider_request_id=%s,"
+                "input_tokens=%s,output_tokens=%s,total_tokens=%s,usage_status=%s,error_category=%s,"
+                "updated_at=UTC_TIMESTAMP(6) WHERE platform_id=%s AND tenant_id=%s AND test_id=%s "
+                "AND state='RUNNING' AND worker_id=%s AND fencing_token=%s "
+                "AND lease_expires_at>UTC_TIMESTAMP(6)",
+                (
+                    result.state.value,
+                    result.latency_ms,
+                    result.provider_request_id,
+                    result.input_tokens,
+                    result.output_tokens,
+                    result.total_tokens,
+                    result.usage_status.value if result.usage_status else None,
+                    result.error_category,
+                    identity.platform_id,
+                    identity.tenant_id,
+                    claimed.test_id,
+                    claimed.worker_id,
+                    claimed.fencing_token,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def get_model_test_record(self, identity: IdentityContext, test_id: str) -> ModelTestRecord:
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT test_id,tenant_id,connection_id,route_id,model_id,test_kind,state,snapshot_json,"
+                "created_by_user_id,worker_id,fencing_token,lease_expires_at,started_at,finished_at,"
+                "latency_ms,provider_request_id,input_tokens,output_tokens,total_tokens,usage_status,"
+                "error_category,created_at,updated_at FROM model_test_records "
+                "WHERE platform_id=%s AND tenant_id=%s AND test_id=%s",
+                (identity.platform_id, identity.tenant_id, test_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise self._not_found("model_test")
+        return self._model_test_record_from_row(row)
+
     def save_model_route(self, identity: IdentityContext, value: ModelRoute) -> None:
         profile = value.profile
         secret = profile.secret_ref
+        if value.tenant_id != identity.tenant_id or profile.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型路由不属于当前租户")
         with self._transaction() as (_, cursor):
+            if profile.connection_id is None:
+                cursor.execute(
+                    "SELECT connection_id FROM model_connections WHERE platform_id=%s AND tenant_id=%s "
+                    "AND provider_kind=%s AND protocol=%s AND endpoint=%s "
+                    "AND auth_secret_ref <=> %s AND auth_secret_scope <=> %s "
+                    "AND auth_secret_provider <=> %s AND status='ACTIVE' ORDER BY connection_id LIMIT 1",
+                    (
+                        identity.platform_id,
+                        identity.tenant_id,
+                        profile.provider,
+                        profile.protocol,
+                        profile.endpoint,
+                        secret.secret_id if secret else None,
+                        secret.scope if secret else None,
+                        secret.provider if secret else None,
+                    ),
+                )
+                existing_connection = cursor.fetchone()
+                connection_id = (
+                    str(existing_connection[0])
+                    if existing_connection is not None
+                    else legacy_model_connection_id(
+                        identity.platform_id, identity.tenant_id, profile
+                    )
+                )
+                if existing_connection is None:
+                    cursor.execute(
+                        "INSERT INTO model_connections "
+                        "(platform_id,tenant_id,connection_id,name,provider_kind,protocol,endpoint,"
+                        "auth_secret_ref,auth_secret_scope,auth_secret_provider,catalog_mode,status,version) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'MANUAL','ACTIVE',1)",
+                        (
+                            identity.platform_id,
+                            identity.tenant_id,
+                            connection_id,
+                            f"{profile.provider}-{connection_id[-8:]}",
+                            profile.provider,
+                            profile.protocol,
+                            profile.endpoint,
+                            secret.secret_id if secret else None,
+                            secret.scope if secret else None,
+                            secret.provider if secret else None,
+                        ),
+                    )
+                model_id = profile.model_name
+                cursor.execute(
+                    "INSERT INTO model_catalog_items "
+                    "(platform_id,tenant_id,connection_id,model_id,display_name,capabilities_json,"
+                    "catalog_source,status) VALUES (%s,%s,%s,%s,%s,JSON_OBJECT(),'MANUAL','ACTIVE') "
+                    "ON DUPLICATE KEY UPDATE display_name=VALUES(display_name),status='ACTIVE'",
+                    (
+                        identity.platform_id,
+                        identity.tenant_id,
+                        connection_id,
+                        model_id,
+                        model_id,
+                    ),
+                )
+            else:
+                connection_id = profile.connection_id
+                model_id = profile.catalog_model_id or ""
+                cursor.execute(
+                    "SELECT provider_kind,protocol,endpoint,auth_secret_ref,auth_secret_scope,"
+                    "auth_secret_provider,status FROM model_connections WHERE platform_id=%s "
+                    "AND tenant_id=%s AND connection_id=%s",
+                    (identity.platform_id, identity.tenant_id, connection_id),
+                )
+                connection_row = cursor.fetchone()
+                if connection_row is None:
+                    raise self._not_found("model_connection")
+                if (
+                    str(connection_row[0]) != profile.provider
+                    or str(connection_row[1]) != profile.protocol
+                    or str(connection_row[2]) != profile.endpoint
+                    or connection_row[3] != (secret.secret_id if secret else None)
+                    or connection_row[4] != (secret.scope if secret else None)
+                    or connection_row[5] != (secret.provider if secret else None)
+                ):
+                    raise DomainError("INVALID_ARGUMENT", "ModelProfile 与 ModelConnection 配置不一致")
+                if str(connection_row[6]) != "ACTIVE":
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "模型连接已停用")
+                cursor.execute(
+                    "SELECT status FROM model_catalog_items WHERE platform_id=%s AND tenant_id=%s "
+                    "AND connection_id=%s AND model_id=%s",
+                    (identity.platform_id, identity.tenant_id, connection_id, model_id),
+                )
+                catalog_row = cursor.fetchone()
+                if catalog_row is None:
+                    raise self._not_found("model_catalog_item")
+                if str(catalog_row[0]) != "ACTIVE":
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "模型目录项已停用")
             cursor.execute(
                 "INSERT INTO model_routes "
                 "(platform_id, tenant_id, route_id, alias, provider, model_name, endpoint, protocol, "
-                "auth_secret_ref, auth_secret_scope, auth_secret_provider, pricing_snapshot_ref, parameters_json, status) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "auth_secret_ref, auth_secret_scope, auth_secret_provider, pricing_snapshot_ref, parameters_json, status, "
+                "model_connection_id, catalog_model_id, route_version) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE alias=VALUES(alias), provider=VALUES(provider), model_name=VALUES(model_name), "
                 "endpoint=VALUES(endpoint), protocol=VALUES(protocol), auth_secret_ref=VALUES(auth_secret_ref), "
                 "auth_secret_scope=VALUES(auth_secret_scope), auth_secret_provider=VALUES(auth_secret_provider), "
-                "pricing_snapshot_ref=VALUES(pricing_snapshot_ref), parameters_json=VALUES(parameters_json), status=VALUES(status)",
+                "pricing_snapshot_ref=VALUES(pricing_snapshot_ref), parameters_json=VALUES(parameters_json), "
+                "status=VALUES(status), model_connection_id=VALUES(model_connection_id), "
+                "catalog_model_id=VALUES(catalog_model_id), route_version=VALUES(route_version)",
                 (
                     identity.platform_id,
                     identity.tenant_id,
@@ -1232,6 +1673,9 @@ class MySqlCatalogRepository:
                     profile.pricing_snapshot_ref,
                     _json_dump(dict(profile.parameters)),
                     value.status,
+                    connection_id,
+                    model_id,
+                    value.route_version,
                 ),
             )
 
@@ -1239,7 +1683,8 @@ class MySqlCatalogRepository:
         with self._reader() as (_, cursor):
             cursor.execute(
                 "SELECT route_id, tenant_id, alias, provider, model_name, endpoint, protocol, auth_secret_ref, "
-                "auth_secret_scope, auth_secret_provider, pricing_snapshot_ref, parameters_json, status "
+                "auth_secret_scope, auth_secret_provider, pricing_snapshot_ref, parameters_json, status, "
+                "model_connection_id, catalog_model_id, route_version "
                 "FROM model_routes WHERE platform_id=%s AND tenant_id=%s AND route_id=%s",
                 (identity.platform_id, identity.tenant_id, route_id),
             )
@@ -1261,8 +1706,11 @@ class MySqlCatalogRepository:
                 secret_ref=secret,
                 pricing_snapshot_ref=str(row[10]) if row[10] is not None else None,
                 parameters=_json_load(row[11], {}),
+                connection_id=str(row[13]),
+                catalog_model_id=str(row[14]),
             ),
             status=str(row[12]),
+            route_version=int(row[15]),
         )
 
     def save(self, identity: IdentityContext, route: ModelRoute) -> None:

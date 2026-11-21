@@ -159,4 +159,4 @@ def get_session_trace(session_id: str, identity: Identity, service: ControlPlane
 @router.get("/runs/{run_id}/usage")
 def get_run_usage(run_id: str, identity: Identity, service: ControlPlane) -> dict[str, object]:
     timeline = service.get_trace(identity, run_id)
-    return {"run_id": run_id, "usage": {"input_tokens": timeline.usage.input_tokens, "output_tokens": timeline.usage.output_tokens, "total_tokens": timeline.usage.total_tokens, "source": timeline.usage.source, "estimated": timeline.usage.estimated, "cost_amount": timeline.usage.cost_amount, "currency": timeline.usage.currency, "pricing_version": timeline.usage.pricing_version}}
+    return {"run_id": run_id, "usage": {"input_tokens": timeline.usage.input_tokens, "output_tokens": timeline.usage.output_tokens, "total_tokens": timeline.usage.total_tokens, "source": timeline.usage.source, "estimated": timeline.usage.estimated, "cost_amount": timeline.usage.cost_amount, "currency": timeline.usage.currency, "pricing_version": timeline.usage.pricing_version, "provider_request_id": timeline.usage.provider_request_id}}

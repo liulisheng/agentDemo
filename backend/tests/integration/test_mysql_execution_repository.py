@@ -101,7 +101,10 @@ def test_session_and_run_snapshots_survive_repository_recreation(mysql_execution
     from agent_platform.application.model_routes import ModelRouteService
 
     route = ModelRouteService(catalog.repository).create(
-        identity, "local-route", "fake-model", "fake", "http://fake.invalid", None
+        identity, "local-route", "fake-model", "fake", "http://fake.invalid", "model-test-secret-ref"
+    )
+    route = ModelRouteService(catalog.repository).update(
+        identity, route.route_id, parameters={"temperature": 0.2}
     )
     profile = catalog.create_profile(identity, "fake", "local-route", model_route_id=route.route_id)
     skill = catalog.create_skill(identity, "本地技能", SkillType.INSTRUCTION, "回答用户", [])
@@ -118,9 +121,35 @@ def test_session_and_run_snapshots_survive_repository_recreation(mysql_execution
     published = catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, published.version)
 
-    control_plane = ControlPlaneService(catalog, FakeRuntimeAdapter(), persistence=execution_repository)
+    class CapturingRuntime(FakeRuntimeAdapter):
+        def run(self, request):
+            self.last_request = request
+            result = super().run(request)
+            return replace(
+                result,
+                usage=replace(result.usage, provider_request_id="upstream-request-local-1"),
+            )
+
+    runtime = CapturingRuntime()
+    control_plane = ControlPlaneService(catalog, runtime, persistence=execution_repository)
     session = control_plane.create_session(identity, deployment.deployment_id)
     run = control_plane.create_run(identity, session.session_id, "你好", "persistent-run-1")
+    assert runtime.last_request.model_route_snapshot is not None
+    assert runtime.last_request.model_route_snapshot.model_id == "fake-model"
+
+    # MySQL 侧运行引用应读取 Session 创建时固定的执行引擎，而不是假定 Fake。
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "UPDATE sessions SET engine_name='deepseek' "
+            "WHERE platform_id=%s AND tenant_id=%s AND session_id=%s",
+            (identity.platform_id, identity.tenant_id, session.session_id),
+        )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
 
     restarted = ControlPlaneService(catalog_service(), FakeRuntimeAdapter(), persistence=execution_repository)
     loaded_session = restarted.get_session(identity, session.session_id)
@@ -135,11 +164,22 @@ def test_session_and_run_snapshots_survive_repository_recreation(mysql_execution
     assert loaded_run.snapshot.employee_version == 1
     assert loaded_run.submitted_by_user_id == identity.user_id
     assert loaded_run.snapshot.model_route_id == route.route_id
+    assert loaded_run.snapshot.model_route_snapshot is not None
+    assert loaded_run.snapshot.model_route_snapshot.connection_id == route.profile.connection_id
+    assert loaded_run.snapshot.model_route_snapshot.model_id == "fake-model"
+    assert loaded_run.snapshot.model_route_snapshot.connection_version == 1
+    assert loaded_run.snapshot.model_route_snapshot.route_version == 2
+    assert loaded_run.snapshot.model_route_snapshot.parameters == {"temperature": 0.2}
+    assert loaded_run.snapshot.model_route_snapshot.secret_ref is not None
+    assert loaded_run.snapshot.model_route_snapshot.secret_ref.secret_id == "model-test-secret-ref"
+    assert "raw-model-api-key" not in repr(loaded_run.snapshot.model_route_snapshot)
     assert loaded_run.snapshot.skill_version_refs == ((skill.skill_id, 1),)
     assert loaded_run.runtime_reference is not None
     assert loaded_run.runtime_reference.runtime_session_ref
+    assert loaded_run.runtime_reference.engine_name == "deepseek"
     timeline = restarted.get_trace(identity, run.run_id)
     assert timeline.usage.total_tokens > 0
+    assert timeline.usage.provider_request_id == "upstream-request-local-1"
     assert any(span.span_type is SpanType.SESSION for span in timeline.spans)
     assert any(span.span_type is SpanType.RESULT for span in timeline.spans)
     assert execution_repository.list_usage_records(identity, run.run_id)[0].model_route_id == route.route_id
@@ -299,6 +339,25 @@ def test_session_and_run_snapshots_survive_repository_recreation(mysql_execution
         tool_token,
     )
     assert execution_repository.list_tool_invocations(identity, tool_run.run_id)[0].tool_name == "echo"
+
+    pinned_model = loaded_run.snapshot.model_route_snapshot
+    assert pinned_model is not None
+    current_connection = catalog.repository.get_model_connection(
+        identity, pinned_model.connection_id
+    )
+    catalog.repository.save_model_connection(
+        identity,
+        replace(
+            current_connection,
+            endpoint="http://changed-after-submit.invalid/v1",
+            version=current_connection.version + 1,
+        ),
+    )
+    ModelRouteService(catalog.repository).update(
+        identity, route.route_id, parameters={"temperature": 0.9}
+    )
+    reloaded_after_route_update = execution_repository.get_run(identity, run.run_id)
+    assert reloaded_after_route_update.snapshot.model_route_snapshot == pinned_model
 
 
 def test_expired_runtime_lease_becomes_unknown_without_replay(mysql_execution_database) -> None:

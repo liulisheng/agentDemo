@@ -11,6 +11,7 @@ from typing import Protocol
 
 from agent_platform.domain.execution import RuntimeStatus, UsageRecord
 from agent_platform.domain.mcp import McpServerProfile
+from agent_platform.domain.model_routes import ModelRouteSnapshot
 from agent_platform.domain.observability import SkillFilePackageSnapshot
 
 
@@ -157,6 +158,8 @@ class RuntimeRequest:
     tool_definitions: Sequence[RuntimeToolDefinition] = ()
     harness_home_ref: str | None = None
     mcp_servers: Sequence[RuntimeMcpServer] = ()
+    model_route_snapshot: ModelRouteSnapshot | None = None
+    max_tokens: int | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("run_id", "prompt"):
@@ -174,6 +177,19 @@ class RuntimeRequest:
             self.employee_context, RuntimeEmployeeContext
         ):
             raise TypeError("employee_context must be a RuntimeEmployeeContext value")
+        if self.model_route_snapshot is not None and not isinstance(
+            self.model_route_snapshot, ModelRouteSnapshot
+        ):
+            raise TypeError("model_route_snapshot must be a ModelRouteSnapshot value")
+        if self.max_tokens is not None and self.max_tokens < 1:
+            raise ValueError("max_tokens must be positive when provided")
+        if (
+            self.employee_context is not None
+            and self.employee_context.model_route_id is not None
+            and self.model_route_snapshot is not None
+            and self.employee_context.model_route_id != self.model_route_snapshot.route_id
+        ):
+            raise ValueError("model route snapshot must match the employee context")
         if self.harness_home_ref is not None and re.fullmatch(
             r"harness-session:[0-9a-f]{64}", self.harness_home_ref
         ) is None:

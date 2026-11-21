@@ -186,6 +186,101 @@ def test_deepseek_runtime_factory_loads_explicit_local_provider_config(monkeypat
     assert provider_patches and "local-acceptance-key" not in provider_patches[0]
 
 
+def test_deepseek_runtime_resolves_pinned_tenant_model_secret_inside_worker(
+    monkeypatch, tmp_path
+) -> None:
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    from typing import ClassVar
+
+    from agent_platform.api.app import _build_runtime_adapter
+    from agent_platform.domain.model_routes import ModelRouteSnapshot, SecretRef
+    from agent_platform.ports.runtime import RuntimeEmployeeContext, RuntimeRequest
+
+    class FakeSession:
+        def __init__(self, session_id):
+            self.session_id = session_id
+
+        def run(self, prompt):
+            return SimpleNamespace(final_response=f"fake: {prompt}", finish_reason="completed")
+
+    class FakeHarness:
+        instances: ClassVar[list[object]] = []
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.config = SimpleNamespace(env=kwargs.get("env", {}))
+            self.child_environment = dict(kwargs.get("env", {}))
+            self.patch_texts = tuple(
+                Path(path).read_text(encoding="utf-8")
+                for path in kwargs.get("patches", ())
+                if "provider" in Path(path).name
+            )
+            type(self).instances.append(self)
+
+        def start_session(self, session_id):
+            return FakeSession(session_id)
+
+        def resume_session(self, session_id):
+            return FakeSession(session_id)
+
+        def close(self):
+            return None
+
+    FakeHarness.instances.clear()
+    monkeypatch.setitem(sys.modules, "deepseek_harness", SimpleNamespace(DeepSeekHarness=FakeHarness))
+    secret_ref = SecretRef("local-model-key", "tenant-a", "environment")
+    monkeypatch.setenv(
+        "AGENT_PLATFORM_MODEL_SECRET_TENANT_A_LOCAL_MODEL_KEY",
+        "tenant-model-key-test",
+    )
+    runtime = _build_runtime_adapter("deepseek", tmp_path / "state")
+    snapshot = ModelRouteSnapshot(
+        tenant_id="tenant-a",
+        route_id="route-local",
+        route_version=2,
+        route_alias="assistant",
+        connection_id="connection-local",
+        connection_version=3,
+        provider_kind="openai-compatible",
+        model_id="local-model-a",
+        protocol="openai-chat-completions",
+        endpoint="http://host.docker.internal:63072/v1",
+        secret_ref=secret_ref,
+        parameters={"temperature": 0.1},
+    )
+    result = runtime.run(
+        RuntimeRequest(
+            run_id="run-tenant-model",
+            session_ref=runtime.create_session(),
+            prompt="检查本地模型配置",
+            skill_instructions=(),
+            allowed_tools=(),
+            employee_context=RuntimeEmployeeContext(
+                employee_id="employee-local-model",
+                employee_version=1,
+                system_prompt="只用于验证固定模型路由。",
+                model_route_id="route-local",
+            ),
+            harness_home_ref="harness-session:" + "9" * 64,
+            model_route_snapshot=snapshot,
+        )
+    )
+
+    harness = FakeHarness.instances[0]
+    assert result.text == "fake: 检查本地模型配置"
+    assert harness.kwargs["provider"] == "openai-compatible"
+    assert harness.kwargs["model"] == "local-model-a"
+    assert harness.child_environment["AGENT_PLATFORM_MODEL_API_KEY"] == "tenant-model-key-test"
+    assert harness.patch_texts
+    assert "host.docker.internal:63072/v1" in harness.patch_texts[0]
+    assert "local-model-a" in harness.patch_texts[0]
+    assert "tenant-model-key-test" not in harness.patch_texts[0]
+    assert "tenant-model-key-test" not in repr(snapshot)
+    assert "local-model-key" not in repr(snapshot)
+
+
 def test_deepseek_runtime_builds_filtered_profile_proxy_without_persisting_secret(
     monkeypatch, tmp_path
 ) -> None:

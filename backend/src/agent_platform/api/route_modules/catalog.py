@@ -16,6 +16,7 @@ from agent_platform.api.schemas import (
     EmployeeVersionUpdateRequest,
     ExecutionProfileCreateRequest,
     ModelRouteCreateRequest,
+    ModelRouteUpdateRequest,
     SkillCreateRequest,
     ToolCreateRequest,
     ToolUpdateRequest,
@@ -24,7 +25,7 @@ from agent_platform.domain.agents import FakeDigitalEmployeeRepository
 from agent_platform.domain.catalog import LifecycleStatus
 from agent_platform.domain.common import DomainError
 
-from .common import Catalog, ControlPlane, Identity, ModelRoutes, _check_tenant
+from .common import Catalog, ControlPlane, Identity, ModelManagement, _check_tenant
 from .serializers import _employee_response, _skill_response, _tool_response, _version_response
 
 router = APIRouter()
@@ -490,11 +491,88 @@ def list_execution_profiles(identity: Identity, service: Catalog) -> dict[str, o
 
 
 @router.post("/model-routes", status_code=201)
-def create_model_route(request: ModelRouteCreateRequest, identity: Identity, service: ModelRoutes) -> dict[str, object]:
+def create_model_route(
+    request: ModelRouteCreateRequest,
+    identity: Identity,
+    management: ModelManagement,
+) -> dict[str, object]:
     _check_tenant(identity, request)
-    return service.create(identity, request.alias, request.model_name, request.provider, request.endpoint, request.secret_id).to_public_dict()
+    if request.connection_id is not None or request.catalog_model_id is not None:
+        if request.connection_id is None:
+            raise DomainError("INVALID_ARGUMENT", "catalog-backed ModelRoute 需要 connection_id")
+        model_id = request.catalog_model_id or request.model_name
+        if model_id is None:
+            raise DomainError("INVALID_ARGUMENT", "catalog-backed ModelRoute 需要 model ID")
+        if request.model_name is not None and request.model_name != model_id:
+            raise DomainError("INVALID_ARGUMENT", "model_name 与 catalog_model_id 不一致")
+        route = management.create_route(
+            identity,
+            alias=request.alias,
+            connection_id=request.connection_id,
+            model_id=model_id,
+            parameters=request.parameters,
+            pricing_snapshot_ref=request.pricing_snapshot_ref,
+        )
+    else:
+        if request.model_name is None:
+            raise DomainError("INVALID_ARGUMENT", "ModelRoute 需要 model_name")
+        route = management.create_legacy_route(
+            identity,
+            alias=request.alias,
+            model_name=request.model_name,
+            provider=request.provider,
+            endpoint=request.endpoint,
+            secret_id=request.secret_id,
+        )
+    return route.to_public_dict()
+
+
+@router.get("/model-routes/{route_id}")
+def get_model_route(
+    route_id: str, identity: Identity, management: ModelManagement
+) -> dict[str, object]:
+    return management.get_route(identity, route_id).to_public_dict()
+
+
+@router.put("/model-routes/{route_id}")
+def update_model_route(
+    route_id: str,
+    request: ModelRouteUpdateRequest,
+    identity: Identity,
+    management: ModelManagement,
+) -> dict[str, object]:
+    _check_tenant(identity, request)
+    values = request.model_dump(exclude_unset=True)
+    values.pop("tenant_id", None)
+    model_id = values.pop("catalog_model_id", None)
+    model_name = values.pop("model_name", None)
+    if model_id is not None and model_name is not None and model_id != model_name:
+        raise DomainError("INVALID_ARGUMENT", "model_name 与 catalog_model_id 不一致")
+    if model_id is not None or model_name is not None:
+        values["model_id"] = model_id or model_name
+    return management.update_route(identity, route_id, values).to_public_dict()
+
+
+@router.post("/model-routes/{route_id}/disable")
+def disable_model_route(
+    route_id: str, identity: Identity, management: ModelManagement
+) -> dict[str, object]:
+    return management.set_route_status(identity, route_id, "DISABLED").to_public_dict()
+
+
+@router.post("/model-routes/{route_id}/enable")
+def enable_model_route(
+    route_id: str, identity: Identity, management: ModelManagement
+) -> dict[str, object]:
+    return management.set_route_status(identity, route_id, "ACTIVE").to_public_dict()
 
 
 @router.get("/model-routes")
-def list_model_routes(identity: Identity, service: ModelRoutes) -> dict[str, object]:
-    return {"items": [item.to_public_dict() for item in service.list(identity)]}
+def list_model_routes(identity: Identity, service: ModelManagement) -> dict[str, object]:
+    source = service.model_authorization.authorization_source
+    return {
+        "items": [
+            {**item.to_public_dict(), "authorization_source": source}
+            for item in service.list_routes(identity)
+        ]
+    }

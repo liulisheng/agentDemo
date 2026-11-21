@@ -1,11 +1,20 @@
 schema: spec-driven
 
 rules:
+  proposal:
+    - 明确本期目标、范围、非目标、影响面、验收目标及分阶段交付边界。
+  specs:
+    - 每个新增/变更需求都要有可测试场景；按需覆盖租户隔离、权限拒绝、错误、超时、取消和兼容行为。
   design:
     - 将可执行 MySQL schema/migration SQL 放在 docs/migrations/，不要建立重复来源目录。
     - 新增或变更的表和字段必须带中文 MySQL COMMENT；历史已应用 migration 不得改写，使用 forward migration 补充元数据。
+    - 写明功能设计、架构图、流程/时序图、数据表和 API/状态、权限/凭据、错误/重试/幂等、审计/Trace、迁移/回滚、已验证/未验证项和验证命令。
+    - 设计说明形成 Markdown 文档；另行引用 docs/原型/<功能名>.html。HTML 原型必须是独立文件，不替代或内嵌进 Markdown 设计文档。
+    - 每个功能都需有自包含、使用演示数据、不发送真实请求的 HTML 原型，含主流程、权限、空/加载/错误和结果状态。
+    - 外部模型网关、new-api 等分期接入能力必须标清本期是否实现，以及目录发现、调用和授权的责任边界。
   tasks:
     - Schema 任务必须包含表/字段中文 COMMENT，并验证 information_schema.TABLES 与 information_schema.COLUMNS。
+    - 任务清单必须包含 HTML 原型、中文文档、测试/验证任务；每个任务描述可观察的完成条件或验证命令。
 
 # Project context (optional)
 # Add only constraints that should guide OpenSpec artifacts and workflows.

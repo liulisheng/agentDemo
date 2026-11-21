@@ -32,6 +32,7 @@ class UsageRecord:
     cost_amount: float = 0.0
     currency: str = "CNY"
     pricing_version: str = "fake-v1"
+    provider_request_id: str | None = None
 
     def __post_init__(self) -> None:
         if min(self.input_tokens, self.output_tokens, self.total_tokens) < 0:
@@ -40,6 +41,8 @@ class UsageRecord:
             raise ValueError("total_tokens must equal input plus output tokens")
         if self.cost_amount < 0 or not self.currency.strip() or not self.pricing_version.strip():
             raise ValueError("usage cost metadata is invalid")
+        if self.provider_request_id is not None and not self.provider_request_id.strip():
+            raise ValueError("provider_request_id must be nonblank when provided")
 
 
 @dataclass(frozen=True, slots=True)

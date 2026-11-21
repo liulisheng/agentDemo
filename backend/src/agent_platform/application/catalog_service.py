@@ -8,7 +8,7 @@ import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import RLock
 from uuid import uuid4
 
@@ -29,7 +29,17 @@ from agent_platform.domain.catalog import (
 )
 from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.identity import IdentityContext
-from agent_platform.domain.model_routes import ModelRoute
+from agent_platform.domain.model_routes import (
+    ModelCatalogItem,
+    ModelCatalogMode,
+    ModelCatalogSource,
+    ModelConnection,
+    ModelRoute,
+    ModelTestRecord,
+    ModelTestResult,
+    ModelTestState,
+    legacy_model_connection_id,
+)
 from agent_platform.domain.resource_center import (
     HubImportMode,
     HubResourceType,
@@ -59,12 +69,16 @@ class InMemoryCatalogRepository:
         self.profiles: dict[tuple[str, str, str], ExecutionProfile] = {}
         self.profile_versions: dict[tuple[str, str, str, int], ExecutionProfile] = {}
         self.model_routes: dict[tuple[str, str, str], object] = {}
+        self.model_connections: dict[tuple[str, str, str], ModelConnection] = {}
+        self.model_catalog_items: dict[tuple[str, str, str, str], ModelCatalogItem] = {}
+        self.model_test_records: dict[tuple[str, str, str], ModelTestRecord] = {}
         self.workspace_profiles: dict[tuple[str, str, str], object] = {}
         self.sandbox_profiles: dict[tuple[str, str, str], object] = {}
         self.deployments: dict[tuple[str, str, str], Deployment] = {}
         self.audit_events: list[AuditEventRecord] = []
         # 员工、版本与部署共用写锁，保证版本下线与部署写入的先后顺序。
         self._employee_version_lock = RLock()
+        self._model_test_lock = RLock()
 
     def _get(self, values: Mapping, key: tuple, resource: str):
         try:
@@ -319,13 +333,227 @@ class InMemoryCatalogRepository:
         self.profile_versions[(*_key(identity, value.profile_id), value.version)] = value
 
     def save_model_route(self, identity: IdentityContext, value: ModelRoute) -> None:
-        self.model_routes[_key(identity, value.route_id)] = value
+        if value.tenant_id != identity.tenant_id or value.profile.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型路由不属于当前租户")
+        route = value
+        profile = route.profile
+        if profile.connection_id is None:
+            connection = next(
+                (
+                    item
+                    for item in self.list_model_connections(identity)
+                    if item.provider_kind == profile.provider
+                    and item.protocol == profile.protocol
+                    and item.endpoint == profile.endpoint
+                    and item.secret_ref == profile.secret_ref
+                ),
+                None,
+            )
+            if connection is None:
+                connection_id = legacy_model_connection_id(
+                    identity.platform_id, identity.tenant_id, profile
+                )
+                connection = ModelConnection(
+                    connection_id=connection_id,
+                    tenant_id=identity.tenant_id,
+                    name=f"{profile.provider}-{connection_id[-8:]}",
+                    provider_kind=profile.provider,
+                    protocol=profile.protocol,
+                    endpoint=profile.endpoint,
+                    secret_ref=profile.secret_ref,
+                    catalog_mode=ModelCatalogMode.MANUAL,
+                )
+                self.save_model_connection(identity, connection)
+            try:
+                self.get_model_catalog_item(identity, connection.connection_id, profile.model_name)
+            except DomainError as error:
+                if error.code != "RESOURCE_NOT_FOUND":
+                    raise
+                self.save_model_catalog_item(
+                    identity,
+                    ModelCatalogItem(
+                        connection_id=connection.connection_id,
+                        tenant_id=identity.tenant_id,
+                        model_id=profile.model_name,
+                        display_name=profile.model_name,
+                        catalog_source=ModelCatalogSource.MANUAL,
+                    ),
+                )
+            route = replace(
+                route,
+                profile=replace(
+                    profile,
+                    connection_id=connection.connection_id,
+                    catalog_model_id=profile.model_name,
+                ),
+            )
+        else:
+            connection = self.get_model_connection(identity, profile.connection_id)
+            if (
+                connection.provider_kind != profile.provider
+                or connection.protocol != profile.protocol
+                or connection.endpoint != profile.endpoint
+                or connection.secret_ref != profile.secret_ref
+            ):
+                raise DomainError("INVALID_ARGUMENT", "ModelProfile 与 ModelConnection 配置不一致")
+            self.get_model_catalog_item(identity, profile.connection_id, profile.catalog_model_id or "")
+        self.model_routes[_key(identity, route.route_id)] = route
 
     def save(self, identity: IdentityContext, value: ModelRoute) -> None:
         self.save_model_route(identity, value)
 
     def get_model_route(self, identity: IdentityContext, route_id: str) -> ModelRoute:
         return self._get(self.model_routes, _key(identity, route_id), "model_route")
+
+    def save_model_connection(self, identity: IdentityContext, value: ModelConnection) -> None:
+        if value.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型连接不属于当前租户")
+        self.model_connections[_key(identity, value.connection_id)] = value
+
+    def get_model_connection(
+        self, identity: IdentityContext, connection_id: str
+    ) -> ModelConnection:
+        return self._get(self.model_connections, _key(identity, connection_id), "model_connection")
+
+    def list_model_connections(self, identity: IdentityContext) -> tuple[ModelConnection, ...]:
+        prefix = (identity.platform_id, identity.tenant_id)
+        return tuple(
+            value
+            for (platform_id, tenant_id, _), value in self.model_connections.items()
+            if (platform_id, tenant_id) == prefix
+        )
+
+    def save_model_catalog_item(self, identity: IdentityContext, value: ModelCatalogItem) -> None:
+        if value.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型目录项不属于当前租户")
+        self.get_model_connection(identity, value.connection_id)
+        self.model_catalog_items[
+            (*_key(identity, value.connection_id), value.model_id)
+        ] = value
+
+    def get_model_catalog_item(
+        self, identity: IdentityContext, connection_id: str, model_id: str
+    ) -> ModelCatalogItem:
+        return self._get(
+            self.model_catalog_items,
+            (*_key(identity, connection_id), model_id),
+            "model_catalog_item",
+        )
+
+    def list_model_catalog_items(
+        self, identity: IdentityContext, connection_id: str
+    ) -> tuple[ModelCatalogItem, ...]:
+        self.get_model_connection(identity, connection_id)
+        prefix = (*_key(identity, connection_id),)
+        return tuple(
+            value
+            for key, value in sorted(self.model_catalog_items.items())
+            if key[:3] == prefix
+        )
+
+    def save_model_test_record(self, identity: IdentityContext, value: ModelTestRecord) -> None:
+        if value.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型测试记录不属于当前租户")
+        self.get_model_connection(identity, value.connection_id)
+        key = _key(identity, value.test_id)
+        with self._model_test_lock:
+            if key in self.model_test_records:
+                raise DomainError("CONFLICT", "模型测试任务标识已存在")
+            self.model_test_records[key] = value
+
+    def get_model_test_record(self, identity: IdentityContext, test_id: str) -> ModelTestRecord:
+        return self._get(self.model_test_records, _key(identity, test_id), "model_test")
+
+    def claim_next_model_test(
+        self, platform_id: str, worker_id: str, *, lease_seconds: int
+    ) -> ModelTestRecord | None:
+        now = datetime.now(UTC)
+        with self._model_test_lock:
+            # 租约过期视为结果不确定，提升 fencing token 后终结，绝不自动重放模型请求。
+            for key, record in tuple(self.model_test_records.items()):
+                if (
+                    key[0] == platform_id
+                    and record.state is ModelTestState.RUNNING
+                    and record.lease_expires_at is not None
+                    and record.lease_expires_at <= now
+                ):
+                    expired = record.finish(
+                        ModelTestResult(
+                            ModelTestState.UNKNOWN,
+                            error_category="WORKER_LEASE_EXPIRED",
+                        ),
+                        finished_at=now,
+                    )
+                    self.model_test_records[key] = replace(
+                        expired, fencing_token=expired.fencing_token + 1
+                    )
+            queued = sorted(
+                (
+                    (key, record)
+                    for key, record in self.model_test_records.items()
+                    if key[0] == platform_id and record.state is ModelTestState.QUEUED
+                ),
+                key=lambda item: (item[1].created_at, item[1].test_id),
+            )
+            if not queued:
+                return None
+            key, record = queued[0]
+            claimed = record.claim(worker_id, now=now, lease_seconds=lease_seconds)
+            self.model_test_records[key] = claimed
+            return claimed
+
+    def heartbeat_model_test(
+        self,
+        identity: IdentityContext,
+        test_id: str,
+        worker_id: str,
+        fencing_token: int,
+        *,
+        lease_seconds: int,
+    ) -> bool:
+        now = datetime.now(UTC)
+        key = _key(identity, test_id)
+        with self._model_test_lock:
+            current = self.model_test_records.get(key)
+            if (
+                current is None
+                or current.state is not ModelTestState.RUNNING
+                or current.worker_id != worker_id
+                or current.fencing_token != fencing_token
+                or current.lease_expires_at is None
+                or current.lease_expires_at <= now
+            ):
+                return False
+            self.model_test_records[key] = replace(
+                current,
+                lease_expires_at=now + timedelta(seconds=lease_seconds),
+                updated_at=now,
+            )
+            return True
+
+    def finish_model_test(
+        self,
+        identity: IdentityContext,
+        claimed: ModelTestRecord,
+        result: ModelTestResult,
+    ) -> bool:
+        key = _key(identity, claimed.test_id)
+        now = datetime.now(UTC)
+        with self._model_test_lock:
+            current = self.model_test_records.get(key)
+            if (
+                current is None
+                or current.state is not ModelTestState.RUNNING
+                or claimed.state is not ModelTestState.RUNNING
+                or current.worker_id != claimed.worker_id
+                or current.worker_id is None
+                or current.fencing_token != claimed.fencing_token
+                or current.lease_expires_at is None
+                or current.lease_expires_at <= now
+            ):
+                return False
+            self.model_test_records[key] = current.finish(result, finished_at=now)
+            return True
 
     def get(self, identity: IdentityContext, route_id: str) -> ModelRoute | None:
         try:
@@ -1204,13 +1432,74 @@ class CatalogService:
             if ref is not None:
                 try:
                     if version_field is None:
-                        getter(identity, ref)
+                        dependency = getter(identity, ref)
                     else:
-                        getter(identity, ref, version=getattr(current, version_field) or 1)
+                        dependency = getter(identity, ref, version=getattr(current, version_field) or 1)
                 except DomainError as error:
                     if error.code != "RESOURCE_NOT_FOUND":
                         raise
                     missing.append({"kind": kind, "id": ref})
+                    continue
+                if kind == "model_route":
+                    if dependency.status != "ACTIVE":
+                        missing.append(
+                            {"kind": kind, "id": ref, "reason": "ROUTE_DISABLED"}
+                        )
+                        continue
+                    connection_id = dependency.profile.connection_id
+                    catalog_model_id = dependency.profile.catalog_model_id
+                    if connection_id is None or catalog_model_id is None:
+                        missing.append(
+                            {"kind": kind, "id": ref, "reason": "MODEL_CONNECTION_MISSING"}
+                        )
+                        continue
+                    try:
+                        model_connection = self.repository.get_model_connection(
+                            identity, connection_id
+                        )
+                    except DomainError as error:
+                        if error.code != "RESOURCE_NOT_FOUND":
+                            raise
+                        missing.append(
+                            {
+                                "kind": "model_connection",
+                                "id": connection_id,
+                                "reason": "CONNECTION_MISSING",
+                            }
+                        )
+                        continue
+                    if model_connection.status.value != "ACTIVE":
+                        missing.append(
+                            {
+                                "kind": "model_connection",
+                                "id": connection_id,
+                                "reason": "CONNECTION_DISABLED",
+                            }
+                        )
+                        continue
+                    try:
+                        catalog_item = self.repository.get_model_catalog_item(
+                            identity, connection_id, catalog_model_id
+                        )
+                    except DomainError as error:
+                        if error.code != "RESOURCE_NOT_FOUND":
+                            raise
+                        missing.append(
+                            {
+                                "kind": "model_catalog_item",
+                                "id": catalog_model_id,
+                                "reason": "MODEL_MISSING",
+                            }
+                        )
+                        continue
+                    if catalog_item.status.value != "ACTIVE":
+                        missing.append(
+                            {
+                                "kind": "model_catalog_item",
+                                "id": catalog_model_id,
+                                "reason": "MODEL_DISABLED",
+                            }
+                        )
         if missing:
             raise DomainError(
                 "DEPENDENCY_VALIDATION_ERROR",

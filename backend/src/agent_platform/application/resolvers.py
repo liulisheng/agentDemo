@@ -20,6 +20,7 @@ from agent_platform.domain.catalog import (
 from agent_platform.domain.common import DomainError
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.mcp import McpProfileStatus, McpRiskLevel, McpServerProfile
+from agent_platform.domain.model_routes import ModelRouteSnapshot
 from agent_platform.domain.observability import (
     HubResourceSnapshot,
     RunSnapshot,
@@ -34,9 +35,12 @@ from agent_platform.domain.resource_center import (
     TenantResourceImport,
 )
 from agent_platform.ports.mcp import McpRepository
+from agent_platform.ports.model_provider import ModelAuthorizationProvider
 from agent_platform.ports.resource_center import ResourceCenterRepository
 from agent_platform.ports.runtime import RuntimeMcpServer, RuntimeSkillFile, RuntimeToolDefinition
 from agent_platform.ports.storage import ObjectStore, ObjectStoreError
+
+_CURRENT_MODEL_ROUTE = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,10 +214,12 @@ class AgentResolver:
         resource_center_repository: ResourceCenterRepository | None = None,
         object_store: ObjectStore | None = None,
         mcp_repository: McpRepository | None = None,
+        model_authorization_provider: ModelAuthorizationProvider | None = None,
     ) -> None:
         self.catalog = catalog
         self.object_store = object_store
         self.mcp_repository = mcp_repository
+        self.model_authorization_provider = model_authorization_provider
         self.hub = (
             HubResourceResolver(resource_center_repository)
             if resource_center_repository is not None
@@ -234,7 +240,154 @@ class AgentResolver:
             raise DomainError("DEPENDENCY_VALIDATION_ERROR", "Hub Package 内容格式非法")
         return content
 
-    def resolve(self, identity: IdentityContext, deployment: Deployment) -> ResolvedAgent:
+    def _resolve_model_route_snapshot(
+        self, identity: IdentityContext, route_id: str | None
+    ) -> ModelRouteSnapshot | None:
+        """读取一次 Run 当前可用的模型连接，并固定非敏感执行参数。"""
+
+        if route_id is None:
+            return None
+        repository = self.catalog.repository
+        route = repository.get_model_route(identity, route_id)
+        if route.status != "ACTIVE":
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "模型路由已停用，不能创建新的 Run",
+                {"model_route_id": route_id},
+            )
+        profile = route.profile
+        if profile.connection_id is None or profile.catalog_model_id is None:
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "模型路由缺少连接或目录模型引用",
+                {"model_route_id": route_id},
+            )
+        try:
+            connection = repository.get_model_connection(identity, profile.connection_id)
+            model = repository.get_model_catalog_item(
+                identity, profile.connection_id, profile.catalog_model_id
+            )
+        except DomainError as error:
+            if error.code != "RESOURCE_NOT_FOUND":
+                raise
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "模型路由引用的连接或目录模型已不存在",
+                {"model_route_id": route_id},
+            ) from error
+        if connection.tenant_id != identity.tenant_id or model.tenant_id != identity.tenant_id:
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "模型路由连接或目录模型不属于当前租户",
+                {"model_route_id": route_id},
+            )
+        if connection.status.value != "ACTIVE" or model.status.value != "ACTIVE":
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "模型路由连接或目录模型已停用",
+                {"model_route_id": route_id},
+            )
+        self._require_model_authorization(identity, route, connection, model)
+        return ModelRouteSnapshot(
+            tenant_id=identity.tenant_id,
+            route_id=route.route_id,
+            route_version=route.route_version,
+            route_alias=route.alias,
+            connection_id=connection.connection_id,
+            connection_version=connection.version,
+            provider_kind=connection.provider_kind,
+            model_id=model.model_id,
+            protocol=connection.protocol,
+            endpoint=connection.endpoint,
+            secret_ref=connection.secret_ref,
+            parameters=profile.parameters,
+            pricing_snapshot_ref=profile.pricing_snapshot_ref,
+        )
+
+    def _require_model_authorization(
+        self,
+        identity: IdentityContext,
+        route: object,
+        connection: object,
+        model: object,
+        *,
+        authorization_identity: IdentityContext | None = None,
+    ) -> None:
+        """在 Run 出站前用当前身份检查路由、连接和模型仍可用。"""
+
+        if getattr(route, "status", None) != "ACTIVE":
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "模型路由已停用，不能调用供应商",
+                {"model_route_id": getattr(route, "route_id", None)},
+            )
+        provider = self.model_authorization_provider
+        principal = authorization_identity or identity
+        if provider is not None and not provider.authorize(principal, connection, model):
+            raise DomainError(
+                "AUTHORIZATION_DENIED",
+                "当前身份未获得该模型路由的调用授权",
+                {"model_route_id": getattr(route, "route_id", None)},
+            )
+
+    def _reauthorize_pinned_model_route(
+        self,
+        identity: IdentityContext,
+        snapshot: ModelRouteSnapshot,
+        *,
+        authorization_identity: IdentityContext | None = None,
+    ) -> None:
+        """复核排队快照的当前授权，同时继续执行快照中的原始版本和参数。"""
+
+        if snapshot.tenant_id != identity.tenant_id:
+            raise DomainError(
+                "AUTHORIZATION_DENIED",
+                "模型路由快照不属于当前租户",
+                {"model_route_id": snapshot.route_id},
+            )
+        repository = self.catalog.repository
+        route = repository.get_model_route(identity, snapshot.route_id)
+        try:
+            connection = repository.get_model_connection(identity, snapshot.connection_id)
+            model = repository.get_model_catalog_item(
+                identity, snapshot.connection_id, snapshot.model_id
+            )
+        except DomainError as error:
+            if error.code != "RESOURCE_NOT_FOUND":
+                raise
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "Run 固定的模型连接或目录模型已不可用",
+                {"model_route_id": snapshot.route_id},
+            ) from error
+        if (
+            connection.tenant_id != identity.tenant_id
+            or model.tenant_id != identity.tenant_id
+            or model.connection_id != snapshot.connection_id
+            or connection.status.value != "ACTIVE"
+            or model.status.value != "ACTIVE"
+        ):
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "Run 固定的模型连接或目录模型已停用",
+                {"model_route_id": snapshot.route_id},
+            )
+        self._require_model_authorization(
+            identity,
+            route,
+            connection,
+            model,
+            authorization_identity=authorization_identity,
+        )
+
+    def resolve(
+        self,
+        identity: IdentityContext,
+        deployment: Deployment,
+        *,
+        model_route_snapshot_override: ModelRouteSnapshot | None | object = _CURRENT_MODEL_ROUTE,
+        model_authorization_identity: IdentityContext | None = None,
+    ) -> ResolvedAgent:
         version = deployment.employee_version
         profile = self.catalog.repository.get_profile_version(
             identity, version.execution_profile_id, version.execution_profile_version
@@ -634,6 +787,26 @@ class AgentResolver:
         unique_refs: dict[tuple[str, int, str], HubResourceSnapshot] = {}
         for reference in source_refs:
             unique_refs[(reference.hub_resource_id, reference.hub_version, reference.mode)] = reference
+        model_route_id = version.model_route_id or profile.model_route_id
+        if model_route_snapshot_override is _CURRENT_MODEL_ROUTE:
+            model_route_snapshot = self._resolve_model_route_snapshot(identity, model_route_id)
+        else:
+            model_route_snapshot = model_route_snapshot_override
+            if model_route_snapshot is not None and (
+                not isinstance(model_route_snapshot, ModelRouteSnapshot)
+                or model_route_snapshot.route_id != model_route_id
+            ):
+                raise DomainError(
+                    "DEPENDENCY_VALIDATION_ERROR",
+                    "RunSnapshot 模型路由与员工固定版本不一致",
+                    {"model_route_id": model_route_id},
+                )
+            if model_route_snapshot is not None:
+                self._reauthorize_pinned_model_route(
+                    identity,
+                    model_route_snapshot,
+                    authorization_identity=model_authorization_identity,
+                )
         snapshot = RunSnapshot(
             employee_id=version.employee_id,
             employee_version=version.version,
@@ -643,7 +816,8 @@ class AgentResolver:
             skill_version_refs=tuple(version.skill_version_refs),
             tool_version_refs=tuple(resolved_tool_refs),
             execution_profile_version=version.execution_profile_version,
-            model_route_id=version.model_route_id or profile.model_route_id,
+            model_route_id=model_route_id,
+            model_route_snapshot=model_route_snapshot,
             hub_resource_refs=tuple(unique_refs.values()),
             skill_file_packages=tuple(skill_file_packages),
         )
@@ -659,7 +833,11 @@ class AgentResolver:
         )
 
     def resolve_snapshot(
-        self, identity: IdentityContext, snapshot: RunSnapshot
+        self,
+        identity: IdentityContext,
+        snapshot: RunSnapshot,
+        *,
+        authorization_identity: IdentityContext | None = None,
     ) -> ResolvedAgent:
         """按 Run 固定的员工版本重建执行上下文，并拒绝资源引用漂移。"""
 
@@ -678,7 +856,12 @@ class AgentResolver:
             employee_id=version.employee_id,
             employee_version=version,
         )
-        resolved = self.resolve(identity, pinned_deployment)
+        resolved = self.resolve(
+            identity,
+            pinned_deployment,
+            model_route_snapshot_override=snapshot.model_route_snapshot,
+            model_authorization_identity=authorization_identity,
+        )
         if resolved.snapshot != snapshot:
             raise DomainError(
                 "DEPENDENCY_VALIDATION_ERROR",

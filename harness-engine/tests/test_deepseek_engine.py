@@ -560,3 +560,83 @@ def test_deepseek_sdk_process_receives_only_model_and_run_mcp_environment(
     assert child_environment["HARNESS_MCP_TEMP_TOKEN"] == "run-mcp-secret"
     assert "database-secret" not in repr(child_environment)
     engine.close()
+
+
+def test_deepseek_for_run_request_uses_pinned_provider_config_and_env_credential(
+    monkeypatch, tmp_path
+):
+    from harness_engine import core
+
+    assert hasattr(core, "EngineModelConfig"), "EngineModelConfig is missing"
+    assert "model_config" in EngineRequest.__dataclass_fields__, "EngineRequest must carry ModelRoute config"
+    FakeHarness.instances.clear()
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "deepseek_harness",
+        SimpleNamespace(DeepSeekHarness=FakeHarness),
+    )
+    employee_context = EmployeeContext(
+        employee_id="employee-model-config",
+        employee_version=1,
+        system_prompt="只验证模型连接。",
+    )
+    model_config = core.EngineModelConfig(
+        tenant_id="tenant-a",
+        route_id="route-a",
+        route_version=2,
+        connection_id="connection-a",
+        connection_version=4,
+        provider_kind="openai-compatible",
+        model_id="local-model-a",
+        protocol="openai-chat-completions",
+        endpoint="http://host.docker.internal:63072/v1",
+        parameters={"temperature": 0.2},
+    )
+    request = EngineRequest(
+        prompt="只回复 READY",
+        session_id="session-model-config",
+        harness_home_ref="harness-session:" + "a" * 64,
+        employee_context=employee_context,
+        model_config=model_config,
+    )
+    local_config_path = tmp_path / "legacy-provider.json"
+    local_config_path.write_text(
+        json.dumps(
+            {
+                "provider": "legacy-local-provider",
+                "model": "legacy-model",
+                "base_url": "http://legacy.invalid/v1",
+                "api_key": "legacy-local-config-key",
+                "api": "openai-completions",
+            }
+        ),
+        encoding="utf-8",
+    )
+    engine = DeepSeekHarnessEngine.for_run_request(
+        request,
+        harness_state_root=tmp_path,
+        profile="sdk-minimal",
+        env={"AGENT_PLATFORM_MODEL_API_KEY": "provider-key-test"},
+        local_config=local_config_path,
+    )
+
+    engine.start()
+    result = engine.run(request)
+    harness = FakeHarness.instances[-1]
+    patch_text = "\n".join(
+        Path(path).read_text(encoding="utf-8")
+        for path in harness.kwargs.get("patches", ())
+    )
+    child_environment = dict(harness.kwargs["env"])
+    engine.close()
+
+    assert result.text == "sdk: 只回复 READY"
+    assert harness.kwargs["provider"] == "openai-compatible"
+    assert harness.kwargs["model"] == "local-model-a"
+    assert child_environment["AGENT_PLATFORM_MODEL_API_KEY"] == "provider-key-test"
+    assert "legacy-local-config-key" not in child_environment.values()
+    assert "AGENT_PLATFORM_MODEL_API_KEY" not in harness.kwargs["env"]
+    assert "host.docker.internal:63072/v1" in patch_text
+    assert "local-model-a" in patch_text
+    assert "temperature" in patch_text
+    assert "provider-key-test" not in patch_text

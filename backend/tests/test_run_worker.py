@@ -247,6 +247,25 @@ def test_run_worker_fences_a_lost_lease_and_requests_runtime_cancellation() -> N
     assert repository.run.status is RuntimeStatus.UNKNOWN
 
 
+def test_run_worker_does_not_log_raw_runtime_exception(caplog) -> None:
+    repository = _Repository()
+
+    class FailingControlPlane:
+        repository = None
+
+        def execute_claimed_run(self, *_args, **_kwargs):
+            raise RuntimeError("upstream included sensitive-model-credential")
+
+    worker = _worker(repository, _ObjectStore(), FailingControlPlane())
+
+    with caplog.at_level("ERROR"):
+        processed = asyncio.run(worker.run_once())
+
+    assert processed
+    assert repository.run.status is RuntimeStatus.UNKNOWN
+    assert "sensitive-model-credential" not in caplog.text
+
+
 def test_worker_entrypoint_rejects_fake_mode(monkeypatch) -> None:
     from agent_platform.workers.run_worker import main
 

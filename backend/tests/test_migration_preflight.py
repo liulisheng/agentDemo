@@ -70,7 +70,7 @@ def test_repository_migration_catalog_plans_forward_migrations_after_v003() -> N
     )
 
     assert result.action is PreflightAction.APPLY_MIGRATIONS
-    assert result.migrations_to_apply == ("V004", "V005", "V006", "V007")
+    assert result.migrations_to_apply == ("V004", "V005", "V006", "V007", "V008")
 
 
 def test_complete_v003_marker_without_checksum_requires_forward_v004() -> None:
@@ -396,6 +396,54 @@ def test_v006_database_plans_v007_session_runtime_lease_migration() -> None:
 
     assert result.action is PreflightAction.APPLY_MIGRATIONS
     assert result.migrations_to_apply == ("V007",)
+
+
+def test_partial_v008_model_management_schema_blocks_migration() -> None:
+    from agent_platform.infrastructure.migrations import (
+        V001_SENTINEL_OBJECTS,
+        V002_SENTINEL_OBJECTS,
+        V004_SENTINEL_OBJECTS,
+        V005_SENTINEL_OBJECTS,
+        V005_SKILL_COLUMNS,
+        V006_APPROVAL_COLUMNS,
+        V006_RUN_COLUMNS,
+        V006_SENTINEL_OBJECTS,
+        V006_TOOL_COLUMNS,
+        V007_LEASE_COLUMNS,
+        V007_SENTINEL_OBJECTS,
+    )
+
+    checksums = {version: f"v{version}" for version in range(1, 9)}
+    result = MigrationPreflight(checksums).assess(
+        MigrationBaseline(
+            schema_version=7,
+            applied_checksums={version: checksums[version] for version in range(1, 8)},
+            schema_objects=(
+                V001_SENTINEL_OBJECTS
+                | V002_SENTINEL_OBJECTS
+                | V003_OBJECTS
+                | V004_SENTINEL_OBJECTS
+                | V005_SENTINEL_OBJECTS
+                | V006_SENTINEL_OBJECTS
+                | V007_SENTINEL_OBJECTS
+                | {"model_connections"}
+            ),
+            schema_columns={
+                "sessions": frozenset({"last_message_sequence"}),
+                "skill_versions": V005_SKILL_COLUMNS,
+                "tool_versions": V006_TOOL_COLUMNS,
+                "tool_approval_requests": V006_APPROVAL_COLUMNS,
+                "runs": V006_RUN_COLUMNS,
+                "session_runtime_leases": V007_LEASE_COLUMNS,
+                "model_routes": frozenset({"model_connection_id"}),
+            },
+            checksum_history_available=True,
+            introspection_available=True,
+        )
+    )
+
+    assert result.action is PreflightAction.BLOCK_PARTIAL_MIGRATION
+    assert result.errors[0].startswith("partial_v008_schema:")
 
 
 def test_partial_v004_objects_block_next_migration() -> None:

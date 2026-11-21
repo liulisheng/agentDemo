@@ -106,11 +106,56 @@ class RunCreateRequest(TenantAwareRequest):
     idempotency_key: str | None = None
 
 class ModelRouteCreateRequest(TenantAwareRequest):
-    alias: str
-    model_name: str
-    provider: str = "fake"
-    endpoint: str = "fake://model"
+    alias: str = Field(min_length=1, max_length=128)
+    model_name: str | None = Field(default=None, min_length=1, max_length=255)
+    provider: str = Field(default="fake", min_length=1, max_length=64)
+    endpoint: str = Field(default="fake://model", min_length=1, max_length=1024)
     secret_id: str | None = None
+    connection_id: str | None = Field(default=None, min_length=1, max_length=64)
+    catalog_model_id: str | None = Field(default=None, min_length=1, max_length=255)
+    parameters: dict[str, object] = Field(default_factory=dict)
+    pricing_snapshot_ref: str | None = None
+
+
+class ModelRouteUpdateRequest(TenantAwareRequest):
+    alias: str | None = Field(default=None, min_length=1, max_length=128)
+    connection_id: str | None = Field(default=None, min_length=1, max_length=64)
+    catalog_model_id: str | None = Field(default=None, min_length=1, max_length=255)
+    model_name: str | None = Field(default=None, min_length=1, max_length=255)
+    parameters: dict[str, object] | None = None
+    pricing_snapshot_ref: str | None = None
+
+
+class ModelConnectionCreateRequest(TenantAwareRequest):
+    name: str = Field(min_length=1, max_length=128)
+    provider_kind: str = "openai-compatible"
+    protocol: str = "openai-chat-completions"
+    endpoint: str = Field(min_length=1, max_length=1024)
+    secret_id: str | None = Field(default=None, min_length=1, max_length=255)
+    catalog_mode: str = "REMOTE"
+
+
+class ModelConnectionUpdateRequest(TenantAwareRequest):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    provider_kind: str | None = Field(default=None, min_length=1, max_length=64)
+    protocol: str | None = Field(default=None, min_length=1, max_length=64)
+    endpoint: str | None = Field(default=None, min_length=1, max_length=1024)
+    secret_id: str | None = Field(default=None, min_length=1, max_length=255)
+    catalog_mode: str | None = None
+    status: str | None = None
+
+
+class ModelCatalogItemCreateRequest(TenantAwareRequest):
+    model_id: str = Field(min_length=1, max_length=255)
+    display_name: str = Field(min_length=1, max_length=255)
+    capabilities: dict[str, object] = Field(default_factory=dict)
+    context_window: int | None = Field(default=None, ge=1)
+
+
+class ModelTestCreateRequest(TenantAwareRequest):
+    confirmed_cost: bool = Field(
+        description="管理员已确认本次会向所选模型发送真实测试请求并可能产生费用"
+    )
 
 
 class ConversationCreateRequest(TenantAwareRequest):

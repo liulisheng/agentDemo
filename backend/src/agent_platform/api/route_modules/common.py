@@ -12,6 +12,7 @@ from agent_platform.api.dependencies import (
     conversation_service,
     conversation_turn_service,
     current_identity,
+    model_management_service,
     model_route_service,
     resource_center_service,
     skill_file_package_service,
@@ -22,6 +23,7 @@ from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversation_turns import ConversationTurnService
 from agent_platform.application.conversations import ConversationService
+from agent_platform.application.model_management import ModelManagementService
 from agent_platform.application.model_routes import ModelRouteService
 from agent_platform.application.resource_center import ResourceCenterService
 from agent_platform.application.skill_files import SkillFilePackageService
@@ -37,6 +39,7 @@ ConversationTurns = Annotated[
     ConversationTurnService, Depends(conversation_turn_service)
 ]
 ModelRoutes = Annotated[ModelRouteService, Depends(model_route_service)]
+ModelManagement = Annotated[ModelManagementService, Depends(model_management_service)]
 ResourceCenter = Annotated[ResourceCenterService, Depends(resource_center_service)]
 SkillFiles = Annotated[SkillFilePackageService, Depends(skill_file_package_service)]
 ToolApprovals = Annotated[ToolApprovalService, Depends(tool_approval_service)]

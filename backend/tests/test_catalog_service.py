@@ -110,3 +110,75 @@ def test_publish_validates_model_route_workspace_and_sandbox_references() -> Non
         sandbox_profile_id="sandbox-1",
     )
     assert service.publish_employee_version(identity, employee.employee_id, version.version).status is LifecycleStatus.PUBLISHED
+
+
+def test_publish_rejects_a_disabled_model_route() -> None:
+    service, identity = _service()
+    repository = service.repository
+    route = ModelRoute(
+        "route-disabled",
+        identity.tenant_id,
+        "disabled-route",
+        ModelProfile("model-disabled", identity.tenant_id, "model-a", "fake", "fake://model"),
+    )
+    repository.save_model_route(identity, route)
+    route = repository.get_model_route(identity, route.route_id)
+    profile = service.create_profile(
+        identity, "fake", "model-a", model_route_id=route.route_id
+    )
+    skill = service.create_skill(identity, "校验 Skill", SkillType.INSTRUCTION, "回答", [])
+    service.publish_skill(identity, skill.skill_id)
+    employee = service.create_employee(identity, "绑定模型助手", "助手", "模型路由发布校验")
+    version = service.create_employee_version(
+        identity,
+        employee.employee_id,
+        "回答问题",
+        [skill.skill_id],
+        [],
+        execution_profile_id=profile.profile_id,
+        model_route_id=route.route_id,
+    )
+    repository.save_model_route(
+        identity,
+        ModelRoute(
+            route.route_id,
+            route.tenant_id,
+            route.alias,
+            route.profile,
+            status="DISABLED",
+            route_version=route.route_version + 1,
+        ),
+    )
+
+    with pytest.raises(DomainError) as disabled:
+        service.publish_employee_version(identity, employee.employee_id, version.version)
+
+    assert disabled.value.code == "DEPENDENCY_VALIDATION_ERROR"
+    assert any(
+        missing.get("kind") == "model_route"
+        and missing.get("reason") == "ROUTE_DISABLED"
+        for missing in disabled.value.details["missing"]
+    )
+
+
+def test_publish_rejects_a_missing_model_route() -> None:
+    service, identity = _service()
+    profile = service.create_profile(identity, "fake", "model-a")
+    skill = service.create_skill(identity, "缺失路由 Skill", SkillType.INSTRUCTION, "回答", [])
+    service.publish_skill(identity, skill.skill_id)
+    employee = service.create_employee(identity, "缺失模型助手", "助手", "模型路由缺失校验")
+    version = service.create_employee_version(
+        identity,
+        employee.employee_id,
+        "回答问题",
+        [skill.skill_id],
+        [],
+        execution_profile_id=profile.profile_id,
+        model_route_id="missing-route",
+    )
+
+    with pytest.raises(DomainError) as missing:
+        service.publish_employee_version(identity, employee.employee_id, version.version)
+
+    assert missing.value.code == "DEPENDENCY_VALIDATION_ERROR"
+    assert any(item["id"] == "missing-route" for item in missing.value.details["missing"])

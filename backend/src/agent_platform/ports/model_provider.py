@@ -6,7 +6,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from agent_platform.domain.model_routes import ModelCallUsage, ModelRoute
+from agent_platform.domain.identity import IdentityContext
+from agent_platform.domain.model_routes import (
+    ModelCallUsage,
+    ModelCatalogItem,
+    ModelConnection,
+    ModelRoute,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,4 +60,29 @@ class ModelProvider(Protocol):
     provider_name: str
 
     def complete(self, request: ModelRequest) -> ModelResponse:
+        ...
+
+
+class ModelCatalogProvider(Protocol):
+    """按连接发现或验证模型目录；不执行模型推理。"""
+
+    provider_kind: str
+
+    def list_models(
+        self, connection: ModelConnection, *, credential: str | None
+    ) -> tuple[ModelCatalogItem, ...]:
+        ...
+
+
+class ModelAuthorizationProvider(Protocol):
+    """根据当前平台身份判断该连接下的模型是否允许使用。"""
+
+    authorization_source: str
+
+    def authorize(
+        self,
+        identity: IdentityContext,
+        connection: ModelConnection,
+        model: ModelCatalogItem,
+    ) -> bool:
         ...

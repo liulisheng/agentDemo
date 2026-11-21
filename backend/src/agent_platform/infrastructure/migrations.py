@@ -95,6 +95,12 @@ V007_LEASE_COLUMNS = frozenset(
         "state",
     }
 )
+V008_SENTINEL_OBJECTS = frozenset(
+    {"model_connections", "model_catalog_items", "model_test_records"}
+)
+V008_MODEL_ROUTE_COLUMNS = frozenset(
+    {"model_connection_id", "catalog_model_id", "route_version"}
+)
 V001_SENTINEL_OBJECTS = frozenset(
     {"schema_version", "platforms", "tenants", "users", "sessions", "runs", "audit_events"}
 )
@@ -392,6 +398,7 @@ class MigrationPreflight:
                     | V005_SENTINEL_OBJECTS
                     | V006_SENTINEL_OBJECTS
                     | V007_SENTINEL_OBJECTS
+                    | V008_SENTINEL_OBJECTS
                 )
                 or baseline.schema_columns.get("skill_versions", frozenset()).intersection(
                     V005_SKILL_COLUMNS
@@ -408,6 +415,9 @@ class MigrationPreflight:
                 or baseline.schema_columns.get(
                     "session_runtime_leases", frozenset()
                 ).intersection(V007_LEASE_COLUMNS)
+                or baseline.schema_columns.get("model_routes", frozenset()).intersection(
+                    V008_MODEL_ROUTE_COLUMNS
+                )
             )
             if current is None and any_known_objects:
                 return MigrationPreflightResult(
@@ -592,6 +602,45 @@ class MigrationPreflight:
                 current,
                 warnings=tuple(warnings),
                 errors=("partial_v007_schema:" + ",".join(missing),),
+            )
+
+        found_v008_objects = baseline.schema_objects.intersection(V008_SENTINEL_OBJECTS)
+        model_route_columns = baseline.schema_columns.get("model_routes", frozenset())
+        found_v008_route_columns = model_route_columns.intersection(V008_MODEL_ROUTE_COLUMNS)
+        found_any_v008 = bool(found_v008_objects or found_v008_route_columns)
+        complete_v008 = (
+            found_v008_objects == V008_SENTINEL_OBJECTS
+            and found_v008_route_columns == V008_MODEL_ROUTE_COLUMNS
+        )
+        if found_any_v008 and not complete_v008:
+            missing = sorted(V008_SENTINEL_OBJECTS.difference(found_v008_objects))
+            missing.extend(
+                "model_routes." + column
+                for column in sorted(V008_MODEL_ROUTE_COLUMNS.difference(found_v008_route_columns))
+            )
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v008_schema:" + ",".join(missing),),
+            )
+        if complete_v008 and (current is None or current < 8):
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                errors=("v008_objects_present_without_schema_version",),
+            )
+        if current is not None and current >= 8 and not complete_v008:
+            missing = sorted(V008_SENTINEL_OBJECTS.difference(found_v008_objects))
+            missing.extend(
+                "model_routes." + column
+                for column in sorted(V008_MODEL_ROUTE_COLUMNS.difference(found_v008_route_columns))
+            )
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v008_schema:" + ",".join(missing),),
             )
 
         v003_present = found_v003_objects == V003_SENTINEL_OBJECTS

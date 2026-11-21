@@ -13,6 +13,7 @@ from agent_platform.domain.context import ContextSnapshot, ContextSource, Contex
 from agent_platform.domain.conversations import Message, MessageSource
 from agent_platform.domain.execution import RuntimeReference, RuntimeStatus, UsageRecord
 from agent_platform.domain.identity import IdentityContext
+from agent_platform.domain.model_routes import ModelRouteSnapshot
 from agent_platform.domain.observability import (
     HubResourceSnapshot,
     RunRecord,
@@ -63,6 +64,11 @@ def _snapshot_data(snapshot: RunSnapshot) -> dict[str, object]:
         "execution_profile_id": snapshot.execution_profile_id,
         "execution_profile_version": snapshot.execution_profile_version,
         "model_route_id": snapshot.model_route_id,
+        "model_route_snapshot": (
+            snapshot.model_route_snapshot.to_snapshot_dict()
+            if snapshot.model_route_snapshot is not None
+            else None
+        ),
         "hub_resource_refs": [
             {
                 "local_resource_type": item.local_resource_type,
@@ -1134,9 +1140,9 @@ class MySqlExecutionRepository:
                 cursor.execute(
                     "INSERT INTO usage_ledger "
                     "(platform_id, tenant_id, call_id, run_id, session_id, user_id, employee_id, model_route_id, "
-                    "input_tokens, output_tokens, total_tokens, cost_amount, currency, pricing_version, "
+                    "provider_request_id, input_tokens, output_tokens, total_tokens, cost_amount, currency, pricing_version, "
                     "usage_status, estimation_method) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
                         identity.platform_id,
                         identity.tenant_id,
@@ -1146,6 +1152,7 @@ class MySqlExecutionRepository:
                         run.submitted_by_user_id or identity.user_id,
                         run.snapshot.employee_id,
                         run.snapshot.model_route_id,
+                        usage.provider_request_id,
                         usage.input_tokens,
                         usage.output_tokens,
                         usage.total_tokens,
@@ -1328,7 +1335,7 @@ class MySqlExecutionRepository:
         with self._reader() as (_, cursor):
             cursor.execute(
                 "SELECT input_tokens, output_tokens, total_tokens, usage_status, estimation_method, "
-                "cost_amount, currency, pricing_version FROM usage_ledger "
+                "cost_amount, currency, pricing_version, provider_request_id FROM usage_ledger "
                 "WHERE platform_id=%s AND tenant_id=%s AND run_id=%s ORDER BY call_id LIMIT 1",
                 (identity.platform_id, identity.tenant_id, run_id),
             )
@@ -1345,6 +1352,7 @@ class MySqlExecutionRepository:
             cost_amount=float(row[5]),
             currency=str(row[6]),
             pricing_version=str(row[7]),
+            provider_request_id=str(row[8]) if row[8] is not None else None,
         )
 
     def list_usage_records(self, identity: IdentityContext, run_id: str, *, limit: int = 100) -> tuple[ModelCallRecord, ...]:
@@ -1508,10 +1516,13 @@ class MySqlExecutionRepository:
     def get_run(self, identity: IdentityContext, run_id: str) -> RunRecord:
         with self._reader() as (_, cursor):
             cursor.execute(
-                "SELECT run_id, session_id, platform_id, tenant_id, trace_id, request_digest, state, "
-                "error_code, snapshot_json, context_snapshot_json, runtime_session_ref, runtime_result_ref, result_ref, "
-                "submitted_by_user_id "
-                "FROM runs WHERE platform_id=%s AND tenant_id=%s AND run_id=%s",
+                "SELECT runs.run_id, runs.session_id, runs.platform_id, runs.tenant_id, runs.trace_id, "
+                "runs.request_digest, runs.state, runs.error_code, runs.snapshot_json, "
+                "runs.context_snapshot_json, runs.runtime_session_ref, runs.runtime_result_ref, "
+                "runs.result_ref, runs.submitted_by_user_id, sessions.engine_name "
+                "FROM runs JOIN sessions ON sessions.platform_id=runs.platform_id "
+                "AND sessions.tenant_id=runs.tenant_id AND sessions.session_id=runs.session_id "
+                "WHERE runs.platform_id=%s AND runs.tenant_id=%s AND runs.run_id=%s",
                 (identity.platform_id, identity.tenant_id, run_id),
             )
             row = cursor.fetchone()
@@ -1529,6 +1540,11 @@ class MySqlExecutionRepository:
             execution_profile_id=str(snapshot_data["execution_profile_id"]),
             execution_profile_version=int(snapshot_data["execution_profile_version"]),
             model_route_id=str(snapshot_data["model_route_id"]) if snapshot_data.get("model_route_id") else None,
+            model_route_snapshot=(
+                ModelRouteSnapshot.from_snapshot_dict(snapshot_data["model_route_snapshot"])
+                if isinstance(snapshot_data.get("model_route_snapshot"), dict)
+                else None
+            ),
             hub_resource_refs=tuple(
                 HubResourceSnapshot(
                     local_resource_type=str(item["local_resource_type"]),
@@ -1571,7 +1587,11 @@ class MySqlExecutionRepository:
         context_snapshot = self._load_context(context_value) if context_value is not None else None
         runtime_session_ref = str(row[10]) if row[10] is not None else None
         runtime_reference = (
-            RuntimeReference("fake", runtime_session_ref, str(row[11]) if row[11] else None)
+            RuntimeReference(
+                str(row[14] or "fake"),
+                runtime_session_ref,
+                str(row[11]) if row[11] else None,
+            )
             if runtime_session_ref
             else None
         )

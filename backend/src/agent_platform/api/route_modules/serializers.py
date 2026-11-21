@@ -200,6 +200,7 @@ def _timeline_response(value: RunTimeline) -> dict[str, object]:
             "cost_amount": value.usage.cost_amount,
             "currency": value.usage.currency,
             "pricing_version": value.usage.pricing_version,
+            "provider_request_id": value.usage.provider_request_id,
         },
         "runtime_reference": (
             {

@@ -25,6 +25,7 @@ from ..core import (
     CancelStatus,
     EmployeeContext,
     EngineCapabilities,
+    EngineModelConfig,
     EngineRequest,
     EngineResult,
     EngineToolDefinition,
@@ -150,23 +151,67 @@ def _load_local_config(path: Path | None) -> dict[str, Any]:
     return value
 
 
-def _write_provider_patch(config_root: Path, settings: Mapping[str, str]) -> Path | None:
+def _usage_mapping(raw: object) -> Mapping[str, object] | None:
+    """只向平台暴露有效的 Token 计数，丢弃供应商对象和未知字段。"""
+
+    names = (
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    )
+    values: dict[str, object] = {}
+    for name in names:
+        value = raw.get(name) if isinstance(raw, Mapping) else getattr(raw, name, None)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            values[name] = value
+    if not any(name in values for name in ("input_tokens", "prompt_tokens")):
+        return None
+    if not any(name in values for name in ("output_tokens", "completion_tokens")):
+        return None
+    return values
+
+
+def _provider_request_id(result: object) -> str | None:
+    """提取可公开审计的上游请求标识，不保留原始响应对象。"""
+
+    for name in ("provider_request_id", "request_id", "id"):
+        value = getattr(result, name, None)
+        if value is not None and str(value).strip():
+            return str(value).strip()[:255]
+    return None
+
+
+def _write_provider_patch(
+    config_root: Path,
+    settings: Mapping[str, Any],
+    *,
+    api_key_available: bool = False,
+) -> Path | None:
     """Create a profile patch for a configured non-DeepSeek provider."""
 
     base_url = settings["base_url"]
     api_key = settings["api_key"]
     provider = settings["provider"]
-    if not base_url and not api_key:
+    if not base_url and not api_key and not api_key_available:
         return None
-    if not base_url or not api_key:
+    if not base_url or (not api_key and not api_key_available):
         raise DeepSeekConfigurationError(
-            "custom provider config requires both base_url and api_key"
+            "custom provider config requires endpoint and configured credential"
         )
     if provider == DEFAULT_PROVIDER:
         return None
     api = settings["api"]
     if api not in SUPPORTED_CUSTOM_APIS:
         raise DeepSeekConfigurationError(f"unsupported provider API protocol: {api}")
+
+    parameters = settings.get("parameters", {})
+    parameter_json = (
+        json.dumps(dict(parameters), ensure_ascii=False)
+        if isinstance(parameters, Mapping) and parameters
+        else None
+    )
 
     if settings["profile"] == "sdk-minimal":
         rows = [
@@ -181,6 +226,7 @@ def _write_provider_patch(config_root: Path, settings: Mapping[str, str]) -> Pat
             f"          baseURL: {_yaml_scalar(base_url)}",
             "          models:",
             f"            - id: {_yaml_scalar(settings['model'])}",
+            *([f"              params: {parameter_json}"] if parameter_json else []),
             "",
         ]
     else:
@@ -194,6 +240,7 @@ def _write_provider_patch(config_root: Path, settings: Mapping[str, str]) -> Pat
             f"        baseURL: {_yaml_scalar(base_url)}",
             "        models:",
             f"          - id: {_yaml_scalar(settings['model'])}",
+            *([f"            params: {parameter_json}"] if parameter_json else []),
             "",
         ]
 
@@ -351,6 +398,7 @@ class DeepSeekHarnessEngine(LifecycleEngine):
         env: Mapping[str, str] | None = None,
         mcp_proxy_launches: Sequence[McpProxyLaunch] = (),
         local_config: str | Path | None = None,
+        model_config: EngineModelConfig | None = None,
         initialize_timeout_seconds: float | None = None,
         request_timeout_seconds: float | None = None,
         shutdown_timeout_seconds: float | None = None,
@@ -363,6 +411,7 @@ class DeepSeekHarnessEngine(LifecycleEngine):
             raise DeepSeekConfigurationError("Run 缺少受控 Harness Session Home 引用")
         if request.employee_context is None:
             raise DeepSeekConfigurationError("Run 缺少固定 EmployeeContext")
+        pinned_model_config = model_config or request.model_config
         root = Path(harness_state_root).expanduser().resolve()
         sessions_root = root / "harness-sessions"
         sessions_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -374,8 +423,13 @@ class DeepSeekHarnessEngine(LifecycleEngine):
             dsh_home=session_home,
             cwd=session_home,
             profile=profile,
-            provider=provider,
-            model=model,
+            provider=(
+                pinned_model_config.provider_kind
+                if pinned_model_config is not None
+                else provider
+            ),
+            model=(pinned_model_config.model_id if pinned_model_config is not None else model),
+            max_tokens=request.max_tokens,
             mcp_tools=tuple(
                 item.name
                 for item in request.tool_definitions
@@ -386,6 +440,7 @@ class DeepSeekHarnessEngine(LifecycleEngine):
             env=env,
             mcp_proxy_launches=mcp_proxy_launches,
             local_config=local_config,
+            model_config=pinned_model_config,
             initialize_timeout_seconds=initialize_timeout_seconds,
             request_timeout_seconds=request_timeout_seconds,
             shutdown_timeout_seconds=shutdown_timeout_seconds,
@@ -422,6 +477,7 @@ class DeepSeekHarnessEngine(LifecycleEngine):
         mcp_proxy_launches: Sequence[McpProxyLaunch] = (),
         env: Mapping[str, str] | None = None,
         local_config: str | Path | None = None,
+        model_config: EngineModelConfig | None = None,
         initialize_timeout_seconds: float | None = None,
         request_timeout_seconds: float | None = None,
         shutdown_timeout_seconds: float | None = None,
@@ -440,12 +496,32 @@ class DeepSeekHarnessEngine(LifecycleEngine):
         resolved_profile = str(
             profile or local.get("profile") or ("sdk" if local else DEFAULT_PROFILE)
         )
-        resolved_base_url = str(local.get("base_url") or "").strip()
-        resolved_api_key = str(local.get("api_key") or "").strip()
+        resolved_base_url = (
+            model_config.endpoint
+            if model_config is not None
+            else str(local.get("base_url") or "").strip()
+        )
+        # Run 有固定模型快照时，凭据只能来自 Worker 按 SecretRef 注入的环境，
+        # 避免兼容旧版本地配置中的 API Key 覆盖租户连接凭据。
+        resolved_api_key = (
+            "" if model_config is not None else str(local.get("api_key") or "").strip()
+        )
         resolved_api_key_env = str(
-            local.get("api_key_env") or "LOCAL_OPENAI_API_KEY"
+            "AGENT_PLATFORM_MODEL_API_KEY"
+            if model_config is not None
+            else local.get("api_key_env") or "LOCAL_OPENAI_API_KEY"
         ).strip()
-        resolved_api = str(local.get("api") or "openai-completions").strip()
+        protocol_aliases = {
+            "openai-chat-completions": "openai-completions",
+            "openai-completions": "openai-completions",
+            "openai-responses": "openai-responses",
+            "anthropic-messages": "anthropic-messages",
+        }
+        resolved_api = (
+            protocol_aliases.get(model_config.protocol, model_config.protocol)
+            if model_config is not None
+            else str(local.get("api") or "openai-completions").strip()
+        )
 
         if dsh_home is None:
             configured_home = os.environ.get("DSH_HOME", "").strip()
@@ -466,6 +542,7 @@ class DeepSeekHarnessEngine(LifecycleEngine):
             "api_key": resolved_api_key,
             "api_key_env": resolved_api_key_env,
             "api": resolved_api,
+            "parameters": dict(model_config.parameters) if model_config is not None else {},
         }
         resolved_env = dict(env or {})
         inherited_system_prompt = resolved_env.pop("DSH_SYSTEM_PROMPT", "")
@@ -557,7 +634,11 @@ class DeepSeekHarnessEngine(LifecycleEngine):
             prefix="agent-harness-run-config-"
         )
         run_config_root = Path(self._run_config_directory.name)
-        provider_patch = _write_provider_patch(run_config_root, settings)
+        provider_patch = _write_provider_patch(
+            run_config_root,
+            settings,
+            api_key_available=bool(resolved_env.get(resolved_api_key_env)),
+        )
         mcp_patches: list[Path] = []
         mcp_patch = _write_mcp_patch(run_config_root, configured_tools)
         if mcp_patch is not None:
@@ -595,7 +676,8 @@ class DeepSeekHarnessEngine(LifecycleEngine):
         if provider_patch is not None:
             existing_patches = tuple(harness_kwargs.get("patches", ()))
             harness_kwargs["patches"] = (*existing_patches, str(provider_patch))
-            resolved_env[resolved_api_key_env] = resolved_api_key
+            if resolved_api_key:
+                resolved_env[resolved_api_key_env] = resolved_api_key
         if mcp_patches:
             existing_patches = tuple(harness_kwargs.get("patches", ()))
             harness_kwargs["patches"] = (*existing_patches, *(str(item) for item in mcp_patches))
@@ -758,6 +840,8 @@ class DeepSeekHarnessEngine(LifecycleEngine):
             session=session_ref
             or SessionRef(session_id=session_id, engine_name="deepseek"),
             status=status,
+            usage=_usage_mapping(getattr(result, "usage", None)),
+            provider_request_id=_provider_request_id(result),
         )
 
     def cancel(self, session_id: str) -> CancelResult:

@@ -60,10 +60,11 @@ beforeEach(() => {
       sandbox_profile_id: null, sandbox_profile_version: null, approval_policy: 'none', status: 'PUBLISHED',
     }],
   }
-  responses['GET /api/v1/model-routes'] = {
+  responses['GET /api/v1/model-routes/selectable'] = {
     items: [{
       route_id: 'route-1', tenant_id: 'tenant-a', alias: '客服模型', status: 'ACTIVE',
-      profile: { model_name: 'model-x', provider: 'fake', endpoint: 'fake://model' },
+      authorization_source: 'platform',
+      profile: { model_name: 'model-x', catalog_model_id: 'model-x', provider: 'fake', endpoint: 'fake://model' },
     }],
   }
   responses['PUT /api/v1/digital-employees/employee-1/versions/3'] = {
@@ -139,6 +140,21 @@ test('version editor explains the system prompt scope beside its field', async (
   const systemPrompt = await screen.findByLabelText('系统指令')
   const promptGuidance = screen.getByText('定义员工每次处理请求时都遵守的角色、规则和边界。')
   expect(promptGuidance.closest('.ant-form-item')).toBe(systemPrompt.closest('.ant-form-item'))
+})
+
+test('employee model picker requests authorized routes and displays alias with model ID', async () => {
+  const user = userEvent.setup()
+  renderEditor()
+
+  expect(await screen.findByLabelText('系统指令')).toBeInTheDocument()
+  await waitFor(() => {
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => (
+      String(input) === '/api/v1/model-routes/selectable'
+    ))).toBe(true)
+  })
+  await user.click(screen.getByLabelText('ModelRoute'))
+  expect((await screen.findAllByText(/客服模型/)).length).toBeGreaterThan(0)
+  expect(screen.getAllByText(/model-x/).length).toBeGreaterThan(0)
 })
 
 test('version editor warns before an in-app navigation with unsaved changes', async () => {

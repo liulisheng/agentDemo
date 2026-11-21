@@ -11,6 +11,10 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from agent_platform.adapters.identity.fake import FakeAuthorizationProvider
+from agent_platform.adapters.model_authorization import PlatformModelAuthorizationProvider
+from agent_platform.adapters.model_catalog import OpenAICompatibleModelCatalogProvider
+from agent_platform.adapters.model_secrets import EnvironmentModelSecretProvider
 from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
 from agent_platform.adapters.secrets import EnvironmentSecretProvider
 from agent_platform.api.routes import router
@@ -18,7 +22,8 @@ from agent_platform.application.catalog_service import CatalogService, InMemoryC
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversation_turns import ConversationTurnService
 from agent_platform.application.conversations import ConversationService
-from agent_platform.application.model_routes import InMemoryModelRouteRepository, ModelRouteService
+from agent_platform.application.model_management import ModelManagementService
+from agent_platform.application.model_routes import ModelRouteService
 from agent_platform.application.resource_center import ResourceCenterService
 from agent_platform.application.skill_files import SkillFilePackageService
 from agent_platform.application.tool_approval import ToolApprovalService
@@ -39,6 +44,11 @@ from agent_platform.ports.catalog_repository import CatalogRepository
 from agent_platform.ports.conversation_repository import ConversationRepository
 from agent_platform.ports.execution_repository import ExecutionRepository
 from agent_platform.ports.mcp import McpRepository
+from agent_platform.ports.model_provider import (
+    ModelAuthorizationProvider,
+    ModelCatalogProvider,
+    SecretProvider,
+)
 from agent_platform.ports.resource_center import ResourceCenterRepository
 from agent_platform.ports.runtime import RuntimeAdapter, RuntimeRequest
 from agent_platform.ports.storage import LocalObjectStore, ObjectStore, SecretRef
@@ -53,6 +63,9 @@ def create_app(
     resource_center_repository: ResourceCenterRepository | None = None,
     object_store: ObjectStore | None = None,
     runtime_adapter: RuntimeAdapter | None = None,
+    model_authorization_provider: ModelAuthorizationProvider | None = None,
+    model_catalog_provider: ModelCatalogProvider | None = None,
+    model_secret_provider: SecretProvider | None = None,
     mode: str | None = None,
     lifecycle_resources: Sequence[object] = (),
 ) -> FastAPI:
@@ -86,20 +99,32 @@ def create_app(
 
     app = FastAPI(title="Agent Platform API", version="0.1.0", lifespan=lifespan)
     use_fake_gallery = resolved_mode == "fake" and catalog_repository is None
+    resolved_catalog_repository = (
+        catalog_repository if catalog_repository is not None else InMemoryCatalogRepository()
+    )
     catalog = CatalogService(
-        catalog_repository if catalog_repository is not None else InMemoryCatalogRepository(),
+        resolved_catalog_repository,
         resource_center_repository=resource_center_repository,
     )
     app.state.catalog_service = catalog
     app.state.use_fake_gallery = use_fake_gallery
+    resolved_model_authorization = (
+        model_authorization_provider or PlatformModelAuthorizationProvider()
+    )
+    resolved_model_catalog_provider = (
+        model_catalog_provider or OpenAICompatibleModelCatalogProvider()
+    )
+    resolved_model_secret_provider = model_secret_provider or EnvironmentModelSecretProvider()
+    resolved_runtime_adapter = runtime_adapter or FakeRuntimeAdapter()
     app.state.control_plane_service = ControlPlaneService(
         catalog,
-        runtime_adapter if runtime_adapter is not None else FakeRuntimeAdapter(),
+        resolved_runtime_adapter,
         persistence=execution_repository,
         object_store=object_store,
         resource_center_repository=resource_center_repository,
         mcp_repository=mcp_repository,
         conversation_repository=conversation_repository,
+        model_authorization_provider=resolved_model_authorization,
     )
     app.state.conversation_service = ConversationService(conversation_repository, object_store)
     app.state.conversation_turn_service = ConversationTurnService(
@@ -111,10 +136,18 @@ def create_app(
         if mcp_repository is not None and object_store is not None
         else None
     )
-    model_route_repository = (
-        catalog_repository if catalog_repository is not None else InMemoryModelRouteRepository()
-    )
+    model_route_repository = resolved_catalog_repository
     app.state.model_route_service = ModelRouteService(model_route_repository)
+    app.state.model_management_service = ModelManagementService(
+        resolved_catalog_repository,
+        app.state.model_route_service,
+        FakeAuthorizationProvider(),
+        resolved_model_authorization,
+        catalog_provider=resolved_model_catalog_provider,
+        secret_provider=resolved_model_secret_provider,
+        runtime_adapter=resolved_runtime_adapter,
+    )
+    app.state.model_test_executor = app.state.model_management_service.execute_test_record
     app.state.resource_center_service = (
         ResourceCenterService(catalog, resource_center_repository, object_store=object_store)
         if resource_center_repository is not None
@@ -300,10 +333,18 @@ def _build_runtime_adapter(runtime_engine: str, state_root: Path) -> RuntimeAdap
         "AGENT_PLATFORM_MCP_ALLOWED_WORKING_DIRECTORY_ROOTS"
     )
     secret_resolver = EnvironmentMcpSecretResolver()
+    model_secret_resolver = EnvironmentModelSecretProvider()
     directory_resolver = EnvironmentMcpWorkingDirectoryResolver()
 
     def create_engine(engine_request: EngineRequest, runtime_request: RuntimeRequest) -> object:
         mcp_servers = runtime_request.mcp_servers
+        model_environment: dict[str, str] = {}
+        model_snapshot = runtime_request.model_route_snapshot
+        if model_snapshot is not None and model_snapshot.secret_ref is not None:
+            # SecretRef 仅在 Worker 创建本次 Engine 时解析，不进入持久化快照或 EngineRequest。
+            model_environment["AGENT_PLATFORM_MODEL_API_KEY"] = model_secret_resolver.resolve(
+                model_snapshot.secret_ref
+            )
         proxy_launches = []
         for runtime_server in mcp_servers:
             server_profile = runtime_server.profile
@@ -343,6 +384,7 @@ def _build_runtime_adapter(runtime_engine: str, state_root: Path) -> RuntimeAdap
             profile=harness_profile,
             provider=provider,
             model=model,
+            env=model_environment,
             mcp_proxy_launches=tuple(proxy_launches),
             local_config=local_config,
         )

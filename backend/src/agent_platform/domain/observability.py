@@ -10,6 +10,7 @@ TraceId = str
 
 from .context import ContextSnapshot
 from .execution import RuntimeReference, RuntimeStatus, UsageRecord
+from .model_routes import ModelRouteSnapshot
 
 
 class SpanType(StrEnum):
@@ -94,8 +95,16 @@ class RunSnapshot:
     tool_version_refs: tuple[tuple[str, int], ...] = ()
     execution_profile_version: int = 1
     model_route_id: str | None = None
+    model_route_snapshot: ModelRouteSnapshot | None = None
     hub_resource_refs: tuple[HubResourceSnapshot, ...] = ()
     skill_file_packages: tuple[SkillFilePackageSnapshot, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            self.model_route_snapshot is not None
+            and self.model_route_id != self.model_route_snapshot.route_id
+        ):
+            raise ValueError("model_route_snapshot must match model_route_id")
 
 
 @dataclass(slots=True)

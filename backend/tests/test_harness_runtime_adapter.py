@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import pytest
 
 from agent_platform.adapters.runtime.harness import HarnessRuntimeAdapter
+from agent_platform.domain.model_routes import ModelRouteSnapshot, SecretRef
 from agent_platform.domain.observability import SkillFilePackageSnapshot, SkillFileSnapshotEntry
 from agent_platform.ports.runtime import (
     RuntimeEmployeeContext,
@@ -100,6 +101,129 @@ def test_harness_adapter_only_translates_lifecycle_and_keeps_engine_loop_opaque(
     assert "员工系统指令" not in repr(harness.last_request)
     assert "只读查询后再预览" not in repr(harness.last_request)
     assert harness.closed is True
+
+
+def test_harness_adapter_passes_pinned_model_config_without_secret_reference() -> None:
+    assert "model_route_snapshot" in RuntimeRequest.__dataclass_fields__, (
+        "RuntimeRequest must carry the RunSnapshot model configuration"
+    )
+    harness = FakeHarness()
+    created: list[object] = []
+
+    def create_engine(engine_request, _runtime_request):
+        created.append(engine_request)
+        return harness
+
+    snapshot = ModelRouteSnapshot(
+        tenant_id="tenant-a",
+        route_id="route-a",
+        route_version=3,
+        route_alias="assistant",
+        connection_id="connection-a",
+        connection_version=4,
+        provider_kind="openai-compatible",
+        model_id="local-model-a",
+        protocol="openai-chat-completions",
+        endpoint="http://host.docker.internal:63072/v1",
+        secret_ref=SecretRef("tenant-a/local-model-key", "tenant-a", "environment"),
+        parameters={"temperature": 0.2, "max_tokens": 64},
+    )
+    adapter = HarnessRuntimeAdapter(create_engine, engine_name="deepseek")
+    result = adapter.run(
+        RuntimeRequest(
+            run_id="model-config-run",
+            session_ref=None,
+            prompt="Reply READY",
+            skill_instructions=(),
+            allowed_tools=(),
+            model_route_snapshot=snapshot,
+        )
+    )
+
+    model_config = getattr(created[0], "model_config", None)
+    assert model_config is not None
+    assert model_config.route_id == "route-a"
+    assert model_config.route_version == 3
+    assert model_config.connection_version == 4
+    assert model_config.model_id == "local-model-a"
+    assert model_config.endpoint == "http://host.docker.internal:63072/v1"
+    assert model_config.parameters == {"temperature": 0.2, "max_tokens": 64}
+    assert "local-model-key" not in repr(model_config)
+    assert result.text == "harness: Reply READY"
+    assert result.usage.estimated is True
+    assert result.usage.source == "ESTIMATED"
+    assert result.usage.pricing_version == "estimated-v1"
+
+
+def test_harness_adapter_normalizes_upstream_usage_and_request_id() -> None:
+    class EngineWithUpstreamUsage(FakeHarness):
+        def run(self, request, on_event=None):
+            self.last_request = request
+            return type(
+                "UpstreamResult",
+                (),
+                {
+                    "text": "READY",
+                    "finish_reason": "completed",
+                    "usage": {
+                        "prompt_tokens": 13,
+                        "completion_tokens": 5,
+                        "total_tokens": 18,
+                        "api_key": "must-not-escape",
+                    },
+                    "request_id": "req-provider-123",
+                },
+            )()
+
+    adapter = HarnessRuntimeAdapter(
+        lambda _engine_request, _runtime_request: EngineWithUpstreamUsage(),
+        engine_name="deepseek",
+    )
+    result = adapter.run(
+        RuntimeRequest(
+            run_id="upstream-usage-run",
+            session_ref=None,
+            prompt="Reply READY",
+            skill_instructions=(),
+            allowed_tools=(),
+        )
+    )
+
+    assert result.usage.input_tokens == 13
+    assert result.usage.output_tokens == 5
+    assert result.usage.total_tokens == 18
+    assert result.usage.source == "UPSTREAM"
+    assert result.usage.estimated is False
+    assert result.usage.provider_request_id == "req-provider-123"
+    assert result.usage.pricing_version == "unpriced-v1"
+    assert "must-not-escape" not in repr(result.usage)
+
+
+def test_harness_adapter_uses_fallback_result_ref_when_sdk_omits_one() -> None:
+    class EngineWithoutResultRef(FakeHarness):
+        def run(self, request, on_event=None):
+            self.last_request = request
+            return type(
+                "ResultWithoutRef",
+                (),
+                {"text": "READY", "finish_reason": "completed", "result_ref": None},
+            )()
+
+    adapter = HarnessRuntimeAdapter(
+        lambda _engine_request, _runtime_request: EngineWithoutResultRef(),
+        engine_name="deepseek",
+    )
+    result = adapter.run(
+        RuntimeRequest(
+            run_id="missing-result-ref-run",
+            session_ref=None,
+            prompt="Reply READY",
+            skill_instructions=(),
+            allowed_tools=(),
+        )
+    )
+
+    assert result.runtime_result_ref == "deepseek-result"
 
 
 def test_harness_adapter_builds_and_closes_a_distinct_engine_for_each_run() -> None:

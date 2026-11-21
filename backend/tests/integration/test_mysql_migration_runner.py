@@ -12,6 +12,13 @@ import pytest
 mysql = pytest.importorskip("mysql.connector")
 
 
+class _RedactedMySqlConfig(dict[str, object]):
+    """让 pytest 失败回溯也不打印本地 MySQL 密码。"""
+
+    def __repr__(self) -> str:
+        return "MySQL test connection config(<redacted>)"
+
+
 def _has_chinese(value: str | None) -> bool:
     """确认 information_schema 注释包含可见中文字符。"""
 
@@ -23,12 +30,12 @@ def disposable_mysql_database():
     if os.environ.get("AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE") != "1":
         pytest.skip("set AGENT_PLATFORM_MYSQL_TEST_ALLOW_CREATE_DATABASE=1 for disposable MySQL integration")
     database = f"agent_platform_runner_test_{secrets.token_hex(5)}"
-    config = {
+    config = _RedactedMySqlConfig({
         "host": os.environ.get("MYSQL_HOST", "127.0.0.1"),
         "port": int(os.environ.get("MYSQL_PORT", "3306")),
         "user": os.environ.get("MYSQL_USER", "root"),
         "password": os.environ.get("MYSQL_PASSWORD", ""),
-    }
+    })
     root_connection = mysql.connect(**config)
     cursor = root_connection.cursor()
     try:
@@ -64,7 +71,7 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
 
     assert first.action is PreflightAction.APPLY_MIGRATIONS
     assert first.applied_migrations == (
-        "V001", "V002", "V003", "V004", "V005", "V006", "V007"
+        "V001", "V002", "V003", "V004", "V005", "V006", "V007", "V008"
     )
     assert second.action is PreflightAction.UP_TO_DATE
     assert second.applied_migrations == ()
@@ -72,9 +79,9 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 7
+        assert cursor.fetchone()[0] == 8
         cursor.execute("SELECT version FROM schema_migration_history ORDER BY version")
-        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7]
+        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7, 8]
     finally:
         cursor.close()
         connection.close()
@@ -107,7 +114,7 @@ def test_runner_blocks_checksum_mismatch_before_any_write(disposable_mysql_datab
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 7
+        assert cursor.fetchone()[0] == 8
     finally:
         cursor.close()
         connection.close()
@@ -269,23 +276,28 @@ def test_v006_schema_has_tenant_keys_and_chinese_comments(disposable_mysql_datab
         connection.close()
 
 
-def test_v006_down_restores_the_v005_schema_boundary(disposable_mysql_database) -> None:
+def test_v006_down_restores_the_v005_schema_boundary(
+    tmp_path: Path, disposable_mysql_database
+) -> None:
     from agent_platform.infrastructure.migrations import MigrationRunner, split_sql_statements
 
     database, config = disposable_mysql_database
     migration_directory = Path(__file__).parents[3] / "docs" / "migrations"
+    v006_migrations = tmp_path / "migrations-v006"
+    v006_migrations.mkdir()
+    for version in range(1, 7):
+        migration = next(
+            path
+            for path in migration_directory.glob(f"V{version:03d}__*.sql")
+            if ".down." not in path.name
+        )
+        shutil.copyfile(migration, v006_migrations / migration.name)
     MigrationRunner(
-        lambda: mysql.connect(**config, database=database), migration_directory
+        lambda: mysql.connect(**config, database=database), v006_migrations
     ).apply()
     connection = mysql.connect(**config, database=database)
     cursor = connection.cursor()
     try:
-        v007_rollback = migration_directory.joinpath(
-            "V007__session_runtime_leases.down.sql"
-        ).read_text(encoding="utf-8")
-        for statement in split_sql_statements(v007_rollback):
-            cursor.execute(statement)
-        connection.commit()
         rollback = migration_directory.joinpath(
             "V006__mcp_profiles_and_approvals.down.sql"
         ).read_text(encoding="utf-8")
@@ -366,19 +378,30 @@ def test_v007_schema_has_tenant_keys_and_chinese_comments(disposable_mysql_datab
             ("fk_session_runtime_lease_run", "session_runtime_leases", "run_id", "runs"),
         } <= references
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 7
+        assert cursor.fetchone()[0] == 8
     finally:
         cursor.close()
         connection.close()
 
 
-def test_v007_down_restores_the_v006_schema_boundary(disposable_mysql_database) -> None:
+def test_v007_down_restores_the_v006_schema_boundary(
+    tmp_path: Path, disposable_mysql_database
+) -> None:
     from agent_platform.infrastructure.migrations import MigrationRunner, split_sql_statements
 
     database, config = disposable_mysql_database
     migration_directory = Path(__file__).parents[3] / "docs" / "migrations"
+    v007_migrations = tmp_path / "migrations-v007"
+    v007_migrations.mkdir()
+    for version in range(1, 8):
+        migration = next(
+            path
+            for path in migration_directory.glob(f"V{version:03d}__*.sql")
+            if ".down." not in path.name
+        )
+        shutil.copyfile(migration, v007_migrations / migration.name)
     MigrationRunner(
-        lambda: mysql.connect(**config, database=database), migration_directory
+        lambda: mysql.connect(**config, database=database), v007_migrations
     ).apply()
     connection = mysql.connect(**config, database=database)
     cursor = connection.cursor()
@@ -405,7 +428,6 @@ def test_v007_down_restores_the_v006_schema_boundary(disposable_mysql_database) 
         cursor.close()
         connection.close()
 
-
 def test_v007_backfills_an_inflight_session_home_before_worker_upgrade(
     tmp_path: Path, disposable_mysql_database
 ) -> None:
@@ -416,13 +438,17 @@ def test_v007_backfills_an_inflight_session_home_before_worker_upgrade(
     migration_directory = Path(__file__).parents[3] / "docs" / "migrations"
     v006_directory = tmp_path / "migrations-v006"
     v006_directory.mkdir()
-    for version in range(1, 7):
+    v007_directory = tmp_path / "migrations-v007"
+    v007_directory.mkdir()
+    for version in range(1, 8):
         migration = next(
             path
             for path in migration_directory.glob(f"V{version:03d}__*.sql")
             if ".down." not in path.name
         )
-        shutil.copyfile(migration, v006_directory / migration.name)
+        shutil.copyfile(migration, v007_directory / migration.name)
+        if version < 7:
+            shutil.copyfile(migration, v006_directory / migration.name)
     connection_factory = lambda: mysql.connect(**config, database=database)
     MigrationRunner(connection_factory, v006_directory).apply()
 
@@ -463,7 +489,8 @@ def test_v007_backfills_an_inflight_session_home_before_worker_upgrade(
         cursor.close()
         connection.close()
 
-    MigrationRunner(connection_factory, migration_directory).apply()
+
+    MigrationRunner(connection_factory, v007_directory).apply()
     connection = connection_factory()
     cursor = connection.cursor()
     try:
@@ -478,6 +505,192 @@ def test_v007_backfills_an_inflight_session_home_before_worker_upgrade(
             12,
             "ACTIVE",
         )
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v008_model_management_schema_has_tenant_keys_and_chinese_comments(
+    disposable_mysql_database,
+) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    MigrationRunner(
+        lambda: mysql.connect(**config, database=database),
+        Path(__file__).parents[3] / "docs" / "migrations",
+    ).apply()
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        expected_tables = {
+            "model_connections",
+            "model_catalog_items",
+            "model_test_records",
+        }
+        cursor.execute(
+            "SELECT table_name,table_comment FROM information_schema.tables "
+            "WHERE table_schema=DATABASE() AND table_name IN "
+            "('model_connections','model_catalog_items','model_test_records')"
+        )
+        table_comments = dict(cursor.fetchall())
+        assert set(table_comments) == expected_tables
+        assert all(_has_chinese(comment) for comment in table_comments.values())
+
+        cursor.execute(
+            "SELECT table_name,column_name,column_comment FROM information_schema.columns "
+            "WHERE table_schema=DATABASE() AND table_name IN "
+            "('model_connections','model_catalog_items','model_test_records')"
+        )
+        comments_by_table: dict[str, dict[str, str]] = {}
+        for table_name, column_name, comment in cursor.fetchall():
+            comments_by_table.setdefault(table_name, {})[column_name] = comment
+        assert set(comments_by_table) == expected_tables
+        assert all(
+            _has_chinese(comment)
+            for columns in comments_by_table.values()
+            for comment in columns.values()
+        )
+        cursor.execute(
+            "SELECT column_name,column_comment FROM information_schema.columns "
+            "WHERE table_schema=DATABASE() AND table_name='model_routes' "
+            "AND column_name IN ('model_connection_id','catalog_model_id','route_version')"
+        )
+        route_comments = dict(cursor.fetchall())
+        assert set(route_comments) == {"model_connection_id", "catalog_model_id", "route_version"}
+        assert all(_has_chinese(comment) for comment in route_comments.values())
+
+        cursor.execute(
+            "SELECT table_name,column_name,referenced_table_name,referenced_column_name "
+            "FROM information_schema.key_column_usage WHERE table_schema=DATABASE() "
+            "AND referenced_table_name IS NOT NULL AND table_name IN "
+            "('model_catalog_items','model_routes','model_test_records')"
+        )
+        foreign_keys = set(cursor.fetchall())
+        assert ("model_catalog_items", "connection_id", "model_connections", "connection_id") in foreign_keys
+        assert ("model_routes", "model_connection_id", "model_connections", "connection_id") in foreign_keys
+        assert ("model_routes", "catalog_model_id", "model_catalog_items", "model_id") in foreign_keys
+        assert ("model_test_records", "connection_id", "model_connections", "connection_id") in foreign_keys
+
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        assert cursor.fetchone()[0] == 8
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v008_backfills_multiple_legacy_routes_to_one_tenant_connection(
+    tmp_path: Path, disposable_mysql_database
+) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    project_migrations = Path(__file__).parents[3] / "docs" / "migrations"
+    v007_migrations = tmp_path / "migrations-v007"
+    v007_migrations.mkdir()
+    for version in range(1, 8):
+        migration = next(
+            path
+            for path in project_migrations.glob(f"V{version:03d}__*.sql")
+            if ".down." not in path.name
+        )
+        shutil.copyfile(migration, v007_migrations / migration.name)
+    connection_factory = lambda: mysql.connect(**config, database=database)
+    MigrationRunner(connection_factory, v007_migrations).apply()
+
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO platforms (platform_id,code,name,status) VALUES "
+            "('plt-local','local','本地平台','ACTIVE')"
+        )
+        cursor.execute(
+            "INSERT INTO tenants (platform_id,tenant_id,code,name,status) VALUES "
+            "('plt-local','tenant-a','tenant-a','租户 A','ACTIVE')"
+        )
+        cursor.executemany(
+            "INSERT INTO model_routes (platform_id,tenant_id,route_id,alias,provider,model_name,"
+            "endpoint,protocol,auth_secret_ref,auth_secret_scope,auth_secret_provider,parameters_json,status) "
+            "VALUES ('plt-local','tenant-a',%s,%s,'openai-compatible',%s,'http://host.docker.internal:63072/v1',"
+            "'openai-chat-completions','local-secret','tenant','environment',JSON_OBJECT(),'ACTIVE')",
+            (
+                ("route-chat", "chat", "chat-model"),
+                ("route-reasoning", "reasoning", "reasoning-model"),
+            ),
+        )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
+
+    MigrationRunner(connection_factory, project_migrations).apply()
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT COUNT(DISTINCT model_connection_id),COUNT(DISTINCT catalog_model_id) "
+            "FROM model_routes WHERE platform_id='plt-local' AND tenant_id='tenant-a'"
+        )
+        assert cursor.fetchone() == (1, 2)
+        cursor.execute(
+            "SELECT c.endpoint,c.auth_secret_ref,c.version,r.route_version "
+            "FROM model_routes r JOIN model_connections c ON c.platform_id=r.platform_id "
+            "AND c.tenant_id=r.tenant_id AND c.connection_id=r.model_connection_id "
+            "WHERE r.platform_id='plt-local' AND r.tenant_id='tenant-a' ORDER BY r.route_id"
+        )
+        rows = cursor.fetchall()
+        assert rows == [
+            ("http://host.docker.internal:63072/v1", "local-secret", 1, 1),
+            ("http://host.docker.internal:63072/v1", "local-secret", 1, 1),
+        ]
+        cursor.execute(
+            "SELECT model_id FROM model_catalog_items WHERE platform_id='plt-local' "
+            "AND tenant_id='tenant-a' AND connection_id=(SELECT model_connection_id FROM model_routes "
+            "WHERE route_id='route-chat') ORDER BY model_id"
+        )
+        assert [row[0] for row in cursor.fetchall()] == ["chat-model", "reasoning-model"]
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        assert cursor.fetchone()[0] == 8
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v008_down_restores_the_v007_schema_boundary(disposable_mysql_database) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner, split_sql_statements
+
+    database, config = disposable_mysql_database
+    migration_directory = Path(__file__).parents[3] / "docs" / "migrations"
+    connection_factory = lambda: mysql.connect(**config, database=database)
+    MigrationRunner(connection_factory, migration_directory).apply()
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        rollback = migration_directory.joinpath(
+            "V008__tenant_model_management.down.sql"
+        ).read_text(encoding="utf-8")
+        for statement in split_sql_statements(rollback):
+            cursor.execute(statement)
+        connection.commit()
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        assert cursor.fetchone()[0] == 7
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() "
+            "AND table_name IN ('model_connections','model_catalog_items','model_test_records')"
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+            "AND table_name='model_routes' AND column_name IN "
+            "('model_connection_id','catalog_model_id','route_version')"
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() "
+            "AND table_name='session_runtime_leases'"
+        )
+        assert cursor.fetchone()[0] == 1
     finally:
         cursor.close()
         connection.close()
