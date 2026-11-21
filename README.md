@@ -1,77 +1,112 @@
-# Harness Engine 工程
+# Agent 平台
 
-根目录只保存架构文档、部署材料和项目说明。Python 工程位于独立子项目 [harness-engine](harness-engine/)，以后所有 Python 源码、测试、依赖和构建配置都放在该目录内。
+面向多租户场景的数字员工控制平台，提供员工与资源管理、部署、对话运行、执行观测和模型配置能力。仓库由 React 管理台、FastAPI 控制面和独立的 Python `harness-engine` 组成。
 
-## 目录约定
+## 当前能力
+
+- 管理数字员工及其版本、Skill、Tool 和租户资源。
+- 创建部署并通过工作台发起对话运行，查看消息、Run 状态、执行轨迹和用量记录。
+- 使用异步 Run Worker 和可替换的 Runtime 适配器执行任务；本地 Fake Runtime 用于离线演示和平台流程验证。
+- 按租户管理模型配置，并通过 MCP 工具配置和审批边界接入外部能力。
+- 使用 MySQL 保存控制面数据，使用本地对象存储保存对话正文及运行产物。
+
+真实身份提供方、生产对象存储/KMS、外部调度系统业务闭环和目标环境沙箱仍需按部署环境单独集成或验收；Fake 模式不代表这些生产能力已验证。
+
+## 架构概览
+
+```mermaid
+flowchart LR
+    User[用户 / 管理员] --> UI[React 管理台]
+    UI --> API[FastAPI 控制面]
+    API --> App[应用服务与领域模型]
+    App --> Repo[Repository / Runtime 端口]
+    Repo --> DB[(MySQL)]
+    Repo --> Store[对象存储]
+    Worker[Run Worker] --> App
+    App --> Adapter[Runtime 适配器]
+    Adapter --> Engine[harness-engine / 外部 Runtime]
+```
+
+控制面负责编排租户、员工、部署和运行状态；Worker 执行异步 Run；Runtime 适配器隔离具体引擎。后端通过稳定端口依赖独立的 `harness-engine`，领域层不直接依赖供应商 SDK。
+
+## 项目结构
 
 ```text
 agentDemo/
-├── docs/                 # 架构、协议、迁移和验收文档
-├── deploy/               # Docker、Kubernetes 部署材料
-├── harness-engine/       # Python 子项目
-│   ├── pyproject.toml
-│   ├── src/harness_engine/
-│   └── tests/
-└── README.md
+├── backend/          FastAPI 控制面、应用服务、领域模型和 Worker
+├── frontend/         React + TypeScript 管理台
+├── harness-engine/   可独立安装的 Python Harness 引擎与工具
+├── deploy/           Docker 等本地部署材料
+├── docs/             架构、接口、运维、验证及迁移文档
+└── openspec/         功能提案、设计、规格和实施任务
 ```
 
-## 运行 Python 子项目
+## 本地启动
 
-```powershell
-cd harness-engine
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m harness_engine.cli "hello"
+### 启动后端（Fake 模式）
+
+需要 Python 3.12 或更高版本。Fake 模式适合本地界面联调和离线演示，不需要连接 MySQL：
+
+```bash
+cd backend
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+AGENT_PLATFORM_MODE=fake python -m uvicorn agent_platform.main:app --host 127.0.0.1 --port 8000
 ```
 
-MySQL 持久化、会话服务、doctor 和扩展教程见
-[Python 子项目说明](harness-engine/README.md)。
+健康检查地址：`http://127.0.0.1:8000/api/health`。Fake 身份模式的 API 调用示例和 MySQL 启动步骤见[运行与验证说明](docs/运行与验证说明.md)。
 
-## 启动本地 MySQL
+### 启动前端
 
-```powershell
-Copy-Item deploy/mysql/.env.example deploy/mysql/.env
-# 编辑 deploy/mysql/.env，设置随机密码
+需要 Node.js 和 npm：
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Vite 会在终端输出本地访问地址。若需验证完整 MySQL 持久化和异步 Worker 流程，按[本地控制面闭环与运维](docs/本地控制面闭环与运维.md)配置数据库、迁移和服务。
+
+### 启动本地 MySQL
+
+仓库提供 Docker Compose 配置：
+
+```bash
+cp deploy/mysql/.env.example deploy/mysql/.env
+# 编辑 deploy/mysql/.env，设置本地密码
 docker compose -f deploy/mysql/docker-compose.yml up -d
 ```
 
-连接与 migration 验收步骤见 [MySQL 开发说明](deploy/mysql/README.md)。
+迁移由显式命令执行，不会在 API 启动时自动修改数据库。完整配置和操作步骤见[MySQL 开发说明](deploy/mysql/README.md)及[迁移目录说明](docs/migrations/README.md)。
 
-对话消息正文、流式分段、执行轨迹、删除和 GC 的持久化设计及待验证项见
-[对话正文持久化设计](docs/superpowers/specs/2026-11-13-conversation-content-persistence-design.md)、
-[实施计划](docs/superpowers/plans/2026-11-13-conversation-content-persistence.md)
-和[真实验证矩阵](docs/verification-matrix.md)。V002 已在一次性 MySQL 8.4.13 中执行，
-只读 doctor 和 V002 代表性检查通过；本地加密 ContentStore、MySQL 上传 intent/消息仓储、
-引擎无关的流式 checkpoint、durable tail、worker 过期恢复、会话级删除和 GC 已实现并验证。
-离线套件为 162 passed、4 skipped；一次性 MySQL 8.4.13 集成为 14 passed。
-DeepSeek 固定 SDK 不提供公开的运行中 delta 回调，适配器声明 `streaming=False`，
-因此 DeepSeek 实时流仍未验证。生产对象存储/KMS、跨进程 transcript 读取和 Docker/Kubernetes 沙箱仍需目标环境验收。
+## 常用验证命令
 
-## 验证 DeepSeek Harness
+```bash
+cd backend
+python -m pytest tests -q
+python -m ruff check src tests
 
-最小验证 Demo 和 SDK/runtime 安装说明见
-[docs/deepseek-harness-demo.md](docs/deepseek-harness-demo.md)。在 `harness-engine/`
-下设置 `PYTHONPATH=src` 后，可以先执行无密钥的启动检查：
-
-```powershell
-.\.venv-sdk-check\Scripts\python.exe -m harness_engine.deepseek_demo --startup-only
+cd ../frontend
+npm test
+npm run build
 ```
 
-验证已经接入引擎协议后，可以运行：
+MySQL 集成、Runtime、Docker/Kubernetes 沙箱等验证范围和未验证项见[真实验证矩阵](docs/verification-matrix.md)及[运行与验证说明](docs/运行与验证说明.md)。
 
-```powershell
-.\.venv-sdk-check\Scripts\harness.exe --engine deepseek "Reply with exactly: cli-deepseek-ok"
-```
+## 文档导航
 
-## 验证 Python MCP 工具
+| 主题 | 文档 |
+|---|---|
+| 系统分层与依赖方向 | [架构总览](docs/架构总览.md)、[后端与 Harness 引擎关系](docs/后端与Harness引擎关系.md) |
+| 目录、模块和 API | [目录与模块说明](docs/目录与模块说明.md)、[接口与状态流程](docs/接口与状态流程.md) |
+| 本地运行与运维 | [运行与验证说明](docs/运行与验证说明.md)、[本地控制面闭环与运维](docs/本地控制面闭环与运维.md)、[Docker 本地验证指南](docs/Docker本地验证指南.md) |
+| 数据模型与数据库 | [数字员工数据模型](docs/数字员工数据模型.md)、[MySQL Schema 说明](docs/mysql-schema.md)、[迁移目录说明](docs/migrations/README.md) |
+| 模型、资源和用量 | [模型管理与模型接入](docs/模型管理与模型接入.md)、[资源中心模型与授权](docs/资源中心模型与授权.md)、[用量计量](docs/usage-accounting.md) |
+| Harness / DeepSeek 示例 | [Python 子项目说明](harness-engine/README.md)、[DeepSeek Harness 验证 Demo](docs/deepseek-harness-demo.md) |
+| OpenSpec 流程 | `openspec/changes/` 中的进行中变更及 `openspec/changes/archive/` 中的已归档记录 |
 
-```powershell
-cd harness-engine
-python -m pip install -e ".[mcp]"
-$env:PYTHONPATH = "src"
-python -m harness_engine.cli tools list --enable echo
-```
+## 贡献约定
 
-DeepSeek 连接方式和 profile 插件安装步骤见
-[DeepSeek Harness 最小验证 Demo](docs/deepseek-harness-demo.md)。
+项目文档、注释、OpenSpec 说明和 Git 提交信息使用中文。新增功能前先完善 OpenSpec 变更；表结构变更、测试、文档和原型要求见[项目协作约定](AGENTS.md)。
