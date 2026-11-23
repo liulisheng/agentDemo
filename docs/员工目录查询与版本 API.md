@@ -36,7 +36,7 @@ sequenceDiagram
 | 模型 | 作用 | 本次查询使用字段 |
 |---|---|---|
 | `DigitalEmployee` | 员工稳定身份和基本资料 | `employee_id`, `tenant_id`, `name`, `role_name`, `description`, `status` |
-| `DigitalEmployeeVersion` | 不可变执行版本 | `version`, `status`, `system_prompt`, exact Skill/Tool version refs, ExecutionProfile version |
+| `DigitalEmployeeVersion` | 不可变员工内容版本 | `version`, `status`, `system_prompt`, exact Skill/Tool version refs；运行配置由 Deployment 保存 |
 | `Deployment` | 固定一个已发布版本 | 员工详情只查询版本，不自动创建或切换 Deployment |
 
 员工版本响应保留兼容的 `skill_ids`/`tool_ids` 数组，并增加 `skill_version_refs`/`tool_version_refs`，包含 ID 和绑定版本，避免客户端用“当前最新”猜依赖。
@@ -78,9 +78,9 @@ sequenceDiagram
 | `GET /digital-employees/{employee_id}/versions` | `status`、`limit`、`cursor` | `{items, next_cursor}`，版本号倒序 |
 | `GET /digital-employees/{employee_id}/versions/{version}` | 精确版本号 | 系统指令、状态、策略、Skill/Tool 精确版本绑定 |
 | `POST /digital-employees` | `name`、`role_name`、`description` | 创建当前租户员工，返回基础资料 |
-| `POST /digital-employees/{employee_id}/versions` | 创建初始 DRAFT 版本的执行配置 | 返回版本号和 DRAFT 状态 |
+| `POST /digital-employees/{employee_id}/versions` | `{system_prompt, skill_ids, tool_ids}`；创建员工内容与能力绑定 DRAFT | 不接受 ExecutionProfile、ModelRoute、Workspace、Sandbox 或审批运行配置 |
 | `PATCH /digital-employees/{employee_id}` | 至少包含 `name`、`role_name`、`description` 之一 | 部分更新稳定资料；省略字段保持不变 |
-| `PUT /digital-employees/{employee_id}/versions/{version}` | 完整 DRAFT 指令、精确 Skill/Tool refs、执行配置 | 原子替换该 DRAFT 版本及绑定 |
+| `PUT /digital-employees/{employee_id}/versions/{version}` | 完整 DRAFT 指令和精确 Skill/Tool refs | 原子替换该 DRAFT 员工内容及能力绑定；运行配置由接收方 Deployment 管理 |
 | `POST /digital-employees/{employee_id}/versions/{version}/test` | `{ "prompt": "..." }` | 运行当前已保存版本的非持久化 Fake/Runtime 预览 |
 | `POST /digital-employees/{employee_id}/versions/{version}/publish` | 无 | 预检通过后将 DRAFT 固定为 PUBLISHED |
 | `POST /digital-employees/{employee_id}/archive` | 无 | 设置员工状态为 `ARCHIVED`，保留历史数据 |
@@ -94,9 +94,17 @@ sequenceDiagram
 | `POST /skills/{skill_id}/publish` | 无 | 管理员发布 Skill；其声明的 Tool 必须已发布 |
 | `POST /skills/{skill_id}/versions/{version}/fork` | 无 | 从本地 PUBLISHED Skill 创建下一 DRAFT，复制 Tool 声明和文件清单引用；Hub REFERENCE 返回 409 |
 | `POST /skills/{skill_id}/versions/{version}/publish` | 无 | 校验并发布精确 Skill DRAFT 版本 |
-| `POST /digital-employees/{employee_id}/versions/{source_version}/fork` | 无 | 从 PUBLISHED 员工版本克隆完整配置和绑定到下一 DRAFT |
+| `POST /digital-employees/{employee_id}/versions/{source_version}/fork` | 无 | 从 PUBLISHED 员工版本克隆员工内容及 Skill/Tool 绑定到下一 DRAFT，不复制运行配置 |
 | `PUT /digital-employees/{employee_id}/versions/{version}/skill-bindings` | `{ "skill_version_refs": [{"resource_id":"skill-1","version":2}] }` | 仅替换 DRAFT Skill 绑定与 Skill capability slot |
 | `PUT /digital-employees/{employee_id}/versions/{version}/tool-bindings` | `{ "tool_version_refs": [{"resource_id":"tool-1","version":1}] }` | 仅替换 DRAFT Tool 绑定与 Tool capability slot |
+| `POST /execution-profiles` | `{ "engine_name": "codex_cli" }` | 管理员创建并发布只记录引擎的 Profile；模型独立绑定，非空 Workspace/Sandbox/附加审批返回 `409 ENGINE_CAPABILITY_UNSUPPORTED` |
+| `GET /execution-profiles` | 无 | 当前租户每个 Profile 的最新版本摘要；未注册 Provider 标记不可用 |
+| `GET /execution-profiles/{profile_id}/versions` | Profile 稳定 ID | 当前租户完整版本历史，返回已发布版本和草稿 |
+| `POST /execution-profiles/{profile_id}/versions/{version}/fork` | 已发布源版本 | 同一 Profile ID 下创建下一 DRAFT，清除旧模型 alias/route 绑定 |
+| `PUT /execution-profiles/{profile_id}/versions/{version}` | DRAFT 的 EngineProvider | 只更新 DRAFT；本期 Worker 未接通的 Workspace/Sandbox/审批字段必须为空；PUBLISHED 返回 `409 IMMUTABLE_VERSION` |
+| `POST /execution-profiles/{profile_id}/versions/{version}/publish` | DRAFT 精确版本 | 发布新版本；默认绑定仍保留旧版本，直到显式改绑 |
+
+ExecutionProfile 稳定 ID 聚合其不可变版本。只有当前租户管理员可以新建、fork、更新草稿和发布；成员可以读取 Profile 版本并设置个人默认。fork 只从已发布版本生成同 ID 的下一 DRAFT；本期只允许创建或编辑引擎 Profile，Workspace/Sandbox/附加审批要等 Worker 接线后再开放，非空新值返回 `409 ENGINE_CAPABILITY_UNSUPPORTED`。模型在默认运行环境或 Deployment 独立选择。Profile 默认与 ModelRoute 默认分别保存到 `execution_profile_bindings` 和 `model_route_bindings`。跨租户版本查询返回 404；PUBLISHED 版本更新返回 409 `IMMUTABLE_VERSION`；Provider 未注册或环境资源越权时拒绝写入。历史版本若保留未接入的环境字段，API会标记为不可用于新 Session，管理员需先 fork 并清除字段。
 
 ### 类型定向编辑流程
 
@@ -116,27 +124,21 @@ sequenceDiagram
     DB-->>UI: 当前完整版本；前端仍显示原类型 Tab
 ```
 
-员工 fork 复制 `system_prompt`、精确 Skill/Tool refs、ExecutionProfile/ModelRoute、Workspace/Sandbox 和审批策略。Skill/Tool 绑定 API 的请求体没有这些字段，只能替换对应类型的绑定行；PUBLISHED 目标版本 409、成员写入 403、跨租户资源 404。Skill 文件工作区的 fork/publish API 按精确版本操作；新版本复用同租户不可变 MediaAsset ID 与 manifest 摘要，REFERENCE 必须先 COPY。此变更复用 V003 的 `digital_employee_versions`、`employee_skill_bindings`、`employee_tool_bindings`、`capability_bindings` 和 V005 的 Skill 文件表，不新增 migration。
+员工 fork 只复制 `system_prompt` 和精确 Skill/Tool refs，不复制任何 ExecutionProfile、ModelRoute、Workspace/Sandbox 或审批配置。Skill/Tool 绑定 API 的请求体没有运行配置字段，只能替换对应类型的绑定行；PUBLISHED 目标版本 409、成员写入 403、跨租户资源 404。Skill 文件工作区的 fork/publish API 按精确版本操作；新版本复用同租户不可变 MediaAsset ID 与 manifest 摘要，REFERENCE 必须先 COPY。此变更复用 V003 的 `digital_employee_versions`、`employee_skill_bindings`、`employee_tool_bindings`、`capability_bindings` 和 V005 的 Skill 文件表，不新增 migration。
 
 `GET /skills/{skill_id}/versions/{version}/files` 响应包含 `source_mode` 和 `fork_allowed`：本地 PUBLISHED 版本可 fork，Hub REFERENCE 显示只读及“先 COPY”说明；成员即使读取到 DRAFT 文件清单，界面也只显示只读视图。
 
-DRAFT 版本 PUT 请求示例：
+DRAFT 员工版本 PUT 请求示例：
 
 ```json
 {
   "system_prompt": "按租户政策处理工单。",
   "skill_version_refs": [{"resource_id": "01...", "version": 2}],
-  "tool_version_refs": [{"resource_id": "01...", "version": 1}],
-  "execution_profile_id": "01...",
-  "execution_profile_version": 1,
-  "model_route_id": "01...",
-  "workspace_profile_id": null,
-  "sandbox_profile_id": null,
-  "approval_policy": "required-for-write"
+  "tool_version_refs": [{"resource_id": "01...", "version": 1}]
 }
 ```
 
-PUT 将系统指令、Skill/Tool 精确版本引用和 ModelRoute/Workspace/Sandbox/审批设置作为一个版本替换，并在 MySQL 一个事务中保存版本正文、Skill 绑定、Tool 绑定和 Capability 绑定。Repository 行锁和状态检查防止写入 PUBLISHED 版本。
+PUT 将系统指令、Skill/Tool 精确版本引用作为一个版本替换，并在 MySQL 一个事务中保存版本正文、Skill 绑定、Tool 绑定和 Capability 绑定。Repository 行锁和状态检查防止写入 PUBLISHED 版本。运行配置不进入 EmployeeVersion。
 
 成功保存响应为该 DRAFT 的完整固定版本；客户端应使用响应的资源 refs 展示状态，不把旧数组 `skill_ids`/`tool_ids` 解释成“绑定最新版本”：
 
@@ -147,14 +149,6 @@ PUT 将系统指令、Skill/Tool 精确版本引用和 ModelRoute/Workspace/Sand
   "system_prompt": "按租户政策处理工单。",
   "skill_version_refs": [{"skill_id": "skill-1", "version": 2}],
   "tool_version_refs": [{"tool_id": "tool-1", "version": 1}],
-  "execution_profile_id": "profile-1",
-  "execution_profile_version": 1,
-  "model_route_id": "route-1",
-  "workspace_profile_id": null,
-  "workspace_profile_version": null,
-  "sandbox_profile_id": null,
-  "sandbox_profile_version": null,
-  "approval_policy": "required-for-write",
   "status": "DRAFT"
 }
 ```
@@ -207,7 +201,7 @@ sequenceDiagram
 - `DRAFT` 版本可继续配置；`PUBLISHED`/`DEPRECATED` 版本只读。版本详情始终按请求版本号返回，不退化为最新版本。
 - 员工状态 `ARCHIVED` 阻止资料修改、新版本创建、发布和新 Deployment；历史版本、已有 Deployment 与 Run 保留供审计。
 - PATCH 必须至少包含一个字段；空值字符串被 schema 拒绝。归档为软状态变更，不物理删除版本或来源资源。
-- 发布预检逐项验证 Skill/Tool 已发布、ExecutionProfile/ModelRoute/Workspace/Sandbox 存在，REFERENCE Grant 仍有效且 Hub Manifest 摘要匹配，FILE_PACKAGE 清单摘要一致，Tool 所需接收方 SecretRef 已配置。失败保留 DRAFT，并返回 `DEPENDENCY_VALIDATION_ERROR` 与 `details.missing[]`，每项包含 `kind`、资源 `id` 和稳定 `reason`。
+- 发布预检逐项验证 Skill/Tool 已发布、REFERENCE Grant 仍有效且 Hub Manifest 摘要匹配、FILE_PACKAGE 清单摘要一致。数字员工版本不引用 ExecutionProfile、ModelRoute、Workspace、Sandbox 或运行审批；接收方在 Deployment 配置自己的运行环境。依赖失败保留 DRAFT，并返回 `DEPENDENCY_VALIDATION_ERROR` 与 `details.missing[]`，每项包含 `kind`、资源 `id` 和稳定 `reason`。
 - `limit` 越界、游标损坏或游标过滤条件改变返回 `422 INVALID_ARGUMENT`。
 - PUBLISHED 版本 PUT 返回 `409 IMMUTABLE_VERSION`；管理员角色缺失返回 `403 AUTHORIZATION_DENIED`；跨租户资源 ID 返回 `404 RESOURCE_NOT_FOUND`。
 - DRAFT 版本 `/test` 失败时返回依赖校验或 Runtime 错误；测试结果只返回状态、文本、Usage 和脱敏事件摘要，不产生正式运行记录。
@@ -221,7 +215,7 @@ sequenceDiagram
 | Skill 文件在线编辑、ZIP 预览/提交 | 拒绝 | 允许 | DRAFT、预期 SHA/staging ID、入口和文件大小限制 |
 | Tool/Skill 创建、DRAFT Tool 编辑和发布 | 拒绝 | 允许 | Tool/Skill 资源与员工版本均按当前租户隔离 |
 | Skill/Tool 定向绑定 | 拒绝 | 仅 DRAFT 可写 | 两个 API 各自只更新本类型绑定表和 Capability slot |
-| PUBLISHED 员工版本 fork | 拒绝 | 允许 | 复制完整执行快照到新 DRAFT；原版本不可变 |
+| PUBLISHED 员工版本 fork | 拒绝 | 允许 | 仅复制员工指令和精确 Skill/Tool refs；Deployment 运行配置不复制 |
 | PUBLISHED Skill fork / DRAFT Skill publish | 拒绝 | 允许 | 精确版本操作；Hub REFERENCE 不允许直接 fork |
 | 版本 Fake Runtime 测试 | 拒绝 | 允许 | 仅执行已保存 DRAFT，不写 Deployment/Session/Run/Trace |
 

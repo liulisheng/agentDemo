@@ -12,9 +12,12 @@ from agent_platform.api.dependencies import (
     conversation_service,
     conversation_turn_service,
     current_identity,
+    deployment_runtime_config_service,
+    engine_provider_registry,
     model_management_service,
     model_route_service,
     resource_center_service,
+    runtime_defaults_service,
     skill_file_package_service,
     tool_approval_service,
 )
@@ -23,9 +26,12 @@ from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversation_turns import ConversationTurnService
 from agent_platform.application.conversations import ConversationService
+from agent_platform.application.deployment_runtime import DeploymentRuntimeConfigService
+from agent_platform.application.engine_providers import EngineProviderRegistry
 from agent_platform.application.model_management import ModelManagementService
 from agent_platform.application.model_routes import ModelRouteService
 from agent_platform.application.resource_center import ResourceCenterService
+from agent_platform.application.runtime_defaults import RuntimeDefaultsService
 from agent_platform.application.skill_files import SkillFilePackageService
 from agent_platform.application.tool_approval import ToolApprovalService
 from agent_platform.domain.common import DomainError
@@ -34,12 +40,17 @@ from agent_platform.domain.identity import IdentityContext
 Identity = Annotated[IdentityContext, Depends(current_identity)]
 Catalog = Annotated[CatalogService, Depends(catalog_service)]
 ControlPlane = Annotated[ControlPlaneService, Depends(control_plane_service)]
+DeploymentRuntimeConfigManagement = Annotated[
+    DeploymentRuntimeConfigService, Depends(deployment_runtime_config_service)
+]
+EngineProviders = Annotated[EngineProviderRegistry, Depends(engine_provider_registry)]
 Conversations = Annotated[ConversationService, Depends(conversation_service)]
 ConversationTurns = Annotated[
     ConversationTurnService, Depends(conversation_turn_service)
 ]
 ModelRoutes = Annotated[ModelRouteService, Depends(model_route_service)]
 ModelManagement = Annotated[ModelManagementService, Depends(model_management_service)]
+RuntimeDefaults = Annotated[RuntimeDefaultsService, Depends(runtime_defaults_service)]
 ResourceCenter = Annotated[ResourceCenterService, Depends(resource_center_service)]
 SkillFiles = Annotated[SkillFilePackageService, Depends(skill_file_package_service)]
 ToolApprovals = Annotated[ToolApprovalService, Depends(tool_approval_service)]

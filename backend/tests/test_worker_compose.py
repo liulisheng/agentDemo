@@ -38,3 +38,49 @@ def test_backend_image_includes_the_engine_neutral_harness_package() -> None:
 
     assert "COPY harness-engine /app/harness-engine" in dockerfile
     assert "'/app/harness-engine[deepseek,mcp]'" in dockerfile
+
+
+def test_compose_uses_one_deepseek_default_for_api_and_run_worker() -> None:
+    root = Path(__file__).parents[2]
+    compose = (root / "deploy" / "control-plane" / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    backend = compose.split("\n  backend:\n", maxsplit=1)[1].split("\n  worker:\n", maxsplit=1)[0]
+    worker = compose.split("\n  worker:\n", maxsplit=1)[1].split("\n  approval-worker:\n", maxsplit=1)[0]
+    environment_template = (root / "deploy" / "control-plane" / ".env.example").read_text(
+        encoding="utf-8"
+    )
+
+    assert "AGENT_PLATFORM_RUNTIME_ENGINE: ${AGENT_PLATFORM_RUNTIME_ENGINE:-deepseek}" in backend
+    assert "AGENT_PLATFORM_RUNTIME_ENGINE: ${AGENT_PLATFORM_RUNTIME_ENGINE:-deepseek}" in worker
+    assert "AGENT_PLATFORM_RUNTIME_ENGINE=deepseek" in environment_template
+    for variable, default in (
+        ("AGENT_PLATFORM_DEEPSEEK_PROFILE", "sdk-minimal"),
+        ("AGENT_PLATFORM_DEEPSEEK_PROVIDER", "deepseek-official"),
+        ("AGENT_PLATFORM_DEEPSEEK_MODEL", "deepseek-v4-flash"),
+    ):
+        assignment = f"{variable}: ${{{variable}:-{default}}}"
+        assert assignment in backend
+        assert assignment in worker
+
+
+def test_acceptance_overlay_selects_deepseek_for_api_and_worker() -> None:
+    overlay = (
+        Path(__file__).parents[2]
+        / "deploy"
+        / "control-plane"
+        / "docker-compose.staffdeck-acceptance.yml"
+    ).read_text(encoding="utf-8")
+    backend = (
+        overlay.split("\n  backend:\n", maxsplit=1)[1].split("\n  worker:\n", maxsplit=1)[0]
+        if "\n  backend:\n" in overlay
+        else ""
+    )
+    worker = (
+        overlay.split("\n  worker:\n", maxsplit=1)[1].split("\n  approval-worker:\n", maxsplit=1)[0]
+        if "\n  worker:\n" in overlay
+        else ""
+    )
+
+    assert "AGENT_PLATFORM_RUNTIME_ENGINE: deepseek" in backend
+    assert "AGENT_PLATFORM_RUNTIME_ENGINE: deepseek" in worker

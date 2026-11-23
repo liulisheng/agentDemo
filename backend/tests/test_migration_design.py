@@ -67,3 +67,34 @@ def test_v007_session_runtime_lease_is_a_tenant_scoped_forward_migration() -> No
     assert "INSERT INTO schema_version (version) VALUES (7)" in text
     assert "DROP TABLE IF EXISTS session_runtime_leases" in rollback
     assert "DELETE FROM schema_version WHERE version = 7" in rollback
+
+
+def test_v009_runtime_configuration_migration_has_tenant_scoped_schema_and_reversal() -> None:
+    root = Path(__file__).parents[2]
+    up = root / "docs/migrations/V009__deployment_runtime_config.sql"
+    down = root / "docs/migrations/V009__deployment_runtime_config.down.sql"
+    text = up.read_text(encoding="utf-8")
+    rollback = down.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE model_route_bindings" in text
+    assert "CREATE TABLE deployment_runtime_config_versions" in text
+    assert "uk_model_route_binding_scope" in text
+    assert "pk_deployment_runtime_config_versions" in text
+    assert "fk_runtime_config_deployment" in text
+    assert "fk_runtime_config_profile" in text
+    assert "fk_runtime_config_route" in text
+    assert "ck_runtime_config_inherit_no_engine_route_override" in text
+    assert "ck_runtime_config_override_has_value" in text
+    assert "execution_profiles.model_alias" in text
+    assert "MODIFY COLUMN model_alias VARCHAR(128) NULL" in text
+    assert "ADD COLUMN runtime_config_version" in text
+    assert "ADD COLUMN runtime_profile_source" in text
+    assert "ADD COLUMN runtime_model_route_source" in text
+    assert "历史兼容模型别名；新 Session 模型由独立 ModelRoute 或运行时默认解析" in text
+    assert "INSERT INTO schema_version (version) VALUES (9)" in text
+    assert "DROP TABLE IF EXISTS deployment_runtime_config_versions" in rollback
+    assert "DROP TABLE IF EXISTS model_route_bindings" in rollback
+    assert "DELETE FROM schema_version WHERE version = 9" in rollback
+
+    for table in ("model_route_bindings", "deployment_runtime_config_versions"):
+        assert f"DROP TABLE IF EXISTS {table}" in rollback

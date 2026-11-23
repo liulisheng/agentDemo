@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from agent_platform.api.app import create_app
+from tests._runtime_config_helpers import configure_api_deployment
 
 HEADERS = {"X-Fake-User": "admin-local"}
 
@@ -62,6 +63,7 @@ def test_api_runs_publish_deploy_fake_runtime_and_trace() -> None:
     )
     assert deployment.status_code == 201
     deployment_id = deployment.json()["id"]
+    configure_api_deployment(client, HEADERS, deployment.json())
     session = client.post(
         "/api/v1/sessions", headers=HEADERS, json={"deployment_id": deployment_id}
     )
@@ -127,6 +129,7 @@ def test_api_rejects_idempotency_payload_conflict() -> None:
     deployment = client.post(
         "/api/v1/deployments", headers=HEADERS, json={"employee_id": employee["id"], "version": 1}
     ).json()
+    configure_api_deployment(client, HEADERS, deployment)
     session = client.post(
         "/api/v1/sessions", headers=HEADERS, json={"deployment_id": deployment["id"]}
     ).json()

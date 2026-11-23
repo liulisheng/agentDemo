@@ -94,10 +94,19 @@ def test_resource_binding_routes_change_only_the_selected_type_and_fork_publishe
     assert forked.json()["system_prompt"] == "必须原样保留"
     assert forked.json()["skill_version_refs"] == [{"skill_id": skill_a, "version": 1}]
     assert forked.json()["tool_version_refs"] == [{"tool_id": tool_a, "version": 1}]
-    assert forked.json()["model_route_id"] == "route-fixed"
-    assert forked.json()["workspace_profile_version"] == 3
-    assert forked.json()["sandbox_profile_version"] == 2
-    assert forked.json()["approval_policy"] == "required"
+    assert not {
+        "execution_profile_id",
+        "model_route_id",
+        "workspace_profile_id",
+        "sandbox_profile_id",
+        "approval_policy",
+    } & forked.json().keys()
+    forked_value = repository.get_employee_version(identity, employee_id, 2)
+    assert forked_value.execution_profile_id is None
+    assert forked_value.model_route_id is None
+    assert forked_value.workspace_profile_id is None
+    assert forked_value.sandbox_profile_id is None
+    assert forked_value.approval_policy is None
 
     skill_update = client.put(
         f"/api/v1/digital-employees/{employee_id}/versions/2/skill-bindings",
@@ -108,8 +117,8 @@ def test_resource_binding_routes_change_only_the_selected_type_and_fork_publishe
     assert skill_update.json()["skill_version_refs"] == [{"skill_id": skill_b, "version": 1}]
     assert skill_update.json()["tool_version_refs"] == [{"tool_id": tool_a, "version": 1}]
     assert skill_update.json()["system_prompt"] == "必须原样保留"
-    assert skill_update.json()["model_route_id"] == "route-fixed"
-    assert skill_update.json()["approval_policy"] == "required"
+    assert "model_route_id" not in skill_update.json()
+    assert "approval_policy" not in skill_update.json()
 
     tool_update = client.put(
         f"/api/v1/digital-employees/{employee_id}/versions/2/tool-bindings",
@@ -120,8 +129,8 @@ def test_resource_binding_routes_change_only_the_selected_type_and_fork_publishe
     assert tool_update.json()["skill_version_refs"] == [{"skill_id": skill_b, "version": 1}]
     assert tool_update.json()["tool_version_refs"] == [{"tool_id": tool_b, "version": 1}]
     assert tool_update.json()["system_prompt"] == "必须原样保留"
-    assert tool_update.json()["model_route_id"] == "route-fixed"
-    assert tool_update.json()["approval_policy"] == "required"
+    assert "model_route_id" not in tool_update.json()
+    assert "approval_policy" not in tool_update.json()
 
     duplicate_skills = client.put(
         f"/api/v1/digital-employees/{employee_id}/versions/2/skill-bindings",

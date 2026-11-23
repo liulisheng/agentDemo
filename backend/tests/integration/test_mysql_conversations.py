@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_config_helpers import configure_in_memory_deployment
+
 mysql = pytest.importorskip("mysql.connector")
 
 
@@ -89,6 +91,7 @@ def test_conversation_and_message_body_reference_survive_restart(
     version = catalog.create_employee_version(identity, employee.employee_id, "系统指令", [skill.skill_id], [])
     catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     execution = MySqlExecutionRepository(connection_factory)
     session = ControlPlaneService(catalog, FakeRuntimeAdapter(), persistence=execution).create_session(
         identity, deployment.deployment_id
@@ -171,6 +174,7 @@ def test_employee_conversation_list_paginates_run_and_message_activity(
     )
     published = catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, published.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     execution = MySqlExecutionRepository(connection_factory)
     control_plane = ControlPlaneService(catalog, FakeRuntimeAdapter(), persistence=execution)
     first_session = control_plane.create_session(identity, deployment.deployment_id)
@@ -477,6 +481,7 @@ def test_conversation_turn_submission_is_atomic_idempotent_and_rolls_back(
     )
     catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     execution = MySqlExecutionRepository(connection_factory)
     control_plane = ControlPlaneService(catalog, FakeRuntimeAdapter(), persistence=execution)
     session = control_plane.create_session(identity, deployment.deployment_id)
@@ -607,6 +612,7 @@ def test_conversation_turn_api_service_uses_mysql_union_transaction(
     )
     catalog.publish_employee_version(identity, employee.employee_id, employee_version.version)
     deployment = catalog.deploy(identity, employee.employee_id, employee_version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     session = ControlPlaneService(
         catalog,
         FakeRuntimeAdapter(),
@@ -752,6 +758,7 @@ def test_mysql_run_worker_processes_a_persisted_conversation_turn_and_fences_sta
     )
     catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     object_root = tmp_path / "run-worker-objects"
 
     def object_store():

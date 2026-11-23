@@ -16,6 +16,7 @@ from agent_platform.domain.catalog import (
     ToolVersion,
 )
 from agent_platform.domain.conversations import CapabilityBinding
+from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import (
     ModelCatalogItem,
@@ -23,6 +24,10 @@ from agent_platform.domain.model_routes import (
     ModelRoute,
     ModelTestRecord,
     ModelTestResult,
+)
+from agent_platform.domain.runtime_defaults import (
+    EngineProfileDefaultBinding,
+    ModelRouteDefaultBinding,
 )
 from agent_platform.ports.workspaces import SandboxProfile, WorkspaceProfile
 
@@ -112,7 +117,50 @@ class CatalogRepository(Protocol):
 
     def list_profiles(self, identity: IdentityContext) -> tuple[ExecutionProfile, ...]: ...
 
+    def list_profile_versions(
+        self, identity: IdentityContext, profile_id: str
+    ) -> tuple[ExecutionProfile, ...]: ...
+
+    def get_engine_profile_default(
+        self, identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> EngineProfileDefaultBinding | None: ...
+
+    def set_engine_profile_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        profile_id: str | None,
+        profile_version: int | None,
+    ) -> EngineProfileDefaultBinding | None: ...
+
+    def get_model_route_default(
+        self, identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> ModelRouteDefaultBinding | None: ...
+
+    def set_model_route_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        route_id: str | None,
+    ) -> ModelRouteDefaultBinding | None: ...
+
     def save_model_route(self, identity: IdentityContext, value: ModelRoute) -> None: ...
+
+    def update_model_route_if_version(
+        self,
+        identity: IdentityContext,
+        expected_route_version: int,
+        value: ModelRoute,
+    ) -> ModelRoute: ...
+
+    def revoke_model_route_if_unreferenced(
+        self,
+        identity: IdentityContext,
+        route_id: str,
+        expected_route_version: int,
+    ) -> ModelRoute: ...
 
     def get_model_route(self, identity: IdentityContext, route_id: str) -> ModelRoute: ...
 
@@ -200,6 +248,18 @@ class DeploymentRepository(Protocol):
     def get_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment: ...
 
     def list_deployments(self, identity: IdentityContext) -> tuple[Deployment, ...]: ...
+
+    def get_deployment_runtime_config(
+        self, identity: IdentityContext, deployment_id: str
+    ) -> DeploymentRuntimeConfig | None: ...
+
+    def save_deployment_runtime_config(
+        self,
+        identity: IdentityContext,
+        deployment_id: str,
+        expected_config_version: int | None,
+        value: DeploymentRuntimeConfig,
+    ) -> DeploymentRuntimeConfig: ...
 
     def list_audit_events(
         self,

@@ -10,6 +10,7 @@ from agent_platform.application.catalog_service import CatalogService, InMemoryC
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.domain.catalog import SkillType
 from agent_platform.domain.common import DomainError
+from tests._runtime_config_helpers import configure_in_memory_deployment
 
 
 def test_deployment_filter_version_summary_audit_and_rollback_preserve_run_snapshot() -> None:
@@ -28,6 +29,7 @@ def test_deployment_filter_version_summary_audit_and_rollback_preserve_run_snaps
     )
     catalog.publish_employee_version(identity, employee.employee_id, version2.version)
     deployment = catalog.deploy(identity, employee.employee_id, version2.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     control_plane = ControlPlaneService(catalog, FakeRuntimeAdapter())
     session = control_plane.create_session(identity, deployment.deployment_id)
     run = control_plane.create_run(identity, session.session_id, "固定版本二")

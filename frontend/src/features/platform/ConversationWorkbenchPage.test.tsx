@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, expect, test, vi } from 'vitest'
 
 import { ConversationWorkbenchPage } from './ConversationWorkbenchPage'
@@ -20,13 +21,21 @@ const { api, identity } = vi.hoisted(() => ({
     getToolApproval: vi.fn(),
     approveToolApproval: vi.fn(),
     rejectToolApproval: vi.fn(),
+    getDeploymentRuntimeConfig: vi.fn(),
+    saveDeploymentRuntimeConfig: vi.fn(),
+    listExecutionProfiles: vi.fn(),
+    listExecutionProfileVersions: vi.fn(),
+    listSelectableModelRoutes: vi.fn(),
+    listEngineProviders: vi.fn(),
+    getEffectiveEngineProfileDefault: vi.fn(),
+    getEffectiveModelRouteDefault: vi.fn(),
   },
   identity: { fakeUser: 'admin-local' },
 }))
 
 vi.mock('../../api/client', () => api)
 vi.mock('../management/TenantContext', () => ({
-  useTenantContext: () => ({ fakeUser: identity.fakeUser }),
+  useTenantContext: () => ({ fakeUser: identity.fakeUser, currentIdentity: { roleName: '管理员', label: '租户 A · 管理员' } }),
 }))
 
 beforeEach(() => {
@@ -38,7 +47,7 @@ function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <ConversationWorkbenchPage />
+      <MemoryRouter><ConversationWorkbenchPage /></MemoryRouter>
     </QueryClientProvider>,
   )
   return { ...view, queryClient }
@@ -46,7 +55,7 @@ function renderPage() {
 
 function baseApiState() {
   api.listDeployments.mockResolvedValue({
-    items: [{ id: 'deploy-1', employee_id: 'employee-1', version: 3, status: 'ACTIVE' }],
+    items: [{ id: 'deploy-1', employee_id: 'employee-1', version: 3, status: 'ACTIVE', runtime_config_version: 1 }],
   })
   api.getDigitalEmployee.mockResolvedValue({ id: 'employee-1', name: '海豚调度数仓开发' })
   api.listConversations.mockResolvedValue({
@@ -76,6 +85,13 @@ function baseApiState() {
       skill_ids: ['skill-1'],
       tool_ids: ['tool-read', 'tool-preview'],
       execution_profile_id: 'profile-1',
+      execution_profile_version: 2,
+      engine_name: 'deepseek_harness',
+      model_route_id: 'route-1',
+      runtime_config_version: 4,
+      runtime_profile_source: 'DEPLOYMENT_OVERRIDE',
+      runtime_model_route_source: 'TENANT_DEFAULT',
+      model_route_snapshot: { route_id: 'route-1', route_version: 3, route_alias: '数仓模型', provider_kind: 'deepseek', model_id: 'deepseek-chat', protocol: 'openai-chat-completions' },
     },
   })
   api.getRunTrace.mockResolvedValue({
@@ -98,6 +114,21 @@ function baseApiState() {
     expires_at: '2026-11-19T09:00:00Z',
     state: 'PENDING',
   })
+  api.getDeploymentRuntimeConfig.mockResolvedValue({ deployment_id: 'deploy-1', deployment_status: 'ACTIVE', runtime_config_version: 1, revision: {
+    config_version: 1, mode: 'INHERIT', execution_profile_id: null, execution_profile_version: null,
+    model_route_id: null, workspace_profile_id: null, workspace_profile_version: null,
+    sandbox_profile_id: null, sandbox_profile_version: null, approval_policy: {}, runtime_options: {}, created_by: 'admin-local',
+  } })
+  api.saveDeploymentRuntimeConfig.mockImplementation((_deploymentId: string, input: Record<string, unknown>) => Promise.resolve({
+    deployment_id: 'deploy-1', deployment_status: 'ACTIVE', runtime_config_version: 2,
+    revision: { ...input, config_version: 2 },
+  }))
+  api.listExecutionProfiles.mockResolvedValue({ items: [{ id: 'profile-1', tenant_id: 'tenant-a', version: 1, engine_name: 'deepseek_harness', engine_available: true, model_alias: null, status: 'PUBLISHED' }] })
+  api.listExecutionProfileVersions.mockResolvedValue({ items: [{ id: 'profile-1', tenant_id: 'tenant-a', version: 1, engine_name: 'deepseek_harness', engine_available: true, model_alias: null, status: 'PUBLISHED' }] })
+  api.listSelectableModelRoutes.mockResolvedValue({ items: [{ route_id: 'route-1', tenant_id: 'tenant-a', alias: '数仓模型', status: 'ACTIVE', route_version: 1, profile: { model_name: 'deepseek-chat', protocol: 'openai-chat-completions' } }] })
+  api.listEngineProviders.mockResolvedValue({ items: [{ engine_name: 'deepseek_harness', display_name: 'DeepSeek Harness', supported_model_protocols: ['openai-chat-completions'], capabilities: {}, execution_mode: 'SIMULATION' }] })
+  api.getEffectiveEngineProfileDefault.mockResolvedValue({ binding: null, profile: null, source: null })
+  api.getEffectiveModelRouteDefault.mockResolvedValue({ binding: null, route: null, source: null })
 }
 
 test('loads tenant scoped Conversation, Run, Trace and exact Approval preview', async () => {
@@ -109,6 +140,10 @@ test('loads tenant scoped Conversation, Run, Trace and exact Approval preview', 
 
   expect(await screen.findByText('ODS 到 DWD 工作流')).toBeInTheDocument()
   expect(await screen.findByText('请检查工作流预览。')).toBeInTheDocument()
+  expect(await screen.findByText('引擎 · deepseek_harness · Profile v2')).toBeInTheDocument()
+  expect(screen.getByText('DEPLOYMENT_OVERRIDE · Deployment v4')).toBeInTheDocument()
+  expect(screen.getByText(/模型 · 数仓模型/)).toBeInTheDocument()
+  expect(screen.getByText('TENANT_DEFAULT')).toBeInTheDocument()
   expect(await screen.findByText('将创建 2 节点 OFFLINE 工作流。')).toBeInTheDocument()
   expect(api.listConversations).toHaveBeenCalledWith('employee-1', expect.any(Object), 'admin-local')
   expect(api.listConversationMessages).toHaveBeenCalledWith('conversation-1', 'admin-local')
@@ -198,6 +233,107 @@ test('creates a new conversation from the selected active employee deployment', 
   expect(await screen.findByText('从这里继续与员工协作。提交任务后，查询、预览和运行状态会按顺序出现。')).toBeInTheDocument()
 })
 
+test('exposes pending Deployment configuration and saves a model-only override', async () => {
+  const user = userEvent.setup()
+  baseApiState()
+  api.listDeployments.mockResolvedValue({
+    items: [{ id: 'deploy-pending', employee_id: 'employee-1', version: 3, status: 'PENDING_CONFIGURATION', runtime_config_version: null }],
+  })
+  api.listConversations.mockResolvedValue({ items: [], next_cursor: null })
+  api.getDeploymentRuntimeConfig.mockResolvedValue({
+    deployment_id: 'deploy-pending', deployment_status: 'PENDING_CONFIGURATION', runtime_config_version: null, revision: null,
+  })
+  api.saveDeploymentRuntimeConfig.mockResolvedValue({
+    deployment_id: 'deploy-pending', deployment_status: 'ACTIVE', runtime_config_version: 1, revision: { mode: 'OVERRIDE', model_route_id: 'route-1' },
+  })
+  renderPage()
+
+  expect(await screen.findByText('运行环境待设置')).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: '运行配置' }))
+  expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: '设置员工覆盖' }))
+  await user.selectOptions(screen.getByRole('combobox', { name: '模型（ModelRoute）' }), 'route-1')
+  expect(screen.getByRole('button', { name: '设置员工覆盖' })).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByText('数仓模型 · deepseek-chat')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '保存配置' })).toBeEnabled()
+  await user.click(screen.getByRole('button', { name: '保存配置' }))
+
+  await waitFor(() => expect(api.saveDeploymentRuntimeConfig).toHaveBeenCalledWith(
+    'deploy-pending',
+    {
+      expected_config_version: null,
+      mode: 'OVERRIDE',
+      execution_profile_id: null,
+      execution_profile_version: null,
+      model_route_id: 'route-1',
+    },
+    'admin-local',
+  ))
+})
+
+test('clears old field overrides when switching a Deployment revision to inherit', async () => {
+  const user = userEvent.setup()
+  baseApiState()
+  api.getDeploymentRuntimeConfig.mockResolvedValue({
+    deployment_id: 'deploy-1', deployment_status: 'ACTIVE', runtime_config_version: 2, revision: {
+      config_version: 2, mode: 'OVERRIDE', execution_profile_id: 'profile-1', execution_profile_version: 1,
+      model_route_id: 'route-1', workspace_profile_id: null, workspace_profile_version: null,
+      sandbox_profile_id: null, sandbox_profile_version: null, approval_policy: {}, runtime_options: {}, created_by: 'admin-local',
+    },
+  })
+  renderPage()
+
+  await screen.findByText('ODS 到 DWD 工作流')
+  await user.click(screen.getByRole('button', { name: '运行配置' }))
+  await user.click(await screen.findByRole('button', { name: '全部继承默认' }))
+  expect(screen.getByText(/引擎来源：/)).toBeInTheDocument()
+  expect(screen.getByText(/模型来源：/)).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: '保存配置' }))
+
+  await waitFor(() => expect(api.saveDeploymentRuntimeConfig).toHaveBeenCalledWith(
+    'deploy-1',
+    {
+      expected_config_version: 2,
+      mode: 'INHERIT',
+      execution_profile_id: null,
+      execution_profile_version: null,
+      model_route_id: null,
+    },
+    'admin-local',
+  ))
+})
+
+test('warns before saving away a legacy approval policy migration field', async () => {
+  const user = userEvent.setup()
+  baseApiState()
+  api.getDeploymentRuntimeConfig.mockResolvedValue({
+    deployment_id: 'deploy-1', deployment_status: 'ACTIVE', runtime_config_version: 2, revision: {
+      config_version: 2, mode: 'OVERRIDE', execution_profile_id: 'profile-1', execution_profile_version: 1,
+      model_route_id: 'route-1', workspace_profile_id: null, workspace_profile_version: null,
+      sandbox_profile_id: null, sandbox_profile_version: null,
+      approval_policy: { name: 'required-for-write' }, runtime_options: {}, created_by: 'admin-local',
+    },
+  })
+  renderPage()
+
+  await screen.findByText('ODS 到 DWD 工作流')
+  await user.click(screen.getByRole('button', { name: '运行配置' }))
+  expect(await screen.findByText('当前修订包含未接入 Worker 的环境扩展字段')).toBeInTheDocument()
+  expect(screen.getByText(/保存本表单会在下一修订中清除这些字段/)).toBeInTheDocument()
+})
+
+test('tells an existing conversation that it keeps its pinned runtime snapshot', async () => {
+  const user = userEvent.setup()
+  baseApiState()
+  renderPage()
+
+  await screen.findByText('ODS 到 DWD 工作流')
+  await user.click(screen.getByRole('button', { name: '运行配置' }))
+  await user.click(await screen.findByRole('button', { name: '保存配置' }))
+
+  expect(await screen.findByText('运行配置已更新；当前对话仍使用旧 Session 快照。点击“新对话”后使用新配置。')).toBeInTheDocument()
+})
+
 test('switching tenant changes query scope and removes the previous tenant conversations', async () => {
   baseApiState()
   api.listConversations.mockImplementation((employeeId: string, _query: unknown, fakeUser: string) => Promise.resolve({
@@ -220,7 +356,7 @@ test('switching tenant changes query scope and removes the previous tenant conve
   identity.fakeUser = 'admin-other'
   view.rerender(
     <QueryClientProvider client={view.queryClient}>
-      <ConversationWorkbenchPage />
+      <MemoryRouter><ConversationWorkbenchPage /></MemoryRouter>
     </QueryClientProvider>,
   )
 

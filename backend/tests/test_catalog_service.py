@@ -112,7 +112,7 @@ def test_publish_validates_model_route_workspace_and_sandbox_references() -> Non
     assert service.publish_employee_version(identity, employee.employee_id, version.version).status is LifecycleStatus.PUBLISHED
 
 
-def test_publish_rejects_a_disabled_model_route() -> None:
+def test_publish_does_not_depend_on_a_disabled_legacy_model_route() -> None:
     service, identity = _service()
     repository = service.repository
     route = ModelRoute(
@@ -150,18 +150,13 @@ def test_publish_rejects_a_disabled_model_route() -> None:
         ),
     )
 
-    with pytest.raises(DomainError) as disabled:
-        service.publish_employee_version(identity, employee.employee_id, version.version)
-
-    assert disabled.value.code == "DEPENDENCY_VALIDATION_ERROR"
-    assert any(
-        missing.get("kind") == "model_route"
-        and missing.get("reason") == "ROUTE_DISABLED"
-        for missing in disabled.value.details["missing"]
-    )
+    published = service.publish_employee_version(identity, employee.employee_id, version.version)
+    assert published.status is LifecycleStatus.PUBLISHED
+    assert published.execution_profile_id is None
+    assert published.model_route_id is None
 
 
-def test_publish_rejects_a_missing_model_route() -> None:
+def test_publish_does_not_depend_on_a_missing_legacy_model_route() -> None:
     service, identity = _service()
     profile = service.create_profile(identity, "fake", "model-a")
     skill = service.create_skill(identity, "缺失路由 Skill", SkillType.INSTRUCTION, "回答", [])
@@ -177,8 +172,7 @@ def test_publish_rejects_a_missing_model_route() -> None:
         model_route_id="missing-route",
     )
 
-    with pytest.raises(DomainError) as missing:
-        service.publish_employee_version(identity, employee.employee_id, version.version)
-
-    assert missing.value.code == "DEPENDENCY_VALIDATION_ERROR"
-    assert any(item["id"] == "missing-route" for item in missing.value.details["missing"])
+    published = service.publish_employee_version(identity, employee.employee_id, version.version)
+    assert published.status is LifecycleStatus.PUBLISHED
+    assert published.execution_profile_id is None
+    assert published.model_route_id is None

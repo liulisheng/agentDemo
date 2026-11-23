@@ -1,4 +1,8 @@
 services:
+  backend:
+    environment:
+      AGENT_PLATFORM_RUNTIME_ENGINE: deepseek
+
   worker:
     environment:
       PYTHONPATH: /app/backend/src:/app/harness-engine/src

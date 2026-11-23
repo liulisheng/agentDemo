@@ -179,6 +179,7 @@ def test_loaded_session_restores_its_persisted_session_trace_span() -> None:
         "session-1", "platform-1", "tenant-1", "deployment-1", "employee-1", 3,
         "profile-1", 2, None, "trace-1", "runtime-session-1", "ACTIVE",
         '{"trace_id":"trace-1","session_span_id":"session-span-1"}', None,
+        1, "DEPLOYMENT_OVERRIDE", "SYSTEM_DEFAULT", "fake",
     ))
     repository = MySqlExecutionRepository(lambda: _Connection(cursor))
 

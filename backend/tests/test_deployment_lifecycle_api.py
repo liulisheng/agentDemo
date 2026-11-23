@@ -50,6 +50,24 @@ def test_employee_version_and_deployment_lifecycle_api_is_tenant_scoped_and_audi
     )
     assert deployment.status_code == 201
     deployment_id = deployment.json()["id"]
+    profile = client.post(
+        "/api/v1/execution-profiles",
+        headers=admin,
+        json={"engine_name": "fake"},
+    )
+    assert profile.status_code == 201
+    runtime_config = client.put(
+        f"/api/v1/deployments/{deployment_id}/runtime-config",
+        headers=admin,
+        json={
+            "expected_config_version": None,
+            "mode": "OVERRIDE",
+            "execution_profile_id": profile.json()["id"],
+            "execution_profile_version": profile.json()["version"],
+        },
+    )
+    assert runtime_config.status_code == 200
+    assert runtime_config.json()["deployment_status"] == "ACTIVE"
 
     # 成员和其他租户管理员不能借生命周期操作改写本租户状态。
     assert client.post(

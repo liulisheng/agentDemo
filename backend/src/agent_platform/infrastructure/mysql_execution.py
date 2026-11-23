@@ -62,8 +62,13 @@ def _snapshot_data(snapshot: RunSnapshot) -> dict[str, object]:
         "skill_version_refs": [list(ref) for ref in snapshot.skill_version_refs],
         "tool_version_refs": [list(ref) for ref in snapshot.tool_version_refs],
         "execution_profile_id": snapshot.execution_profile_id,
+        "engine_name": snapshot.engine_name,
         "execution_profile_version": snapshot.execution_profile_version,
         "model_route_id": snapshot.model_route_id,
+        "model_alias": snapshot.model_alias,
+        "runtime_config_version": snapshot.runtime_config_version,
+        "runtime_profile_source": snapshot.runtime_profile_source,
+        "runtime_model_route_source": snapshot.runtime_model_route_source,
         "model_route_snapshot": (
             snapshot.model_route_snapshot.to_snapshot_dict()
             if snapshot.model_route_snapshot is not None
@@ -198,8 +203,9 @@ class MySqlExecutionRepository:
                 "(platform_id, tenant_id, session_id, user_id, engine_name, engine_session_id, "
                 "harness_home_ref, workspace_ref, status, metadata_json, deployment_id, employee_id, "
                 "employee_version, execution_profile_id, execution_profile_version, model_route_id, "
+                "runtime_config_version, runtime_profile_source, runtime_model_route_source, "
                 "trace_id, composition_snapshot_json) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE status=VALUES(status), "
                 "harness_home_ref=COALESCE(harness_home_ref,VALUES(harness_home_ref))",
                 (
@@ -211,13 +217,27 @@ class MySqlExecutionRepository:
                     session.runtime_session_ref or session.session_id,
                     session.harness_home_ref,
                     session.status,
-                    _json_dump({"trace_id": session.trace_id, "session_span_id": session.span_id}),
+                    _json_dump(
+                        {
+                            "trace_id": session.trace_id,
+                            "session_span_id": session.span_id,
+                            "model_alias": session.model_alias,
+                            "model_route_snapshot": (
+                                session.model_route_snapshot.to_snapshot_dict()
+                                if session.model_route_snapshot is not None
+                                else None
+                            ),
+                        }
+                    ),
                     session.deployment_id,
                     session.employee_id,
                     session.employee_version,
                     session.execution_profile_id,
                     session.execution_profile_version,
                     session.model_route_id,
+                    session.runtime_config_version,
+                    session.runtime_profile_source,
+                    session.runtime_model_route_source,
                     session.trace_id,
                     _json_dump(
                         {
@@ -226,6 +246,10 @@ class MySqlExecutionRepository:
                             "execution_profile_id": session.execution_profile_id,
                             "execution_profile_version": session.execution_profile_version,
                             "model_route_id": session.model_route_id,
+                            "model_alias": session.model_alias,
+                            "runtime_config_version": session.runtime_config_version,
+                            "runtime_profile_source": session.runtime_profile_source,
+                            "runtime_model_route_source": session.runtime_model_route_source,
                         }
                     ),
                 ),
@@ -264,7 +288,8 @@ class MySqlExecutionRepository:
             cursor.execute(
                 "SELECT session_id, platform_id, tenant_id, deployment_id, employee_id, employee_version, "
                 "execution_profile_id, execution_profile_version, model_route_id, trace_id, engine_session_id, "
-                "status, metadata_json, harness_home_ref "
+                "status, metadata_json, harness_home_ref, runtime_config_version, runtime_profile_source, "
+                "runtime_model_route_source, engine_name "
                 "FROM sessions WHERE platform_id=%s AND tenant_id=%s AND session_id=%s",
                 (identity.platform_id, identity.tenant_id, session_id),
             )
@@ -291,6 +316,21 @@ class MySqlExecutionRepository:
             status=str(row[11]),
             span_id=session_span_id,
             harness_home_ref=str(row[13]) if row[13] is not None else None,
+            runtime_config_version=int(row[14]) if row[14] is not None else None,
+            runtime_profile_source=str(row[15]) if row[15] is not None else None,
+            runtime_model_route_source=str(row[16]) if row[16] is not None else None,
+            engine_name=str(row[17]) if row[17] is not None else "",
+            model_route_snapshot=(
+                ModelRouteSnapshot.from_snapshot_dict(metadata["model_route_snapshot"])
+                if isinstance(metadata, dict)
+                and isinstance(metadata.get("model_route_snapshot"), dict)
+                else None
+            ),
+            model_alias=(
+                str(metadata["model_alias"])
+                if isinstance(metadata, dict) and metadata.get("model_alias") is not None
+                else None
+            ),
         )
 
     def save_run(self, identity: IdentityContext, run: RunRecord, idempotency_key: str) -> None:
@@ -1538,11 +1578,36 @@ class MySqlExecutionRepository:
             skill_version_refs=tuple((str(ref[0]), int(ref[1])) for ref in snapshot_data["skill_version_refs"]),
             tool_version_refs=tuple((str(ref[0]), int(ref[1])) for ref in snapshot_data["tool_version_refs"]),
             execution_profile_id=str(snapshot_data["execution_profile_id"]),
+            engine_name=(
+                str(snapshot_data["engine_name"])
+                if snapshot_data.get("engine_name") is not None
+                else None
+            ),
             execution_profile_version=int(snapshot_data["execution_profile_version"]),
             model_route_id=str(snapshot_data["model_route_id"]) if snapshot_data.get("model_route_id") else None,
+            model_alias=(
+                str(snapshot_data["model_alias"])
+                if snapshot_data.get("model_alias") is not None
+                else None
+            ),
             model_route_snapshot=(
                 ModelRouteSnapshot.from_snapshot_dict(snapshot_data["model_route_snapshot"])
                 if isinstance(snapshot_data.get("model_route_snapshot"), dict)
+                else None
+            ),
+            runtime_config_version=(
+                int(snapshot_data["runtime_config_version"])
+                if snapshot_data.get("runtime_config_version") is not None
+                else None
+            ),
+            runtime_profile_source=(
+                str(snapshot_data["runtime_profile_source"])
+                if snapshot_data.get("runtime_profile_source") is not None
+                else None
+            ),
+            runtime_model_route_source=(
+                str(snapshot_data["runtime_model_route_source"])
+                if snapshot_data.get("runtime_model_route_source") is not None
                 else None
             ),
             hub_resource_refs=tuple(

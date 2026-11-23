@@ -466,7 +466,7 @@ export function EmployeeDetailPage() {
                 <div className="employee-version-workspace-header">
                   <div>
                     <Title level={3}>版本与发布</Title>
-                    <Paragraph type="secondary">每个版本固定自己的 Skills、Tools 和运行配置。</Paragraph>
+                    <Paragraph type="secondary">每个版本固定自己的系统指令、Skills 和 Tools；运行环境由 Deployment 单独管理。</Paragraph>
                   </div>
                   {canConfigure && <Button type="primary" onClick={() => setCreateVersionOpen(true)}>新建空白草稿</Button>}
                 </div>
@@ -505,8 +505,7 @@ export function EmployeeDetailPage() {
                       <div className="employee-version-summary">
                         <span>{item.skill_version_refs.length} Skills</span>
                         <span>{item.tool_version_refs.length} Tools</span>
-                        <span>{item.execution_profile_id} · v{item.execution_profile_version}</span>
-                        <span>{item.model_route_id ? `ModelRoute ${item.model_route_id}` : '默认模型路由'}</span>
+                        <span>运行环境：Deployment 配置</span>
                       </div>
                     </Card>
                   ))}

@@ -13,6 +13,7 @@ from agent_platform.domain.execution import RuntimeStatus, UsageRecord
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import ModelCatalogItem, ModelConnection, SecretRef
 from agent_platform.ports.runtime import RuntimeCapabilities, RuntimeEvent, RuntimeResult
+from tests._runtime_config_helpers import configure_in_memory_deployment
 
 
 class _ToggleModelAuthorization:
@@ -103,7 +104,9 @@ def _model_deployment(identity: IdentityContext):
         model_route_id=route.route_id,
     )
     published = catalog.publish_employee_version(identity, employee.employee_id, version.version)
-    return catalog, routes, catalog.deploy(identity, employee.employee_id, published.version)
+    deployment = catalog.deploy(identity, employee.employee_id, published.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
+    return catalog, routes, deployment
 
 
 def test_denied_or_revoked_model_authorization_blocks_before_runtime_dispatch() -> None:

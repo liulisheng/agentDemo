@@ -11,6 +11,8 @@ from threading import Barrier
 
 import pytest
 
+from tests._runtime_config_helpers import configure_in_memory_deployment
+
 mysql = pytest.importorskip("mysql.connector")
 
 
@@ -120,6 +122,7 @@ def test_session_and_run_snapshots_survive_repository_recreation(mysql_execution
     )
     published = catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, published.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
 
     class CapturingRuntime(FakeRuntimeAdapter):
         def run(self, request):
@@ -361,15 +364,11 @@ def test_session_and_run_snapshots_survive_repository_recreation(mysql_execution
 
 
 def test_expired_runtime_lease_becomes_unknown_without_replay(mysql_execution_database) -> None:
-    from hashlib import sha256
-
     from agent_platform.adapters.identity.fake import FakeIdentityProvider
     from agent_platform.application.catalog_service import CatalogService
     from agent_platform.application.control_plane import ControlPlaneService
     from agent_platform.domain.catalog import SkillType
-    from agent_platform.domain.common import generate_database_id
     from agent_platform.domain.execution import RuntimeStatus
-    from agent_platform.domain.observability import RunRecord
     from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
     from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
 
@@ -382,23 +381,14 @@ def test_expired_runtime_lease_becomes_unknown_without_replay(mysql_execution_da
     version = catalog.create_employee_version(identity, employee.employee_id, "系统指令", [skill.skill_id], [])
     catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
 
     repository = MySqlExecutionRepository(lambda: mysql.connect(**config, database=database))
-    session = ControlPlaneService(catalog, _CountingRuntime(), persistence=repository).create_session(
-        identity, deployment.deployment_id
-    )
-    template = RunRecord(
-        run_id=generate_database_id(),
-        session_id=session.session_id,
-        platform_id=identity.platform_id,
-        tenant_id=identity.tenant_id,
-        trace_id=session.trace_id,
-        prompt_digest=sha256("相同内容".encode()).hexdigest(),
-        snapshot=ControlPlaneService(catalog, _CountingRuntime()).agent_resolver.snapshot(
-            identity, catalog.resolve_deployment(identity, deployment.deployment_id)
-        ),
-        status=RuntimeStatus.UNKNOWN,
-    )
+    submitting_service = ControlPlaneService(catalog, _CountingRuntime(), persistence=repository)
+    session = submitting_service.create_session(identity, deployment.deployment_id)
+    template = submitting_service._prepare_run(
+        identity, session, "相同内容", "lost-runtime-result"
+    )[0]
     pending, created = repository.submit_run(identity, template, "lost-runtime-result")
     assert created
     old_token = repository.acquire_lease(identity, pending.run_id, "worker-lost", lease_seconds=30)
@@ -463,6 +453,7 @@ def test_run_result_transaction_rolls_back_each_write_stage(mysql_execution_data
     version = catalog.create_employee_version(identity, employee.employee_id, "系统指令", [skill.skill_id], [])
     catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
 
     def inject(stage: str) -> None:
         if stage == failure_stage:
@@ -847,6 +838,7 @@ def test_mcp_profile_and_approval_are_tenant_scoped_and_single_use(mysql_executi
     )
     catalog.publish_employee_version(admin, employee.employee_id, employee_version.version)
     deployment = catalog.deploy(admin, employee.employee_id, employee_version.version)
+    deployment = configure_in_memory_deployment(catalog, admin, deployment)
     session = ControlPlaneService(
         catalog, FakeRuntimeAdapter(), persistence=MySqlExecutionRepository(connection_factory)
     ).create_session(admin, deployment.deployment_id)

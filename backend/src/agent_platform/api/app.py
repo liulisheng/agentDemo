@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Sequence
+import shutil
+from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -14,7 +15,14 @@ from fastapi.responses import JSONResponse
 from agent_platform.adapters.identity.fake import FakeAuthorizationProvider
 from agent_platform.adapters.model_authorization import PlatformModelAuthorizationProvider
 from agent_platform.adapters.model_catalog import OpenAICompatibleModelCatalogProvider
-from agent_platform.adapters.model_secrets import EnvironmentModelSecretProvider
+from agent_platform.adapters.model_secrets import (
+    EnvironmentModelSecretProvider,
+    ModelSecretError,
+)
+from agent_platform.adapters.runtime.codex_app_server import (
+    CodexAppServerConfig,
+    CodexAppServerRuntimeAdapter,
+)
 from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
 from agent_platform.adapters.secrets import EnvironmentSecretProvider
 from agent_platform.api.routes import router
@@ -22,9 +30,15 @@ from agent_platform.application.catalog_service import CatalogService, InMemoryC
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversation_turns import ConversationTurnService
 from agent_platform.application.conversations import ConversationService
+from agent_platform.application.deployment_runtime import DeploymentRuntimeConfigService
+from agent_platform.application.engine_providers import (
+    EngineProviderCapabilities,
+    EngineProviderRegistry,
+)
 from agent_platform.application.model_management import ModelManagementService
 from agent_platform.application.model_routes import ModelRouteService
 from agent_platform.application.resource_center import ResourceCenterService
+from agent_platform.application.runtime_defaults import RuntimeDefaultsService
 from agent_platform.application.skill_files import SkillFilePackageService
 from agent_platform.application.tool_approval import ToolApprovalService
 from agent_platform.domain.common import DomainError
@@ -63,6 +77,7 @@ def create_app(
     resource_center_repository: ResourceCenterRepository | None = None,
     object_store: ObjectStore | None = None,
     runtime_adapter: RuntimeAdapter | None = None,
+    engine_provider_registry: EngineProviderRegistry | None = None,
     model_authorization_provider: ModelAuthorizationProvider | None = None,
     model_catalog_provider: ModelCatalogProvider | None = None,
     model_secret_provider: SecretProvider | None = None,
@@ -116,21 +131,12 @@ def create_app(
     )
     resolved_model_secret_provider = model_secret_provider or EnvironmentModelSecretProvider()
     resolved_runtime_adapter = runtime_adapter or FakeRuntimeAdapter()
-    app.state.control_plane_service = ControlPlaneService(
-        catalog,
+    resolved_engine_providers = engine_provider_registry or EngineProviderRegistry.for_runtime(
         resolved_runtime_adapter,
-        persistence=execution_repository,
-        object_store=object_store,
-        resource_center_repository=resource_center_repository,
-        mcp_repository=mcp_repository,
-        conversation_repository=conversation_repository,
-        model_authorization_provider=resolved_model_authorization,
+        simulate_known_engines=runtime_adapter is None,
     )
+    app.state.engine_provider_registry = resolved_engine_providers
     app.state.conversation_service = ConversationService(conversation_repository, object_store)
-    app.state.conversation_turn_service = ConversationTurnService(
-        app.state.conversation_service,
-        app.state.control_plane_service,
-    )
     app.state.tool_approval_service = (
         ToolApprovalService(mcp_repository, object_store)
         if mcp_repository is not None and object_store is not None
@@ -146,6 +152,32 @@ def create_app(
         catalog_provider=resolved_model_catalog_provider,
         secret_provider=resolved_model_secret_provider,
         runtime_adapter=resolved_runtime_adapter,
+    )
+    app.state.runtime_defaults_service = RuntimeDefaultsService(
+        resolved_catalog_repository,
+        app.state.model_management_service,
+        resolved_engine_providers,
+    )
+    app.state.control_plane_service = ControlPlaneService(
+        catalog,
+        resolved_runtime_adapter,
+        persistence=execution_repository,
+        object_store=object_store,
+        resource_center_repository=resource_center_repository,
+        mcp_repository=mcp_repository,
+        conversation_repository=conversation_repository,
+        model_authorization_provider=resolved_model_authorization,
+        runtime_defaults=app.state.runtime_defaults_service,
+        engine_providers=resolved_engine_providers,
+    )
+    app.state.conversation_turn_service = ConversationTurnService(
+        app.state.conversation_service,
+        app.state.control_plane_service,
+    )
+    app.state.deployment_runtime_config_service = DeploymentRuntimeConfigService(
+        resolved_catalog_repository,
+        app.state.model_management_service,
+        resolved_engine_providers,
     )
     app.state.model_test_executor = app.state.model_management_service.execute_test_record
     app.state.resource_center_service = (
@@ -169,9 +201,17 @@ def create_app(
             "RESOURCE_NOT_FOUND": 404,
             "AUTHORIZATION_DENIED": 403,
             "DEPENDENCY_VALIDATION_ERROR": 409,
+            "ENGINE_MODEL_INCOMPATIBLE": 409,
+            "ENGINE_PROVIDER_UNAVAILABLE": 409,
+            "ENGINE_CAPABILITY_UNSUPPORTED": 409,
+            "ENGINE_CONFIGURATION_REQUIRED": 409,
             "DEPLOYMENT_DISABLED": 409,
             "IMMUTABLE_VERSION": 409,
             "IDEMPOTENCY_CONFLICT": 409,
+            "MODEL_ROUTE_IN_USE": 409,
+            "MODEL_ROUTE_VERSION_CONFLICT": 409,
+            "RUNTIME_CONFIGURATION_REQUIRED": 409,
+            "RUNTIME_CONFIG_REVISION_CONFLICT": 409,
             "INVALID_STATE": 409,
             "INVALID_ARGUMENT": 422,
         }
@@ -194,15 +234,11 @@ def create_app(
 
 
 def create_app_from_environment() -> FastAPI:
-    """生产入口只接受显式 Fake 或完整 MySQL 配置，启动只读检查 schema。"""
+    """读取 Fake/MySQL 部署配置；MySQL 默认 DeepSeek 并启动时只读检查 schema。"""
 
     mode = os.environ.get("AGENT_PLATFORM_MODE")
-    runtime_engine = os.environ.get("AGENT_PLATFORM_RUNTIME_ENGINE", "fake").strip().lower()
-    if runtime_engine not in {"fake", "deepseek"}:
-        raise RuntimeError("AGENT_PLATFORM_RUNTIME_ENGINE 只支持 fake 或 deepseek")
+    runtime_engine = _runtime_engine_from_environment(mode)
     if mode == "fake":
-        if runtime_engine != "fake":
-            raise RuntimeError("DeepSeek Runtime 需要 MySQL Run Worker 模式")
         return create_app(mode="fake")
     if mode != "mysql":
         raise RuntimeError("必须显式设置 AGENT_PLATFORM_MODE=mysql 或 AGENT_PLATFORM_MODE=fake")
@@ -269,6 +305,12 @@ def create_app_from_environment() -> FastAPI:
             key_provider=key_provider,
         )
         runtime_adapter = _build_runtime_adapter(runtime_engine, data_root)
+        engine_provider_registry = EngineProviderRegistry.for_runtime(runtime_adapter)
+        codex_adapter = _register_codex_app_server_provider(
+            engine_provider_registry,
+            data_root / "codex-runtime",
+            EnvironmentModelSecretProvider(),
+        )
         from agent_platform.infrastructure.mysql_resource_center import (
             MySqlResourceCenterRepository,
         )
@@ -282,11 +324,71 @@ def create_app_from_environment() -> FastAPI:
             resource_center_repository=MySqlResourceCenterRepository(pool.connection),
             object_store=object_store,
             runtime_adapter=runtime_adapter,
-            lifecycle_resources=(pool,),
+            engine_provider_registry=engine_provider_registry,
+            lifecycle_resources=((pool, codex_adapter) if codex_adapter else (pool,)),
         )
     except Exception:
         pool.close()
         raise
+
+
+def _runtime_engine_from_environment(
+    mode: str | None,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """为 MySQL 和 Fake 入口选择一致、可显式覆盖的默认引擎。"""
+
+    configured_environment = os.environ if environment is None else environment
+    default_engine = "fake" if mode == "fake" else "deepseek"
+    runtime_engine = configured_environment.get(
+        "AGENT_PLATFORM_RUNTIME_ENGINE", default_engine
+    ).strip().lower()
+    if runtime_engine not in {"fake", "deepseek"}:
+        raise RuntimeError("AGENT_PLATFORM_RUNTIME_ENGINE 只支持 fake 或 deepseek")
+    if mode == "fake" and runtime_engine != "fake":
+        raise RuntimeError("DeepSeek Runtime 需要 MySQL Run Worker 模式")
+    return runtime_engine
+
+
+def _register_codex_app_server_provider(
+    registry: EngineProviderRegistry,
+    state_root: Path,
+    secret_provider: SecretProvider,
+) -> CodexAppServerRuntimeAdapter | None:
+    """仅在运维显式开启并配置可执行命令时注册隔离 Codex Provider。"""
+
+    if os.environ.get("AGENT_PLATFORM_CODEX_APP_SERVER_ENABLED", "0") != "1":
+        return None
+    config = CodexAppServerConfig.from_environment(state_root)
+    command_path = config.command[0]
+    if not (Path(command_path).is_file() and os.access(command_path, os.X_OK)) and shutil.which(command_path) is None:
+        raise RuntimeError("Codex app-server 已启用，但配置的 codex 命令不可执行")
+    adapter = CodexAppServerRuntimeAdapter(
+        command=config.command,
+        state_root=config.state_root,
+        secret_resolver=secret_provider.resolve,
+        timeout_seconds=config.timeout_seconds,
+        startup_timeout_seconds=config.startup_timeout_seconds,
+    )
+    runtime_capabilities = EngineProviderCapabilities.from_runtime(adapter.capabilities)
+    registry.register(
+        "codex_cli",
+        adapter,
+        display_name="Codex CLI",
+        model_protocols={"openai-responses"},
+        capabilities=EngineProviderCapabilities(
+            resume=runtime_capabilities.resume,
+            cancellation=runtime_capabilities.cancellation,
+            tool_calls=runtime_capabilities.tool_calls,
+            mcp=runtime_capabilities.mcp,
+            workspace=runtime_capabilities.workspace,
+            sandbox=runtime_capabilities.sandbox,
+            approvals=runtime_capabilities.approvals,
+            model_route_required=True,
+            route_secret_required=True,
+        ),
+    )
+    return adapter
 
 
 def _build_runtime_adapter(runtime_engine: str, state_root: Path) -> RuntimeAdapter:
@@ -342,9 +444,17 @@ def _build_runtime_adapter(runtime_engine: str, state_root: Path) -> RuntimeAdap
         model_snapshot = runtime_request.model_route_snapshot
         if model_snapshot is not None and model_snapshot.secret_ref is not None:
             # SecretRef 仅在 Worker 创建本次 Engine 时解析，不进入持久化快照或 EngineRequest。
-            model_environment["AGENT_PLATFORM_MODEL_API_KEY"] = model_secret_resolver.resolve(
-                model_snapshot.secret_ref
-            )
+            try:
+                model_environment["AGENT_PLATFORM_MODEL_API_KEY"] = model_secret_resolver.resolve(
+                    model_snapshot.secret_ref
+                )
+            except ModelSecretError as error:
+                # 凭据缺失发生在模型请求出站前，稳定归类且不把 SecretRef 写进错误上下文。
+                raise DomainError(
+                    "ENGINE_CONFIGURATION_REQUIRED",
+                    "接收方 ModelRoute 凭据无法解析",
+                    {"model_route_id": model_snapshot.route_id},
+                ) from error
         proxy_launches = []
         for runtime_server in mcp_servers:
             server_profile = runtime_server.profile
@@ -383,7 +493,13 @@ def _build_runtime_adapter(runtime_engine: str, state_root: Path) -> RuntimeAdap
             harness_state_root=state_root,
             profile=harness_profile,
             provider=provider,
-            model=model,
+            model=(
+                runtime_request.employee_context.model_alias
+                if runtime_request.model_route_snapshot is None
+                and runtime_request.employee_context is not None
+                and runtime_request.employee_context.model_alias
+                else model
+            ),
             env=model_environment,
             mcp_proxy_launches=tuple(proxy_launches),
             local_config=local_config,

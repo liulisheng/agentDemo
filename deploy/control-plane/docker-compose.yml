@@ -51,7 +51,12 @@ services:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile.backend
     restart: unless-stopped
-    environment: *backend_environment
+    environment:
+      <<: *backend_environment
+      AGENT_PLATFORM_RUNTIME_ENGINE: ${AGENT_PLATFORM_RUNTIME_ENGINE:-deepseek}
+      AGENT_PLATFORM_DEEPSEEK_PROFILE: ${AGENT_PLATFORM_DEEPSEEK_PROFILE:-sdk-minimal}
+      AGENT_PLATFORM_DEEPSEEK_PROVIDER: ${AGENT_PLATFORM_DEEPSEEK_PROVIDER:-deepseek-official}
+      AGENT_PLATFORM_DEEPSEEK_MODEL: ${AGENT_PLATFORM_DEEPSEEK_MODEL:-deepseek-v4-flash}
     volumes:
       - control_plane_objects:/var/lib/agent-platform
     depends_on:
@@ -72,6 +77,10 @@ services:
     restart: unless-stopped
     environment:
       <<: *backend_environment
+      AGENT_PLATFORM_RUNTIME_ENGINE: ${AGENT_PLATFORM_RUNTIME_ENGINE:-deepseek}
+      AGENT_PLATFORM_DEEPSEEK_PROFILE: ${AGENT_PLATFORM_DEEPSEEK_PROFILE:-sdk-minimal}
+      AGENT_PLATFORM_DEEPSEEK_PROVIDER: ${AGENT_PLATFORM_DEEPSEEK_PROVIDER:-deepseek-official}
+      AGENT_PLATFORM_DEEPSEEK_MODEL: ${AGENT_PLATFORM_DEEPSEEK_MODEL:-deepseek-v4-flash}
       AGENT_PLATFORM_ID: ${AGENT_PLATFORM_ID:-plt-local}
       AGENT_PLATFORM_WORKER_POLL_SECONDS: ${AGENT_PLATFORM_WORKER_POLL_SECONDS:-1}
       AGENT_PLATFORM_WORKER_LEASE_SECONDS: ${AGENT_PLATFORM_WORKER_LEASE_SECONDS:-30}

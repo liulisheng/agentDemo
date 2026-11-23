@@ -52,13 +52,6 @@ class EmployeeVersionCreateRequest(TenantAwareRequest):
     system_prompt: str
     skill_ids: list[str] = Field(default_factory=list)
     tool_ids: list[str] = Field(default_factory=list)
-    execution_profile_id: str = "profile-fake"
-    model_route_id: str | None = None
-    workspace_profile_id: str | None = None
-    workspace_profile_version: int | None = None
-    sandbox_profile_id: str | None = None
-    sandbox_profile_version: int | None = None
-    approval_policy: str = "none"
 
 
 class ResourceVersionRefRequest(BaseModel):
@@ -70,14 +63,6 @@ class EmployeeVersionUpdateRequest(TenantAwareRequest):
     system_prompt: str = Field(min_length=1, max_length=65535)
     skill_version_refs: list[ResourceVersionRefRequest] = Field(default_factory=list)
     tool_version_refs: list[ResourceVersionRefRequest] = Field(default_factory=list)
-    execution_profile_id: str = Field(default="profile-fake", min_length=1, max_length=64)
-    execution_profile_version: int = Field(default=1, ge=1)
-    model_route_id: str | None = Field(default=None, max_length=64)
-    workspace_profile_id: str | None = Field(default=None, max_length=64)
-    workspace_profile_version: int | None = Field(default=None, ge=1)
-    sandbox_profile_id: str | None = Field(default=None, max_length=64)
-    sandbox_profile_version: int | None = Field(default=None, ge=1)
-    approval_policy: str = Field(default="none", max_length=64)
 
 
 class EmployeeSkillBindingsUpdateRequest(TenantAwareRequest):
@@ -118,6 +103,7 @@ class ModelRouteCreateRequest(TenantAwareRequest):
 
 
 class ModelRouteUpdateRequest(TenantAwareRequest):
+    expected_route_version: int = Field(ge=1)
     alias: str | None = Field(default=None, min_length=1, max_length=128)
     connection_id: str | None = Field(default=None, min_length=1, max_length=64)
     catalog_model_id: str | None = Field(default=None, min_length=1, max_length=255)
@@ -197,7 +183,7 @@ class DeliveryCreateRequest(TenantAwareRequest):
 
 class ExecutionProfileCreateRequest(TenantAwareRequest):
     engine_name: str = "fake"
-    model_alias: str = "fake-model"
+    model_alias: str | None = None
     model_route_id: str | None = None
     workspace_profile_id: str | None = None
     workspace_profile_version: int | None = None
@@ -205,9 +191,43 @@ class ExecutionProfileCreateRequest(TenantAwareRequest):
     sandbox_profile_version: int | None = None
     approval_policy: str = "none"
 
+
+class ExecutionProfileVersionUpdateRequest(TenantAwareRequest):
+    """完整替换一个 DRAFT ExecutionProfile 版本的引擎与环境策略。"""
+
+    engine_name: str = Field(min_length=1, max_length=64)
+    workspace_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
+    workspace_profile_version: int | None = Field(default=None, ge=1)
+    sandbox_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
+    sandbox_profile_version: int | None = Field(default=None, ge=1)
+    approval_policy: str = Field(default="none", min_length=1, max_length=64)
+
+
+class ExecutionProfileDefaultRequest(TenantAwareRequest):
+    profile_id: str | None = Field(default=None, min_length=1, max_length=64)
+    profile_version: int | None = Field(default=None, ge=1)
+
+
+class ModelRouteDefaultRequest(TenantAwareRequest):
+    route_id: str | None = Field(default=None, min_length=1, max_length=64)
+
 class DeploymentRollbackRequest(TenantAwareRequest):
     employee_id: str
     version: int
+
+
+class DeploymentRuntimeConfigRequest(TenantAwareRequest):
+    expected_config_version: int | None = Field(default=None, ge=0)
+    mode: str = Field(min_length=1, max_length=16)
+    execution_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
+    execution_profile_version: int | None = Field(default=None, ge=1)
+    model_route_id: str | None = Field(default=None, min_length=1, max_length=64)
+    workspace_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
+    workspace_profile_version: int | None = Field(default=None, ge=1)
+    sandbox_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
+    sandbox_profile_version: int | None = Field(default=None, ge=1)
+    approval_policy: dict[str, object] = Field(default_factory=dict)
+    runtime_options: dict[str, object] = Field(default_factory=dict)
 
 
 class HubPackageCreateRequest(TenantAwareRequest):

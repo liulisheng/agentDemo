@@ -12,6 +12,7 @@ from agent_platform.domain.catalog import (
     ToolVersion,
     compute_skill_file_manifest_sha256,
 )
+from tests._runtime_config_helpers import configure_in_memory_deployment
 
 
 def test_resolved_employee_context_exposes_schema_only_for_read_and_preview_tools() -> None:
@@ -56,6 +57,7 @@ def test_resolved_employee_context_exposes_schema_only_for_read_and_preview_tool
     )
     published = catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, published.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
 
     resolved = AgentResolver(catalog).resolve(identity, deployment)
 
@@ -149,6 +151,7 @@ def test_resolver_binds_only_selected_read_preview_tools_to_exact_mcp_profile() 
     )
     published = catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, published.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
 
     resolved = AgentResolver(catalog, mcp_repository=McpRepository()).resolve(identity, deployment)
 
@@ -203,6 +206,7 @@ def test_resolver_loads_verified_text_skill_support_files_into_runtime_context()
     )
     published = catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, published.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
 
     class _Store:
         def read_asset(self, asset_id, platform_id, tenant_id, *, max_bytes):
@@ -274,6 +278,7 @@ def test_run_snapshot_pins_model_connection_and_route_before_later_edits() -> No
     )
     published = catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, published.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     resolver = AgentResolver(catalog)
 
     submitted = resolver.resolve(identity, deployment)

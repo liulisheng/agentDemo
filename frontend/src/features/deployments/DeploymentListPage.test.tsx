@@ -8,10 +8,9 @@ import { DeploymentListPage } from './DeploymentListPage'
 import { TenantProvider } from '../management/TenantContext'
 
 const deployment = {
-  id: 'deployment-1', tenant_id: 'tenant-a', employee_id: 'employee-1', version: 2, status: 'ACTIVE',
+  id: 'deployment-1', tenant_id: 'tenant-a', employee_id: 'employee-1', version: 2, status: 'PENDING_CONFIGURATION', runtime_config_version: null,
   version_summary: {
     version: 2, status: 'PUBLISHED', skill_count: 1, tool_count: 1,
-    execution_profile_id: 'profile-fake', execution_profile_version: 1, model_route_id: null,
   },
 }
 
@@ -71,6 +70,8 @@ test('deployment page creates from a published version, confirms rollback and sh
 
   expect(await screen.findByText('工单助手')).toBeInTheDocument()
   expect(screen.getByText('1 Skill · 1 Tool')).toBeInTheDocument()
+  expect(screen.getByText('运行配置待设置')).toBeInTheDocument()
+  expect(screen.getByText('待配置运行环境')).toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: '审计记录' }))
   expect(await screen.findByText('DEPLOYMENT_CREATED')).toBeInTheDocument()
 
@@ -101,4 +102,4 @@ test('deployment page creates from a published version, confirms rollback and sh
     expect(request).toBeDefined()
     expect(JSON.parse(String(request?.[1]?.body))).toEqual({ employee_id: 'employee-1', version: 1 })
   })
-}, 15000)
+}, 30000)

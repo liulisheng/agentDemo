@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
+
 from harness_engine.core import (
     EmployeeContext,
     EngineCapabilities,

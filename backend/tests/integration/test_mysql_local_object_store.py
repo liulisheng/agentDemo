@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_config_helpers import configure_in_memory_deployment
+
 mysql = pytest.importorskip("mysql.connector")
 
 
@@ -425,6 +427,7 @@ def test_gc_protects_message_chunk_run_and_runtime_references(tmp_path: Path, my
     version = catalog.create_employee_version(identity, employee.employee_id, "系统指令", [skill.skill_id], [])
     catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     execution = MySqlExecutionRepository(connection_factory)
     control_plane = ControlPlaneService(catalog, FakeRuntimeAdapter(), persistence=execution)
     session = control_plane.create_session(identity, deployment.deployment_id)

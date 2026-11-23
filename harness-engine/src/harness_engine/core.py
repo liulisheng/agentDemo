@@ -162,6 +162,7 @@ class EmployeeContext:
     skill_instructions: tuple[str, ...] = field(default=(), repr=False)
     skill_files: tuple[SkillFileContext, ...] = ()
     model_route_id: str | None = None
+    model_alias: str | None = None
 
     def __post_init__(self) -> None:
         if not self.employee_id.strip() or self.employee_version < 1:
@@ -176,6 +177,8 @@ class EmployeeContext:
             raise TypeError("skill_files must contain SkillFileContext values")
         if self.model_route_id is not None and not self.model_route_id.strip():
             raise ValueError("model_route_id must be nonblank when provided")
+        if self.model_alias is not None and not self.model_alias.strip():
+            raise ValueError("model_alias must be nonblank when provided")
         refs = tuple((str(skill_id), int(version)) for skill_id, version in self.skill_refs)
         if any(not skill_id.strip() or version < 1 for skill_id, version in refs):
             raise ValueError("skill_refs must contain positive fixed versions")

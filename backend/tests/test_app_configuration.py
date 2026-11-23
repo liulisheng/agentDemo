@@ -20,13 +20,40 @@ def test_environment_entrypoint_requires_explicit_mode(monkeypatch) -> None:
 
 def test_environment_fake_mode_is_explicit_and_needs_no_mysql(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_PLATFORM_MODE", "fake")
+    monkeypatch.delenv("AGENT_PLATFORM_RUNTIME_ENGINE", raising=False)
     monkeypatch.delenv("MYSQL_HOST", raising=False)
     with TestClient(create_app_from_environment()) as client:
         assert client.get("/api/health").json() == {"status": "ok"}
 
 
+def test_mysql_runtime_defaults_to_deepseek_harness(monkeypatch) -> None:
+    from agent_platform.api.app import _runtime_engine_from_environment
+
+    monkeypatch.delenv("AGENT_PLATFORM_RUNTIME_ENGINE", raising=False)
+
+    assert _runtime_engine_from_environment("mysql") == "deepseek"
+
+
+def test_fake_runtime_mode_keeps_fake_as_its_default(monkeypatch) -> None:
+    from agent_platform.api.app import _runtime_engine_from_environment
+
+    monkeypatch.delenv("AGENT_PLATFORM_RUNTIME_ENGINE", raising=False)
+
+    assert _runtime_engine_from_environment("fake") == "fake"
+
+
+def test_mysql_runtime_can_be_explicitly_overridden_to_fake(monkeypatch) -> None:
+    from agent_platform.api.app import _runtime_engine_from_environment
+
+    monkeypatch.setenv("AGENT_PLATFORM_RUNTIME_ENGINE", "fake")
+
+    assert _runtime_engine_from_environment("mysql") == "fake"
+
+
 def test_app_factory_injects_the_selected_runtime_adapter() -> None:
-    runtime = object()
+    from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
+
+    runtime = FakeRuntimeAdapter()
     app = create_app(mode="fake", runtime_adapter=runtime)
 
     assert app.state.control_plane_service.runtime is runtime

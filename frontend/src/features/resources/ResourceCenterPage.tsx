@@ -177,7 +177,11 @@ export function ResourceCenterPage() {
     }, fakeUser),
     onSuccess: async (result) => {
       await invalidateHub()
-      message.success(`${result.mode} 导入已完成`)
+      if (result.runtime_configuration_required) {
+        message.info('员工已导入。请在接收方 Deployment 中选择本地引擎与模型；发布方运行环境不会复制。')
+      } else {
+        message.success(`${result.mode} 导入已完成`)
+      }
     },
   })
 
@@ -431,6 +435,7 @@ export function ResourceCenterPage() {
                     <Text strong>{latest?.name ?? resourceTypeLabels[item.local_resource_type] ?? item.local_resource_type}</Text>
                     <Tag color={item.mode === 'COPY' ? 'blue' : 'purple'}>{item.mode === 'REFERENCE' ? '只读引用' : '租户副本'}</Tag>
                     <Tag>{item.status}</Tag>
+                    {item.runtime_configuration_required && <Tag color="orange">待配置本地运行环境</Tag>}
                   </Space>
                   <div className="hub-import-meta">
                     Hub v{item.hub_version} · 本地 {item.local_resource_type} {item.local_resource_id} · 摘要 {item.manifest_sha256.slice(0, 12)}

@@ -13,6 +13,7 @@ from agent_platform.domain.catalog import SkillType
 from agent_platform.domain.common import DomainError
 from agent_platform.domain.observability import SpanType
 from agent_platform.ports.runtime import RuntimeEvent
+from tests._runtime_config_helpers import configure_in_memory_deployment
 
 
 def _published_service() -> tuple[ControlPlaneService, object, object]:
@@ -30,6 +31,7 @@ def _published_service() -> tuple[ControlPlaneService, object, object]:
     )
     catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     service = ControlPlaneService(catalog, FakeRuntimeAdapter())
     return service, identity, deployment
 

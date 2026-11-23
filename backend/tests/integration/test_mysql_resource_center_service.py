@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_config_helpers import configure_in_memory_deployment
+
 mysql = pytest.importorskip("mysql.connector")
 
 
@@ -289,6 +291,9 @@ def test_publish_local_resources_to_hub_with_exact_dependency_versions(
         referenced_employee.local_resource_id,
         referenced_employee.local_resource_version,
     )
+    reference_deployment = configure_in_memory_deployment(
+        recipient_catalog, other, reference_deployment
+    )
     reference_control_plane = ControlPlaneService(recipient_catalog, FakeRuntimeAdapter())
     reference_session = reference_control_plane.create_session(
         other, reference_deployment.deployment_id
@@ -365,6 +370,9 @@ def test_publish_local_resources_to_hub_with_exact_dependency_versions(
     )
     runtime_deployment = recipient_catalog.deploy(
         other, runtime_employee.local_resource_id, runtime_employee.local_resource_version
+    )
+    runtime_deployment = configure_in_memory_deployment(
+        recipient_catalog, other, runtime_deployment
     )
     resolved_control_plane = ControlPlaneService(
         recipient_catalog,
@@ -890,6 +898,7 @@ def test_hub_file_package_copy_and_reference_run_keep_tenant_boundary(
     deployment = recipient_catalog.deploy(
         recipient, referenced_employee.local_resource_id, referenced_employee.local_resource_version
     )
+    deployment = configure_in_memory_deployment(recipient_catalog, recipient, deployment)
     control_plane = ControlPlaneService(
         recipient_catalog,
         runtime,
@@ -1162,6 +1171,8 @@ def test_mysql_local_object_store_resource_center_copy_reference_full_api_flow(
         )
         assert response.status_code == 201, response.text
         imported[mode] = response.json()
+        assert imported[mode]["runtime_configuration_required"] is True
+        assert imported[mode]["next_action"] == "CONFIGURE_DEPLOYMENT_RUNTIME"
 
     copy_employee = imported["COPY"]
     copy_employee_id = str(copy_employee["local_resource_id"])
@@ -1196,10 +1207,6 @@ def test_mysql_local_object_store_resource_center_copy_reference_full_api_flow(
             "tool_version_refs": [
                 {"resource_id": copy_tool_ref["tool_id"], "version": copy_tool_ref["version"]}
             ],
-            "execution_profile_id": copy_version_data["execution_profile_id"],
-            "execution_profile_version": copy_version_data["execution_profile_version"],
-            "model_route_id": copy_version_data["model_route_id"],
-            "approval_policy": copy_version_data["approval_policy"],
         },
     )
     assert copy_saved.status_code == 200, copy_saved.text
@@ -1219,6 +1226,51 @@ def test_mysql_local_object_store_resource_center_copy_reference_full_api_flow(
     assert reference_version.status_code == 200, reference_version.text
     assert reference_version.json()["status"] == "PUBLISHED"
 
+    recipient_runtime = {
+        "COPY": ("codex_cli", "openai-responses", "gpt-codex-recipient"),
+        "REFERENCE": ("deepseek_harness", "openai-chat-completions", "deepseek-recipient"),
+    }
+    profiles_by_mode: dict[str, dict[str, object]] = {}
+    routes_by_mode: dict[str, dict[str, object]] = {}
+    for mode, (engine_name, protocol, model_id) in recipient_runtime.items():
+        connection = recipient.post(
+            "/api/v1/model-connections",
+            headers=recipient_headers,
+            json={
+                "name": f"接收方 {engine_name} 连接",
+                "provider_kind": "openai-compatible",
+                "protocol": protocol,
+                "endpoint": "http://recipient-model.local/v1",
+                "catalog_mode": "MANUAL",
+            },
+        )
+        assert connection.status_code == 201, connection.text
+        model = recipient.post(
+            f"/api/v1/model-connections/{connection.json()['connection_id']}/models",
+            headers=recipient_headers,
+            json={"model_id": model_id, "display_name": model_id},
+        )
+        assert model.status_code == 201, model.text
+        route = recipient.post(
+            "/api/v1/model-routes",
+            headers=recipient_headers,
+            json={
+                "alias": f"本地 {engine_name} 路由",
+                "connection_id": connection.json()["connection_id"],
+                "catalog_model_id": model_id,
+                "model_name": model_id,
+            },
+        )
+        assert route.status_code == 201, route.text
+        routes_by_mode[mode] = route.json()
+        profile = recipient.post(
+            "/api/v1/execution-profiles",
+            headers=recipient_headers,
+            json={"engine_name": engine_name},
+        )
+        assert profile.status_code == 201, profile.text
+        profiles_by_mode[mode] = profile.json()
+
     for mode, employee_id, version in (
         ("COPY", copy_employee_id, copy_employee_version),
         ("REFERENCE", reference_employee_id, reference_employee_version),
@@ -1229,12 +1281,30 @@ def test_mysql_local_object_store_resource_center_copy_reference_full_api_flow(
             json={"tenant_id": "tenant-b", "employee_id": employee_id, "version": version},
         )
         assert deployment.status_code == 201, deployment.text
+        engine_profile = profiles_by_mode[mode]
+        model_route = routes_by_mode[mode]
+        saved_config = recipient.put(
+            f"/api/v1/deployments/{deployment.json()['id']}/runtime-config",
+            headers=recipient_headers,
+            json={
+                "tenant_id": "tenant-b",
+                "expected_config_version": None,
+                "mode": "OVERRIDE",
+                "execution_profile_id": engine_profile["id"],
+                "execution_profile_version": engine_profile["version"],
+                "model_route_id": model_route["route_id"],
+            },
+        )
+        assert saved_config.status_code == 200, saved_config.text
         session = recipient.post(
             "/api/v1/sessions",
             headers=recipient_headers,
             json={"tenant_id": "tenant-b", "deployment_id": deployment.json()["id"]},
         )
         assert session.status_code == 201, session.text
+        engine_name = recipient_runtime[mode][0]
+        assert session.json()["engine_name"] == engine_name
+        assert session.json()["model_route_id"] == model_route["route_id"]
         run = recipient.post(
             f"/api/v1/sessions/{session.json()['id']}/runs",
             headers=recipient_headers,
@@ -1243,6 +1313,9 @@ def test_mysql_local_object_store_resource_center_copy_reference_full_api_flow(
         assert run.status_code == 201, run.text
         assert run.json()["status"] == "succeeded"
         assert run.json()["result"].startswith("fake:")
+        assert run.json()["snapshot"]["engine_name"] == engine_name
+        assert run.json()["snapshot"]["model_route_id"] == model_route["route_id"]
+        assert run.json()["snapshot"]["model_route_snapshot"]["model_id"] == recipient_runtime[mode][2]
         refs = run.json()["snapshot"]["hub_resource_refs"]
         assert refs
         assert {item["mode"] for item in refs} == {mode}

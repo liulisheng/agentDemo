@@ -56,7 +56,7 @@ StaffDeck 中目标员工“小刘”绑定已发布 Skill `dolphinscheduler-dw-
 
 | 位置 | 当前状态 | 接入时要解决的问题 |
 |---|---|---|
-| backend/src/agent_platform/api/app.py、workers/run_worker.py | Conversation turn 经 MySQL 入队；本机 Compose backend/Worker 已应用 V007；默认 Fake，acceptance overlay 显式配置 DeepSeek Harness 与本地兼容 mock | Fake Worker 重启、新 Session/旧同步 API、过期 lease 隔离均已验证；本机 Harness Run 已通过 StaffDeck Stdio 完成预览审批；真实 DeepSeek provider 和跨 Worker 长会话恢复仍未验证 |
+| backend/src/agent_platform/api/app.py、workers/run_worker.py | Conversation turn 经 MySQL 入队；本机 Compose backend/Worker 使用默认 DeepSeek Harness 与租户 ModelRoute；Fake 可显式回退 | Fake Worker 重启、新 Session/旧同步 API、过期 lease 隔离和本机确定性 DeepSeek Harness Run 已验证；本机 Harness Run 也通过 StaffDeck Stdio 完成预览审批；真实 DeepSeek 云端 provider 和跨 Worker 长会话恢复仍未验证 |
 | backend/src/agent_platform/adapters/runtime/harness.py | 每个 Run 用自己的 EngineRequest 创建/关闭 Engine；系统提示、Skill 文件、Schema 和 opaque Session Home 从固定 Run 输入传递；SDK 截短工具名按 Run Schema 还原 | 本机项目/数据源/工作流预览事件进入 Trace，审批引用和摘要可回查；模型端点使用确定性 mock |
 | harness-engine/src/harness_engine/core.py | EngineRequest 带固定 EmployeeContext、带 SHA 的 Skill 文件、READ/PREVIEW EngineToolDefinition 和 opaque Home ref；Fake 不记录正文 | SDK 实际业务调用还需真实模型路由与 Dolphin Profile 验收 |
 | harness-engine/src/harness_engine/engines/deepseek.py | 每 Run 新建 Harness；Session Home 稳定，prompt/工具 patch 独立；SDK close 会中断当前 Run | 本机假模型与假 MCP 已验证，真实容器/生产模型未验证 |
@@ -205,7 +205,7 @@ erDiagram
     TOOL_INVOCATION ||--o| TOOL_APPROVAL_REQUEST : gates
 ~~~
 
-Conversation 与 Session 保持独立。一个 Conversation 可有多个 AgentBinding；单员工工作台按 employee_id 筛选，通常每个绑定对应一个独立 Platform Session。每个 Run 在创建时绑定 EmployeeVersion、SkillVersion、ToolVersion、ExecutionProfile、ModelRoute、MCP Profile 及相关摘要。
+Conversation 与 Session 保持独立。一个 Conversation 可有多个 AgentBinding；单员工工作台按 employee_id 筛选，通常每个绑定对应一个独立 Platform Session。Session 固定 Deployment 配置修订、ExecutionProfile/ModelRoute 来源与模型路由快照；每个 Run 再固定 EmployeeVersion、SkillVersion、ToolVersion、ExecutionProfile、ModelRoute、MCP Profile 及相关摘要。
 
 ER 图中的 RunSnapshot 是 runs.snapshot_json 内的版本化 JSON 文档，不是单独的 MySQL 表。
 ToolInvocationRecord 是平台 Trace 中的 tool 类型 Span，不是独立表；tool_invocation_id 关联该 Span 的 span_id。
@@ -217,9 +217,9 @@ ToolInvocationRecord 是平台 Trace 中的 tool 类型 Span，不是独立表�
 | Conversation | conversation_id、platform/tenant、title、is_group、status | 工作台列表主对象 |
 | AgentBinding | conversation、employee、session、status | 把当前员工绑定到独立 Platform Session |
 | Message | message、conversation、sender、source、text、routing_depth | 用户任务和员工回复；持久化正文放加密对象存储 |
-| SessionRecord | deployment、employee version、trace、runtime_session_ref | 平台会话和 Runtime opaque 引用映射 |
+| SessionRecord | deployment、employee version、runtime_config_version、Profile/Route ID 与来源、model_alias 兼容值、model_route_snapshot、trace、runtime_session_ref | 固定该 Session 使用的接收方运行环境和 Runtime opaque 引用映射 |
 | RunRecord / MySQL runs | status、submitted_by_user_id、idempotency、request_digest、worker、lease、fencing、snapshot_json | 入队、执行、恢复审计和审批授权主体 |
-| RunSnapshot | employee/version、Skill/Tool 精确版本、ExecutionProfile、ModelRoute、文件包快照 | 运行输入和授权不可变基线 |
+| RunSnapshot | employee/version、Skill/Tool 精确版本、runtime_config_version、Profile/Route 来源、model_alias 兼容值与路由快照、文件包快照 | 运行输入和授权不可变基线 |
 | ToolInvocationRecord | tool name/protocol/version/status/input/output refs/approval ref | 记录工具调用和审批关联 |
 | audit_events | actor、event、run/session、fencing、受限 payload | 可核验的操作者与状态变更 |
 
@@ -334,6 +334,16 @@ RunSnapshot 保存用哪个版本与授权执行，不把秘密、prompt 或完�
     "version": 1,
     "engine_name": "deepseek-harness",
     "model_route_id": "route-ds"
+  },
+  "runtime_config_version": 3,
+  "runtime_profile_source": "DEPLOYMENT_OVERRIDE",
+  "runtime_model_route_source": "TENANT_DEFAULT",
+  "model_route_snapshot": {
+    "route_id": "route-ds",
+    "route_version": 1,
+    "model_id": "deepseek-chat",
+    "protocol": "openai-chat-completions",
+    "secret_ref": {"secret_id": "tenant-model-key", "scope": "tenant-b"}
   },
   "model_tool_names_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
   "approval_action_tools_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",

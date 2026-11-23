@@ -24,6 +24,7 @@ import type {
   ToolApprovalPreview,
 } from '../../api/client'
 import { useTenantContext } from '../management/TenantContext'
+import { DeploymentRuntimeConfigurationDialog } from './DeploymentRuntimeConfigurationDialog'
 import {
   ConversationWorkbench,
   type WorkbenchConversation,
@@ -36,6 +37,8 @@ interface EmployeeOption {
   id: string
   name: string
   deploymentId: string
+  deploymentStatus: 'ACTIVE' | 'DISABLED' | 'PENDING_CONFIGURATION'
+  runtimeConfigVersion: number | null
 }
 
 interface WorkbenchConversationContext extends WorkbenchConversation {
@@ -79,22 +82,32 @@ async function loadEmployeeOptions(fakeUser: string): Promise<EmployeeOption[]> 
   const deployments = []
   let cursor: string | null = null
   do {
-    const page = await listDeployments({ status: 'ACTIVE', limit: 200, cursor }, fakeUser)
-    deployments.push(...page.items)
+    const page = await listDeployments({ limit: 200, cursor }, fakeUser)
+    deployments.push(...page.items.filter((item) => item.status === 'ACTIVE' || item.status === 'PENDING_CONFIGURATION'))
     cursor = page.next_cursor ?? null
   } while (cursor)
 
   const selectedDeployments = new Map<string, (typeof deployments)[number]>()
   for (const deployment of deployments) {
     const current = selectedDeployments.get(deployment.employee_id)
-    if (!current || deployment.version > current.version) {
+    if (
+      !current
+      || deployment.version > current.version
+      || (deployment.version === current.version && deployment.status === 'ACTIVE')
+    ) {
       selectedDeployments.set(deployment.employee_id, deployment)
     }
   }
 
   return Promise.all([...selectedDeployments.values()].map(async (deployment) => {
     const employee = await getDigitalEmployee(deployment.employee_id, fakeUser)
-    return { id: deployment.employee_id, name: employee.name, deploymentId: deployment.id }
+    return {
+      id: deployment.employee_id,
+      name: employee.name,
+      deploymentId: deployment.id,
+      deploymentStatus: deployment.status,
+      runtimeConfigVersion: deployment.runtime_config_version,
+    }
   }))
 }
 
@@ -266,6 +279,13 @@ function snapshotFromRun(
     sessionId: conversation.sessionId,
     skills: run.snapshot.skill_ids,
     allowedTools: run.snapshot.tool_ids,
+    engineName: run.snapshot.engine_name,
+    executionProfileVersion: run.snapshot.execution_profile_version,
+    modelRouteAlias: run.snapshot.model_route_snapshot?.route_alias,
+    modelName: run.snapshot.model_route_snapshot?.model_id ?? run.snapshot.model_alias ?? undefined,
+    runtimeConfigVersion: run.snapshot.runtime_config_version,
+    runtimeProfileSource: run.snapshot.runtime_profile_source,
+    runtimeModelRouteSource: run.snapshot.runtime_model_route_source,
   }
 }
 
@@ -279,13 +299,15 @@ function getApprovalId(trace: RunTrace | undefined): string | null {
 
 /** 员工工作台数据容器：按当前租户读取对话，并通过平台 API 提交和审批。 */
 export function ConversationWorkbenchPage() {
-  const { fakeUser } = useTenantContext()
+  const { fakeUser, currentIdentity } = useTenantContext()
   const queryClient = useQueryClient()
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(null)
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null)
   const [runIdOverrides, setRunIdOverrides] = useState<Record<string, string>>({})
   const [optimisticConversation, setOptimisticConversation] = useState<WorkbenchConversationContext | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [runtimeConfigOpen, setRuntimeConfigOpen] = useState(false)
+  const [runtimeConfigNotice, setRuntimeConfigNotice] = useState<string | null>(null)
   const previousFakeUser = useRef(fakeUser)
   const turnKeys = useRef(new Map<string, string>())
   const approvalKeys = useRef(new Map<string, string>())
@@ -373,6 +395,7 @@ export function ConversationWorkbenchPage() {
     setRunIdOverrides({})
     setOptimisticConversation(null)
     setActionError(null)
+    setRuntimeConfigNotice(null)
   }, [fakeUser])
 
   useEffect(() => {
@@ -389,7 +412,7 @@ export function ConversationWorkbenchPage() {
 
   const createConversationMutation = useMutation({
     mutationFn: async () => {
-      if (!activeEmployee) throw new Error('请先选择一名已上线的员工')
+      if (!activeEmployee || activeEmployee.deploymentStatus !== 'ACTIVE') throw new Error('请先为当前员工保存运行配置')
       const session = await createSession(activeEmployee.deploymentId, fakeUser)
       const conversation = await createConversation({
         title: `新对话 ${new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date())}`,
@@ -414,6 +437,7 @@ export function ConversationWorkbenchPage() {
     },
     onSuccess: async (conversation) => {
       setActionError(null)
+      setRuntimeConfigNotice(null)
       setOptimisticConversation(conversation)
       setSelectedConversationId(conversation.id)
       await queryClient.invalidateQueries({ queryKey: ['workbench-conversations', fakeUser, activeEmployeeId] })
@@ -515,10 +539,14 @@ export function ConversationWorkbenchPage() {
   )
 
   return (
+    <>
     <ConversationWorkbench
       employeeName={activeEmployee?.name ?? '没有可运行的员工'}
       employeeOptions={employeeOptions.map(({ id, name }) => ({ id, name }))}
       selectedEmployeeId={activeEmployeeId ?? undefined}
+      deploymentStatus={activeEmployee?.deploymentStatus}
+      runtimeConfigVersion={activeEmployee?.runtimeConfigVersion}
+      runtimeConfigNotice={runtimeConfigNotice}
       conversations={workbenchConversations}
       selectedConversationId={selectedConversationId}
       timeline={timeline}
@@ -539,10 +567,15 @@ export function ConversationWorkbenchPage() {
         setSelectedEmployeeId(employeeId)
         setSelectedConversationId(null)
         setOptimisticConversation(null)
+        setRuntimeConfigNotice(null)
       }}
-      onSelectConversation={setSelectedConversationId}
+      onSelectConversation={(conversationId) => {
+        setSelectedConversationId(conversationId)
+        setRuntimeConfigNotice(null)
+      }}
       onLoadMore={() => { void conversationsQuery.fetchNextPage() }}
-      onNewConversation={activeEmployee ? () => createConversationMutation.mutate() : undefined}
+      onNewConversation={activeEmployee?.deploymentStatus === 'ACTIVE' ? () => createConversationMutation.mutate() : undefined}
+      onOpenRuntimeConfig={activeEmployee ? () => setRuntimeConfigOpen(true) : undefined}
       onSubmit={submitTurn}
       onApprove={canApprove && approvalId ? (previewSha256) => {
         if (authorizedApproval?.preview_sha256 !== previewSha256) {
@@ -553,5 +586,20 @@ export function ConversationWorkbenchPage() {
       } : undefined}
       onReject={canApprove && approvalId ? () => approvalMutation.mutate({ kind: 'reject', approvalId }) : undefined}
     />
+    <DeploymentRuntimeConfigurationDialog
+      open={runtimeConfigOpen}
+      deploymentId={activeEmployee?.deploymentId}
+      employeeName={activeEmployee?.name}
+      canEdit={currentIdentity.roleName === '管理员'}
+      onClose={() => setRuntimeConfigOpen(false)}
+      onSaved={() => {
+        setRuntimeConfigOpen(false)
+        if (selectedConversation) {
+          setRuntimeConfigNotice('运行配置已更新；当前对话仍使用旧 Session 快照。点击“新对话”后使用新配置。')
+        }
+        void queryClient.invalidateQueries({ queryKey: ['workbench-employees', fakeUser] })
+      }}
+    />
+    </>
   )
 }

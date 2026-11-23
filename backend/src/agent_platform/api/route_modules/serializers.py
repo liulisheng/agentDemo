@@ -9,6 +9,7 @@ from agent_platform.domain.catalog import (
     SkillVersion,
     ToolVersion,
 )
+from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig
 from agent_platform.domain.observability import RunRecord, RunTimeline, SessionRecord, TraceSpan
 
 
@@ -72,14 +73,6 @@ def _version_response(value: DigitalEmployeeVersion) -> dict[str, object]:
             {"tool_id": tool_id, "version": version}
             for tool_id, version in value.tool_version_refs
         ],
-        "execution_profile_id": value.execution_profile_id,
-        "model_route_id": value.model_route_id,
-        "workspace_profile_id": value.workspace_profile_id,
-        "workspace_profile_version": value.workspace_profile_version,
-        "sandbox_profile_id": value.sandbox_profile_id,
-        "sandbox_profile_version": value.sandbox_profile_version,
-        "execution_profile_version": value.execution_profile_version,
-        "approval_policy": value.approval_policy,
         "status": value.status.value,
     }
 
@@ -93,15 +86,42 @@ def _deployment_response(value: Deployment) -> dict[str, object]:
         "employee_id": value.employee_id,
         "version": value.employee_version.version,
         "status": value.status.value,
+        "runtime_config_version": value.runtime_config_version,
         "version_summary": {
             "version": value.employee_version.version,
             "status": value.employee_version.status.value,
             "skill_count": len(value.employee_version.skill_version_refs),
             "tool_count": len(value.employee_version.tool_version_refs),
-            "execution_profile_id": value.employee_version.execution_profile_id,
-            "execution_profile_version": value.employee_version.execution_profile_version,
-            "model_route_id": value.employee_version.model_route_id,
         },
+    }
+
+
+def _deployment_runtime_config_response(
+    value: Deployment, config: DeploymentRuntimeConfig | None
+) -> dict[str, object]:
+    """只返回配置修订的资源引用和策略，不序列化路由快照中的 SecretRef。"""
+
+    revision = None
+    if config is not None:
+        revision = {
+            "config_version": config.config_version,
+            "mode": config.config_mode.value,
+            "execution_profile_id": config.execution_profile_id,
+            "execution_profile_version": config.execution_profile_version,
+            "model_route_id": config.model_route_id,
+            "workspace_profile_id": config.workspace_profile_id,
+            "workspace_profile_version": config.workspace_profile_version,
+            "sandbox_profile_id": config.sandbox_profile_id,
+            "sandbox_profile_version": config.sandbox_profile_version,
+            "approval_policy": dict(config.approval_policy),
+            "runtime_options": dict(config.runtime_options),
+            "created_by": config.created_by,
+        }
+    return {
+        "deployment_id": value.deployment_id,
+        "deployment_status": value.status.value,
+        "runtime_config_version": value.runtime_config_version,
+        "revision": revision,
     }
 
 
@@ -113,6 +133,14 @@ def _session_response(value: SessionRecord) -> dict[str, object]:
         "trace_id": value.trace_id,
         "runtime_session_ref": value.runtime_session_ref,
         "status": value.status,
+        "execution_profile_id": value.execution_profile_id,
+        "execution_profile_version": value.execution_profile_version,
+        "engine_name": value.engine_name,
+        "model_route_id": value.model_route_id,
+        "model_alias": value.model_alias,
+        "runtime_config_version": value.runtime_config_version,
+        "runtime_profile_source": value.runtime_profile_source,
+        "runtime_model_route_source": value.runtime_model_route_source,
     }
 
 
@@ -131,6 +159,25 @@ def _run_response(value: RunRecord) -> dict[str, object]:
             "skill_ids": list(value.snapshot.skill_version_ids),
             "tool_ids": list(value.snapshot.tool_version_ids),
             "execution_profile_id": value.snapshot.execution_profile_id,
+            "engine_name": value.snapshot.engine_name,
+            "execution_profile_version": value.snapshot.execution_profile_version,
+            "model_route_id": value.snapshot.model_route_id,
+            "model_alias": value.snapshot.model_alias,
+            "runtime_config_version": value.snapshot.runtime_config_version,
+            "runtime_profile_source": value.snapshot.runtime_profile_source,
+            "runtime_model_route_source": value.snapshot.runtime_model_route_source,
+            "model_route_snapshot": (
+                {
+                    "route_id": value.snapshot.model_route_snapshot.route_id,
+                    "route_version": value.snapshot.model_route_snapshot.route_version,
+                    "route_alias": value.snapshot.model_route_snapshot.route_alias,
+                    "provider_kind": value.snapshot.model_route_snapshot.provider_kind,
+                    "model_id": value.snapshot.model_route_snapshot.model_id,
+                    "protocol": value.snapshot.model_route_snapshot.protocol,
+                }
+                if value.snapshot.model_route_snapshot is not None
+                else None
+            ),
             "hub_resource_refs": [
                 {
                     "resource_type": item.local_resource_type,

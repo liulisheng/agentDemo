@@ -1,7 +1,7 @@
 # 后端与 Harness 引擎关系
 
-状态：RuntimeAdapter 端口、Harness 适配原型和 MySQL 租约仓储已存在；生产 Worker 执行闭环尚未接通
-更新时间：2026-11-18
+状态：EngineProviderRegistry、Session/Run 配置快照和 MySQL Worker 执行闭环已接通；Codex app-server 需显式启用
+更新时间：2026-11-22
 
 本文前半部描述目标分层。当前实现状态、代码缺口、MCP Stdio、审批和工作台交互的统一方案见[Harness 数字员工执行闭环设计](Harness员工执行闭环设计.md)。
 
@@ -15,11 +15,12 @@ flowchart LR
     APP --> POLICY[身份 / 租户 / 发布 / 策略]
     APP --> QUEUE[Run Queue]
     QUEUE --> WORKER[Backend Run Worker]
-    WORKER --> ADAPTER[RuntimeAdapter]
+    WORKER --> REGISTRY[EngineProviderRegistry]
+    REGISTRY --> ADAPTER[RuntimeAdapter]
     ADAPTER --> HE[harness-engine]
     HE --> DS[DeepSeek Harness]
-    HE --> FAKE[Fake Runtime]
-    HE --> FUTURE[Codex / Hermes / Generic CLI]
+    ADAPTER --> FAKE[Fake Runtime]
+    ADAPTER --> CODEX[Codex app-server]
     WORKER --> DB[(Platform Storage)]
     WORKER --> OBS[Trace / Usage / Audit]
 ```
@@ -77,40 +78,32 @@ flowchart LR
 
 ## 三、RuntimeAdapter 边界
 
-下列接口是目标边界的示意。当前 Protocol 定义位于 backend/src/agent_platform/ports/runtime.py，实际字段尚未完全覆盖 on_event 与创建 Session 的 request 参数。
+实际 Protocol 定义位于 `backend/src/agent_platform/ports/runtime.py`，适配器通过平台 RuntimeRequest/RuntimeResult 传递一次 Run 上下文和标准化事件，不让 API 请求携带本机命令或进程环境。
 
 backend 使用统一的 RuntimeAdapter：
 
 ```python
 class RuntimeAdapter(Protocol):
-    def capabilities(self) -> RuntimeCapabilities: ...
+    capabilities: RuntimeCapabilities
 
-    def create_session(self, request: SessionCreateRequest) -> RuntimeSessionRef: ...
-
-    def resume_session(self, ref: RuntimeSessionRef) -> RuntimeSessionRef: ...
-
-    def run(
-        self,
-        request: RuntimeRequest,
-        on_event: EventHandler | None = None,
-    ) -> RuntimeResult: ...
-
-    def cancel(self, run_id: str) -> CancelResult: ...
-
-    def close(self) -> None: ...
+    def create_session(self) -> str: ...
+    def resume_session(self, session_ref: str) -> str: ...
+    def run(self, request: RuntimeRequest) -> RuntimeResult: ...
+    def cancel(self, session_ref: str) -> bool: ...
 ```
 
 适配器实现：
 
 ~~~text
 backend/src/agent_platform/adapters/runtime/
-├── harness.py            # Harness 适配原型
-├── fake.py               # 当前可用的 Fake Runtime
-├── cli.py                # CLI 适配边界
-└── registry.py           # Runtime 注册表原型
-~~~
+├── harness.py            # DeepSeek Harness RuntimeAdapter
+├── codex_app_server.py   # 显式启用的 Codex app-server RuntimeAdapter
+├── fake.py               # 离线 Fake Runtime
+├── cli.py                # 受控 CLI 进程调用边界
+└── registry.py           # 底层 Runtime 工厂兼容层
 
-上方目录是现有文件位置；Harness 适配器当前尚未成为 MySQL 模式 API 的执行引擎。
+backend/src/agent_platform/application/engine_providers.py
+└── EngineProviderRegistry # 按 Profile 选择 adapter 并校验协议/能力
 
 ## 四、平台 Session 与 Runtime Session
 
@@ -162,11 +155,12 @@ sequenceDiagram
 
     UI->>API: 提交用户消息
     API->>APP: 解析身份、租户和 Deployment
-    APP->>APP: 解析 DigitalEmployeeVersion
-    APP->>APP: 解析 ExecutionProfile
+    APP->>APP: 解析 DigitalEmployeeVersion 员工内容
+    APP->>APP: 解析 Deployment EngineProfile/ModelRoute 覆盖和独立默认
+    APP->>APP: Session 固定配置修订、来源与模型路由快照
     APP->>APP: 创建 Platform Session/Run
     APP->>W: 投递 Run
-    W->>A: 创建或恢复 Runtime Session
+    W->>A: 使用 RunSnapshot 中的引擎/模型配置创建或恢复 Runtime Session
     A->>HE: 调用引擎无关协议
     HE->>RT: 执行 Agent Loop
     RT-->>HE: 模型、工具和 Runtime 事件
@@ -175,6 +169,8 @@ sequenceDiagram
     W->>APP: 保存消息、Trace、Usage 和状态
     APP-->>UI: 返回流式事件和最终结果
 ```
+
+Worker 的 EngineProvider、ExecutionProfile、ModelRoute 和来源只能从 RunSnapshot 读取，并交叉核对所属 Session 固定的引擎。Profile/依赖撤销或 SecretRef 在模型 Turn 出站前失败时，Run 以 `FAILED` 和稳定错误类别收尾；Trace 不保存端点、SecretRef 或密钥。Runtime 调用后发生超时或连接中断时结果不确定，Run 收敛为 `UNKNOWN`，使用 `complete_run` 持久化 Trace 错误 Span 并隔离 Session Runtime lease；UNKNOWN 不自动重试、不切换 Fake 或其他 Provider。失去租约的旧 Worker 仍由 fencing token 阻止写回。
 
 ## 六、上下文、记忆和工作区边界
 
@@ -205,19 +201,19 @@ sequenceDiagram
 已存在：
 
 - RuntimeAdapter Protocol 和平台 RuntimeRequest / RuntimeResult 类型。
-- HarnessRuntimeAdapter 原型、FakeRuntimeAdapter 和 RuntimeRegistry。
-- Session、Run、RunSnapshot、Trace、Usage、MySQL 租约与 fencing 持久化。
-- DeepSeek/Fake Harness Engine 生命周期和 Stdio MCP Server 示例。
+- Session 保存 Deployment 配置修订、ExecutionProfile/ModelRoute 来源和模型路由快照；RunSnapshot 固定同一组解析结果。
+- EngineProviderRegistry 按 Profile 选择已注册 adapter，验证 ModelRoute 协议和 Tool/MCP/Workspace/Sandbox/审批能力；未知 Provider 不回退 Fake。
+- MySQL Worker、Run lease/fencing、Conversation/Message、审批和 Stdio MCP Proxy 闭环。
+- MySQL/Compose 默认注册 DeepSeek Harness，API 与 Run Worker 共用 `AGENT_PLATFORM_RUNTIME_ENGINE`；可显式设为 `fake` 离线运行。DeepSeek Profile 固定引擎，模型 Endpoint/协议/SecretRef 仍由租户 ModelRoute 管理。本机已用 Conversation turn、独立 Worker、本地确定性 ModelRoute 和 DeepSeek SDK 完成一次成功 Run/Trace。Codex app-server 可通过 `AGENT_PLATFORM_CODEX_APP_SERVER_ENABLED=1` 显式注册，命令默认为 `codex app-server --stdio`，可用 `AGENT_PLATFORM_CODEX_APP_SERVER_COMMAND` 覆盖；当前仅接收带租户 SecretRef 的 OpenAI Responses ModelRoute，不接收平台 Tool/MCP 或定制 Workspace/Sandbox/审批要求。
+- Worker RunSnapshot 固定引擎/模型/来源；撤销 Profile 和缺失 Codex SecretRef 的出站前失败、Runtime Turn 超时的 UNKNOWN/不重试和 Trace 错误类别已有定向回归测试。
 
-尚未接通：
+尚未完成：
 
-- api/app.py 的 MySQL 模式仍固定注入 FakeRuntimeAdapter。
-- ControlPlaneService 的 Run 路径仍在请求调用链同步执行；workers 包没有 Worker 主循环。
-- HarnessRuntimeAdapter 使用动态请求对象，Session 恢复依赖本地集合；尚未以真正 EngineRequest 完整传递员工系统指令、Skill 文件和工具调用执行器。
-- DeepSeek 适配当前只把 prompt/session_id 传给 SDK；MCP Profile 未由 Worker 消费。
-- Conversation 列表、审批请求及批准后的一次性 MCP 写操作尚未实现。
+- Codex app-server 的假 JSON-RPC 测试覆盖 start/turn/resume；本机 CLI 已验证 initialize/thread-start，没有调用真实模型。真实模型用量、取消和长时间恢复仍需验证。
+- Claude Code 未注册。Workspace/Sandbox 与更多 Runtime 能力要等 adapter 明确实现并通过隔离验证后再开放。
+- `/enterprise/workbench` 当前员工的 Deployment 配置入口已接入；全局默认与 ExecutionProfile 版本管理位于“模型管理 → 默认运行环境”。Claude Code 仍未注册，需等适配器能力、隔离与凭据契约通过验证。
 
-实施方案、数据格式、状态转换、API 契约、各阶段验收和原型见[Harness 数字员工执行闭环设计](Harness员工执行闭环设计.md)。在 Worker、真实 Harness 输入和 MCP 隔离执行验证完成前，不得把适配器原型当作生产能力。
+实施方案、数据格式、状态转换、API 契约、各阶段验收和原型见[Harness 数字员工执行闭环设计](Harness员工执行闭环设计.md)。Codex 产品集成采用 app-server 持久线程协议；[OpenAI 的 Codex 平台集成说明](https://developers.openai.com/blog/codex-as-a-platform)区分了非交互 exec 与产品级 app-server/SDK 生命周期。
 
 ## 八、验证命令
 

@@ -7,9 +7,12 @@ from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversation_turns import ConversationTurnService
 from agent_platform.application.conversations import ConversationService
+from agent_platform.application.deployment_runtime import DeploymentRuntimeConfigService
+from agent_platform.application.engine_providers import EngineProviderRegistry
 from agent_platform.application.model_management import ModelManagementService
 from agent_platform.application.model_routes import ModelRouteService
 from agent_platform.application.resource_center import ResourceCenterService
+from agent_platform.application.runtime_defaults import RuntimeDefaultsService
 from agent_platform.application.skill_files import SkillFilePackageService
 from agent_platform.application.tool_approval import ToolApprovalService
 from agent_platform.domain.identity import IdentityContext
@@ -54,6 +57,18 @@ def conversation_turn_service(request: Request) -> ConversationTurnService:
     return request.app.state.conversation_turn_service
 
 
+def deployment_runtime_config_service(request: Request) -> DeploymentRuntimeConfigService:
+    """读取应用启动时注入的 Deployment 不可变运行配置服务。"""
+
+    return request.app.state.deployment_runtime_config_service
+
+
+def engine_provider_registry(request: Request) -> EngineProviderRegistry:
+    """读取经过注册的 EngineProvider 清单和能力边界。"""
+
+    return request.app.state.engine_provider_registry
+
+
 def model_route_service(request: Request) -> ModelRouteService:
     """读取应用启动时注入的模型路由服务。"""
 
@@ -64,6 +79,12 @@ def model_management_service(request: Request) -> ModelManagementService:
     """读取租户模型连接、目录、测试任务与可用路由管理服务。"""
 
     return request.app.state.model_management_service
+
+
+def runtime_defaults_service(request: Request) -> RuntimeDefaultsService:
+    """读取应用启动时注入的作用域化引擎/模型默认管理服务。"""
+
+    return request.app.state.runtime_defaults_service
 
 
 def resource_center_service(request: Request) -> ResourceCenterService:

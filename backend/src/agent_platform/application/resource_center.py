@@ -10,7 +10,6 @@ from agent_platform.application.catalog_service import CatalogService
 from agent_platform.domain.catalog import (
     DigitalEmployee,
     DigitalEmployeeVersion,
-    ExecutionProfile,
     LifecycleStatus,
     SkillContentFormat,
     SkillFileEntry,
@@ -218,9 +217,6 @@ class ResourceCenterService:
         source = self.catalog.repository.get_employee_version(identity, source_id, source_version)
         self._require_published(source, resource_type)
         employee = self.catalog.repository.get_employee(identity, source_id)
-        profile = self.catalog.repository.get_profile_version(
-            identity, source.execution_profile_id, source.execution_profile_version
-        )
         dependencies: list[HubResourceDependency] = []
         manifest_dependencies: list[dict[str, object]] = []
         seen: set[tuple[str, int]] = set()
@@ -254,18 +250,6 @@ class ResourceCenterService:
             "role_name": employee.role_name,
             "description": employee.description,
             "system_prompt": source.system_prompt,
-            "execution_profile": {
-                "engine_name": profile.engine_name,
-                "model_alias": profile.model_alias,
-                "tool_policy": list(profile.tool_policy),
-                "context_policy": profile.context_policy,
-                "approval_policy": source.approval_policy,
-                "requires_recipient_model_route": bool(
-                    source.model_route_id or profile.model_route_id
-                ),
-                "requires_recipient_workspace": bool(profile.workspace_profile_id),
-                "requires_recipient_sandbox": bool(profile.sandbox_profile_id),
-            },
         }
         return employee.name, employee.description, content, tuple(dependencies), manifest_dependencies
 
@@ -742,19 +726,6 @@ class ResourceCenterService:
                     status=LifecycleStatus.DRAFT if copied else LifecycleStatus.ACTIVE,
                 ),
             )
-            profile_content = content.get("execution_profile", {})
-            if not isinstance(profile_content, dict):
-                raise DomainError("INVALID_STATE", "Hub Employee Package 执行配置格式非法")
-            profile = ExecutionProfile(
-                profile_id=generate_database_id(),
-                tenant_id=identity.tenant_id,
-                engine_name=str(profile_content.get("engine_name", "fake")),
-                model_alias=str(profile_content.get("model_alias", "fake-model")),
-                tool_policy=tuple(str(item) for item in profile_content.get("tool_policy", [])),
-                context_policy=str(profile_content.get("context_policy", "default")),
-                approval_policy=str(profile_content.get("approval_policy", "none")),
-            ).publish()
-            self.catalog.repository.save_profile(identity, profile)
             skill_refs = tuple((item.local_resource_id, item.local_resource_version) for item in skill_bindings)
             tool_refs = tuple((item.local_resource_id, item.local_resource_version) for item in tool_bindings)
             self.catalog.repository.save_employee_version(
@@ -770,9 +741,7 @@ class ResourceCenterService:
                     ),
                     skill_version_ids=tuple(resource_id for resource_id, _ in skill_refs),
                     tool_version_ids=tuple(resource_id for resource_id, _ in tool_refs),
-                    execution_profile_id=profile.profile_id,
                     status=local_status,
-                    execution_profile_version=profile.version,
                     skill_version_refs=skill_refs,
                     tool_version_refs=tool_refs,
                 ),

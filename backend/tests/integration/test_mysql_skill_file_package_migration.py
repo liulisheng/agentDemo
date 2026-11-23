@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_config_helpers import configure_in_memory_deployment
+
 mysql = pytest.importorskip("mysql.connector")
 
 
@@ -634,6 +636,7 @@ def test_mysql_run_snapshot_and_trace_pin_file_package_refs(migrated_current_dat
     )
     catalog.publish_employee_version(identity, employee.employee_id, employee_version.version)
     deployment = catalog.deploy(identity, employee.employee_id, employee_version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     execution = MySqlExecutionRepository(connection_factory)
     client = TestClient(
         create_app(

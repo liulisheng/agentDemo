@@ -49,14 +49,6 @@ export interface EmployeeVersion {
   tool_ids: string[]
   skill_version_refs: EmployeeVersionRef[]
   tool_version_refs: EmployeeVersionRef[]
-  execution_profile_id: string
-  execution_profile_version: number
-  model_route_id?: string | null
-  workspace_profile_id?: string | null
-  workspace_profile_version?: number | null
-  sandbox_profile_id?: string | null
-  sandbox_profile_version?: number | null
-  approval_policy: string
   status: string
 }
 
@@ -98,7 +90,11 @@ export interface ExecutionProfileSummary {
   tenant_id?: string
   version?: number
   engine_name: string
-  model_alias: string
+  engine_available?: boolean
+  engine_execution_mode?: 'SIMULATION' | 'NATIVE' | null
+  runtime_policy_supported?: boolean
+  unsupported_runtime_fields?: string[]
+  model_alias: string | null
   tool_policy?: string[]
   context_policy?: string
   model_route_id?: string | null
@@ -181,16 +177,80 @@ export interface DeploymentSummary {
   tenant_id: string
   employee_id: string
   version: number
-  status: 'ACTIVE' | 'DISABLED'
+  status: 'ACTIVE' | 'DISABLED' | 'PENDING_CONFIGURATION'
+  runtime_config_version: number | null
   version_summary: {
     version: number
     status: string
     skill_count: number
     tool_count: number
-    execution_profile_id: string
-    execution_profile_version: number
-    model_route_id?: string | null
   }
+}
+
+export interface EngineProviderSummary {
+  engine_name: string
+  display_name: string
+  supported_model_protocols: string[]
+  capabilities: Record<string, boolean>
+  execution_mode: 'SIMULATION' | 'NATIVE'
+}
+
+export interface RuntimeDefaultBinding {
+  binding_id: string
+  scope_type: 'user' | 'tenant' | 'platform'
+  scope_id: string
+  profile_id?: string
+  profile_version?: number
+  route_id?: string
+  status: string
+}
+
+export interface EffectiveEngineProfileSummary {
+  profile_id: string
+  version: number
+  engine_name: string
+  tool_policy: string[]
+  context_policy: string
+  workspace_profile_id: string | null
+  workspace_profile_version: number | null
+  sandbox_profile_id: string | null
+  sandbox_profile_version: number | null
+  approval_policy: string
+  runtime_policy_supported?: boolean
+  unsupported_runtime_fields?: string[]
+  status: string
+}
+
+export interface EffectiveModelRouteSummary {
+  route_id: string
+  route_version: number
+  alias: string
+  model_name: string
+  provider: string
+  protocol: string
+  status: string
+}
+
+export interface DeploymentRuntimeConfigRevision {
+  config_version: number
+  mode: 'INHERIT' | 'OVERRIDE'
+  execution_profile_id: string | null
+  execution_profile_version: number | null
+  model_route_id: string | null
+  workspace_profile_id: string | null
+  workspace_profile_version: number | null
+  sandbox_profile_id: string | null
+  sandbox_profile_version: number | null
+  approval_policy: Record<string, unknown>
+  runtime_options: Record<string, unknown>
+  created_by: string | null
+}
+
+export interface DeploymentRuntimeConfigRecord {
+  deployment_id: string
+  deployment_status: DeploymentSummary['status']
+  runtime_config_version: number | null
+  revision: DeploymentRuntimeConfigRevision | null
 }
 
 export interface AuditEvent {
@@ -232,6 +292,8 @@ export interface HubImport {
   local_resource_version: number
   manifest_sha256: string
   status: string
+  runtime_configuration_required: boolean
+  next_action: 'CONFIGURE_DEPLOYMENT_RUNTIME' | null
 }
 
 export interface HubGrant {
@@ -438,13 +500,6 @@ export async function createEmployeeVersion(
     system_prompt: string
     skill_ids: string[]
     tool_ids?: string[]
-    execution_profile_id?: string
-    model_route_id?: string | null
-    workspace_profile_id?: string | null
-    workspace_profile_version?: number | null
-    sandbox_profile_id?: string | null
-    sandbox_profile_version?: number | null
-    approval_policy?: string
   },
   fakeUser = DEFAULT_FAKE_USER,
 ): Promise<EmployeeVersion> {
@@ -462,14 +517,6 @@ export async function updateEmployeeVersion(
     system_prompt: string
     skill_version_refs: { resource_id: string; version: number }[]
     tool_version_refs: { resource_id: string; version: number }[]
-    execution_profile_id: string
-    execution_profile_version: number
-    model_route_id?: string | null
-    workspace_profile_id?: string | null
-    workspace_profile_version?: number | null
-    sandbox_profile_id?: string | null
-    sandbox_profile_version?: number | null
-    approval_policy?: string
   },
   fakeUser = DEFAULT_FAKE_USER,
 ): Promise<EmployeeVersion> {
@@ -604,6 +651,125 @@ export async function listExecutionProfiles(
   fakeUser = DEFAULT_FAKE_USER,
 ): Promise<Page<ExecutionProfileSummary>> {
   return request('/api/v1/execution-profiles', fakeUser)
+}
+
+export async function listExecutionProfileVersions(
+  profileId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<Page<ExecutionProfileSummary>> {
+  return request(`/api/v1/execution-profiles/${encodeURIComponent(profileId)}/versions`, fakeUser)
+}
+
+export async function createExecutionProfile(
+  input: {
+    engine_name: string
+    approval_policy?: string
+    workspace_profile_id?: string | null
+    workspace_profile_version?: number | null
+    sandbox_profile_id?: string | null
+    sandbox_profile_version?: number | null
+  },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ExecutionProfileSummary> {
+  return request('/api/v1/execution-profiles', fakeUser, { method: 'POST', body: jsonBody(input) })
+}
+
+export async function forkExecutionProfileVersion(
+  profileId: string,
+  sourceVersion: number,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ExecutionProfileSummary> {
+  return request(
+    `/api/v1/execution-profiles/${encodeURIComponent(profileId)}/versions/${sourceVersion}/fork`,
+    fakeUser,
+    { method: 'POST' },
+  )
+}
+
+export async function updateExecutionProfileDraft(
+  profileId: string,
+  version: number,
+  input: {
+    engine_name: string
+    approval_policy: string
+    workspace_profile_id: string | null
+    workspace_profile_version: number | null
+    sandbox_profile_id: string | null
+    sandbox_profile_version: number | null
+  },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ExecutionProfileSummary> {
+  return request(
+    `/api/v1/execution-profiles/${encodeURIComponent(profileId)}/versions/${version}`,
+    fakeUser,
+    { method: 'PUT', body: jsonBody(input) },
+  )
+}
+
+export async function publishExecutionProfileVersion(
+  profileId: string,
+  version: number,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ExecutionProfileSummary> {
+  return request(
+    `/api/v1/execution-profiles/${encodeURIComponent(profileId)}/versions/${version}/publish`,
+    fakeUser,
+    { method: 'POST' },
+  )
+}
+
+export async function listEngineProviders(
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<Page<EngineProviderSummary>> {
+  return request('/api/v1/engine-providers', fakeUser)
+}
+
+export async function getEffectiveEngineProfileDefault(
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ binding: RuntimeDefaultBinding | null; profile: EffectiveEngineProfileSummary | null; source: string | null }> {
+  return request('/api/v1/execution-profile-bindings/effective', fakeUser)
+}
+
+export async function getEngineProfileDefault(
+  scope: 'user' | 'tenant',
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ binding: RuntimeDefaultBinding | null }> {
+  return request(`/api/v1/execution-profile-bindings/${scope}`, fakeUser)
+}
+
+export async function setEngineProfileDefault(
+  scope: 'user' | 'tenant',
+  profile: { profile_id: string | null; profile_version: number | null },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ binding: RuntimeDefaultBinding | null }> {
+  return request(`/api/v1/execution-profile-bindings/${scope}`, fakeUser, {
+    method: 'PUT',
+    body: jsonBody(profile),
+  })
+}
+
+export async function getEffectiveModelRouteDefault(
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ binding: RuntimeDefaultBinding | null; route: EffectiveModelRouteSummary | null; source: string | null }> {
+  return request('/api/v1/model-route-bindings/effective', fakeUser)
+}
+
+export async function getModelRouteDefault(
+  scope: 'user' | 'tenant',
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ binding: RuntimeDefaultBinding | null }> {
+  return request(`/api/v1/model-route-bindings/${scope}`, fakeUser)
+}
+
+export async function setModelRouteDefault(
+  scope: 'user' | 'tenant',
+  routeId: string | null,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ binding: RuntimeDefaultBinding | null }> {
+  return request(`/api/v1/model-route-bindings/${scope}`, fakeUser, {
+    method: 'PUT',
+    body: jsonBody({ route_id: routeId }),
+  })
 }
 
 export async function listModelRoutes(fakeUser = DEFAULT_FAKE_USER): Promise<Page<ModelRouteSummary>> {
@@ -741,6 +907,38 @@ export async function createModelRoute(
   })
 }
 
+export async function updateModelRoute(
+  routeId: string,
+  input: {
+    expected_route_version: number
+    alias?: string
+    connection_id?: string
+    catalog_model_id?: string
+    model_name?: string
+    parameters?: Record<string, unknown>
+    pricing_snapshot_ref?: string | null
+  },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ModelRouteSummary> {
+  return request(`/api/v1/model-routes/${encodeURIComponent(routeId)}`, fakeUser, {
+    method: 'PUT',
+    body: jsonBody(input),
+  })
+}
+
+export async function deleteModelRoute(
+  routeId: string,
+  expectedRouteVersion: number,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<ModelRouteSummary> {
+  const query = new URLSearchParams({ expected_route_version: String(expectedRouteVersion) })
+  return request(
+    `/api/v1/model-routes/${encodeURIComponent(routeId)}?${query.toString()}`,
+    fakeUser,
+    { method: 'DELETE' },
+  )
+}
+
 export async function setModelRouteStatus(
   routeId: string,
   enabled: boolean,
@@ -765,6 +963,34 @@ export async function listDeployments(
   fakeUser = DEFAULT_FAKE_USER,
 ): Promise<Page<DeploymentSummary>> {
   return request(`/api/v1/deployments${queryString(query)}`, fakeUser)
+}
+
+export async function getDeploymentRuntimeConfig(
+  deploymentId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<DeploymentRuntimeConfigRecord> {
+  return request(
+    `/api/v1/deployments/${encodeURIComponent(deploymentId)}/runtime-config`,
+    fakeUser,
+  )
+}
+
+export async function saveDeploymentRuntimeConfig(
+  deploymentId: string,
+  input: {
+    expected_config_version: number | null
+    mode: 'INHERIT' | 'OVERRIDE'
+    execution_profile_id?: string | null
+    execution_profile_version?: number | null
+    model_route_id?: string | null
+  },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<DeploymentRuntimeConfigRecord> {
+  return request(
+    `/api/v1/deployments/${encodeURIComponent(deploymentId)}/runtime-config`,
+    fakeUser,
+    { method: 'PUT', body: jsonBody(input) },
+  )
 }
 
 export async function createDeployment(
@@ -1107,6 +1333,21 @@ export interface RunDetails {
     skill_ids: string[]
     tool_ids: string[]
     execution_profile_id?: string
+    execution_profile_version?: number
+    engine_name?: string
+    model_route_id?: string | null
+    model_alias?: string | null
+    runtime_config_version?: number | null
+    runtime_profile_source?: string | null
+    runtime_model_route_source?: string | null
+    model_route_snapshot?: {
+      route_id: string
+      route_version: number
+      route_alias: string
+      provider_kind: string
+      model_id: string
+      protocol: string
+    } | null
   }
 }
 

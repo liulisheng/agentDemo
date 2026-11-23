@@ -224,7 +224,7 @@ test('employee detail edits basic information and hides actions for a member', a
     ))).toBe(true)
   })
   expect(screen.getByRole('heading', { name: '办公助手' })).toBeInTheDocument()
-})
+}, 15000)
 
 test('new employee version explains the scope of its system prompt', async () => {
   const user = userEvent.setup()

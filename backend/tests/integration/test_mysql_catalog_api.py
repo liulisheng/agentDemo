@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 
 mysql = pytest.importorskip("mysql.connector")
 
+from tests._runtime_config_helpers import configure_api_deployment
+
 
 class _RedactedMySqlConfig(dict[str, object]):
     """避免 pytest 失败回溯打印测试库密码。"""
@@ -141,7 +143,7 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
     updated_route = client.put(
         f"/api/v1/model-routes/{catalog_route_id}",
         headers=headers,
-        json={"alias": "catalog-backed-route-v2"},
+        json={"expected_route_version": 1, "alias": "catalog-backed-route-v2"},
     )
     assert updated_route.status_code == 200
     assert updated_route.json()["route_version"] == 2
@@ -215,9 +217,14 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
     )
     assert deployment.status_code == 201
     deployment_id = deployment.json()["id"]
+    configured = configure_api_deployment(client, headers, deployment.json())
 
     session = client.post("/api/v1/sessions", headers=headers, json={"deployment_id": deployment_id})
     assert session.status_code == 201
+    assert session.json()["runtime_config_version"] == configured["revision"]["config_version"] == 1
+    assert session.json()["execution_profile_id"] == configured["revision"]["execution_profile_id"]
+    assert session.json()["runtime_profile_source"] == "DEPLOYMENT_OVERRIDE"
+    assert session.json()["runtime_model_route_source"] == "DEPLOYMENT_OVERRIDE"
     session_id = session.json()["id"]
     run = client.post(
         f"/api/v1/sessions/{session_id}/runs",
@@ -228,6 +235,9 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
     run_id = run.json()["id"]
     assert run.json()["result"].startswith("fake:")
     assert run.json()["result_ref"].startswith("object:plt-local:tenant-a:")
+    assert run.json()["snapshot"]["runtime_config_version"] == 1
+    assert run.json()["snapshot"]["runtime_profile_source"] == "DEPLOYMENT_OVERRIDE"
+    assert run.json()["snapshot"]["runtime_model_route_source"] == "DEPLOYMENT_OVERRIDE"
 
     conversation = client.post(
         "/api/v1/conversations", headers=headers, json={"title": "支持会话"}
@@ -247,6 +257,7 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
     assert message.status_code == 201
     message_id = message.json()["id"]
     client.close()
+
 
     restarted = TestClient(create_mysql_app())
     assert any(
@@ -277,6 +288,8 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
     assert recovered_run.status_code == 200
     assert recovered_run.json()["result"].startswith("fake:")
     assert recovered_run.json()["result_ref"] == run.json()["result_ref"]
+    assert recovered_run.json()["snapshot"]["runtime_config_version"] == 1
+    assert recovered_run.json()["snapshot"]["model_route_snapshot"]["model_id"] == "fake-model"
     trace = restarted.get(f"/api/v1/runs/{run_id}/trace", headers=headers)
     assert trace.status_code == 200
     assert trace.json()["usage"]["total_tokens"] > 0
@@ -311,6 +324,366 @@ def test_catalog_api_uses_mysql_and_survives_app_restart(tmp_path: Path, mysql_c
         json={"tenant_id": "tenant-b", "name": "forged", "description": "越权"},
     )
     assert forged.status_code == 403
+
+
+def test_mysql_execution_profile_versions_persist_across_repository_restart(
+    mysql_catalog_api_database,
+) -> None:
+    from agent_platform.adapters.identity.fake import FakeIdentityProvider
+    from agent_platform.application.catalog_service import CatalogService
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+
+    database, config = mysql_catalog_api_database
+    identity = FakeIdentityProvider().resolve_identity("admin-local")
+    connection_factory = lambda: mysql.connect(**config, database=database)
+    catalog = CatalogService(MySqlCatalogRepository(connection_factory))
+    published_v1 = catalog.create_profile(identity, "deepseek_harness", "legacy-model")
+    draft_v2 = catalog.fork_profile_version(identity, published_v1.profile_id, 1)
+    updated_v2 = catalog.update_profile_draft(
+        identity,
+        published_v1.profile_id,
+        2,
+        engine_name="codex_cli",
+        workspace_profile_id=None,
+        workspace_profile_version=None,
+        sandbox_profile_id=None,
+        sandbox_profile_version=None,
+        approval_policy="none",
+    )
+    assert draft_v2.model_alias is None
+    assert updated_v2.model_route_id is None
+    catalog.publish_profile_version(identity, published_v1.profile_id, 2)
+
+    restarted = CatalogService(MySqlCatalogRepository(connection_factory))
+    versions = restarted.list_profile_versions(identity, published_v1.profile_id)
+    assert [(item.version, item.status.value) for item in versions] == [
+        (1, "PUBLISHED"),
+        (2, "PUBLISHED"),
+    ]
+    assert versions[0].model_alias == "legacy-model"
+    assert versions[1].engine_name == "codex_cli"
+    assert versions[1].model_alias is None
+
+
+def test_runtime_defaults_persist_independently_across_api_restart(
+    tmp_path: Path, mysql_catalog_api_database
+) -> None:
+    from agent_platform.api.app import create_app
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+    from agent_platform.infrastructure.mysql_conversations import MySqlConversationRepository
+    from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
+    from agent_platform.infrastructure.mysql_mcp import MySqlMcpRepository
+    from agent_platform.infrastructure.mysql_resource_center import MySqlResourceCenterRepository
+    from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
+    from agent_platform.ports.storage import LocalObjectStore
+
+    database, config = mysql_catalog_api_database
+    admin = {"X-Fake-User": "admin-local"}
+    member = {"X-Fake-User": "member-local"}
+    other_admin = {"X-Fake-User": "admin-other"}
+
+    def create_mysql_app():
+        connection_factory = lambda: mysql.connect(**config, database=database)
+        return create_app(
+            catalog_repository=MySqlCatalogRepository(connection_factory),
+            execution_repository=MySqlExecutionRepository(connection_factory),
+            conversation_repository=MySqlConversationRepository(connection_factory),
+            mcp_repository=MySqlMcpRepository(connection_factory),
+            resource_center_repository=MySqlResourceCenterRepository(connection_factory),
+            object_store=LocalObjectStore(
+                tmp_path / "runtime-defaults-objects",
+                metadata_repository=MySqlMediaAssetRepository(connection_factory),
+            ),
+        )
+
+    client = TestClient(create_mysql_app())
+    codex_profile = client.post(
+        "/api/v1/execution-profiles", headers=admin, json={"engine_name": "codex_cli"}
+    )
+    deepseek_profile = client.post(
+        "/api/v1/execution-profiles", headers=admin, json={"engine_name": "deepseek_harness"}
+    )
+    assert codex_profile.status_code == deepseek_profile.status_code == 201
+    assert codex_profile.json()["model_alias"] is None
+    codex_route = client.post(
+        "/api/v1/model-routes",
+        headers=admin,
+        json={"alias": "codex-model", "model_name": "gpt-local", "provider": "fake"},
+    )
+    deepseek_route = client.post(
+        "/api/v1/model-routes",
+        headers=admin,
+        json={"alias": "deepseek-model", "model_name": "deepseek-local", "provider": "fake"},
+    )
+    assert codex_route.status_code == deepseek_route.status_code == 201
+
+    assert client.put(
+        "/api/v1/execution-profile-bindings/tenant",
+        headers=admin,
+        json={"profile_id": codex_profile.json()["id"], "profile_version": 1},
+    ).status_code == 200
+    assert client.put(
+        "/api/v1/execution-profile-bindings/user",
+        headers=admin,
+        json={"profile_id": deepseek_profile.json()["id"], "profile_version": 1},
+    ).status_code == 200
+    assert client.put(
+        "/api/v1/model-route-bindings/tenant",
+        headers=admin,
+        json={"route_id": codex_route.json()["route_id"]},
+    ).status_code == 200
+    assert client.put(
+        "/api/v1/model-route-bindings/user",
+        headers=admin,
+        json={"route_id": deepseek_route.json()["route_id"]},
+    ).status_code == 200
+    client.close()
+
+    restarted = TestClient(create_mysql_app())
+    admin_engine = restarted.get("/api/v1/execution-profile-bindings/effective", headers=admin).json()
+    member_engine = restarted.get("/api/v1/execution-profile-bindings/effective", headers=member).json()
+    admin_model = restarted.get("/api/v1/model-route-bindings/effective", headers=admin).json()
+    member_model = restarted.get("/api/v1/model-route-bindings/effective", headers=member).json()
+    assert (admin_engine["source"], admin_engine["profile"]["engine_name"]) == (
+        "USER_DEFAULT", "deepseek_harness"
+    )
+    assert (member_engine["source"], member_engine["profile"]["engine_name"]) == (
+        "TENANT_DEFAULT", "codex_cli"
+    )
+    assert (admin_model["source"], admin_model["route"]["route_id"]) == (
+        "USER_DEFAULT", deepseek_route.json()["route_id"]
+    )
+    assert (member_model["source"], member_model["route"]["route_id"]) == (
+        "TENANT_DEFAULT", codex_route.json()["route_id"]
+    )
+    assert "secret_ref" not in admin_model["route"]
+
+    skill = restarted.post(
+        "/api/v1/skills",
+        headers=admin,
+        json={"name": "默认解析 Skill", "skill_type": "instruction", "instruction": "回答问题"},
+    )
+    assert skill.status_code == 201
+    assert restarted.post(
+        f"/api/v1/skills/{skill.json()['id']}/publish", headers=admin
+    ).status_code == 200
+    employee = restarted.post(
+        "/api/v1/digital-employees",
+        headers=admin,
+        json={"name": "默认解析员工", "role_name": "助手", "description": "验证数据库默认解析"},
+    )
+    employee_id = employee.json()["id"]
+    version = restarted.post(
+        f"/api/v1/digital-employees/{employee_id}/versions",
+        headers=admin,
+        json={"system_prompt": "按 Skill 回答", "skill_ids": [skill.json()["id"]]},
+    )
+    assert version.status_code == 201
+    assert restarted.post(
+        f"/api/v1/digital-employees/{employee_id}/versions/1/publish", headers=admin
+    ).status_code == 200
+    deployment = restarted.post(
+        "/api/v1/deployments",
+        headers=admin,
+        json={"employee_id": employee_id, "version": 1},
+    )
+    assert deployment.status_code == 201
+    inherited = restarted.put(
+        f"/api/v1/deployments/{deployment.json()['id']}/runtime-config",
+        headers=admin,
+        json={"expected_config_version": None, "mode": "INHERIT"},
+    )
+    assert inherited.status_code == 200
+    session = restarted.post(
+        "/api/v1/sessions",
+        headers=admin,
+        json={"deployment_id": deployment.json()["id"]},
+    )
+    assert session.status_code == 201, session.text
+    assert session.json()["execution_profile_id"] == deepseek_profile.json()["id"]
+    assert session.json()["model_route_id"] == deepseek_route.json()["route_id"]
+    assert session.json()["runtime_profile_source"] == "USER_DEFAULT"
+    assert session.json()["runtime_model_route_source"] == "USER_DEFAULT"
+    default_run = restarted.post(
+        f"/api/v1/sessions/{session.json()['id']}/runs",
+        headers=admin,
+        json={"prompt": "持久化默认配置", "idempotency_key": "mysql-runtime-default-session"},
+    )
+    assert default_run.status_code == 201, default_run.text
+    resumed_app = TestClient(create_mysql_app())
+    resumed_run = resumed_app.get(
+        f"/api/v1/runs/{default_run.json()['id']}", headers=admin
+    )
+    assert resumed_run.status_code == 200
+    assert resumed_run.json()["snapshot"]["execution_profile_id"] == deepseek_profile.json()["id"]
+    assert resumed_run.json()["snapshot"]["model_route_id"] == deepseek_route.json()["route_id"]
+    assert resumed_run.json()["snapshot"]["runtime_profile_source"] == "USER_DEFAULT"
+    assert resumed_run.json()["snapshot"]["runtime_model_route_source"] == "USER_DEFAULT"
+    resumed_app.close()
+
+    assert restarted.get(
+        "/api/v1/execution-profile-bindings/effective", headers=other_admin
+    ).json()["profile"] is None
+    assert restarted.get(
+        "/api/v1/model-route-bindings/effective", headers=other_admin
+    ).json()["route"] is None
+    assert restarted.put(
+        "/api/v1/model-route-bindings/user",
+        headers=other_admin,
+        json={"route_id": codex_route.json()["route_id"]},
+    ).status_code == 404
+
+    audit_connection = mysql.connect(**config, database=database)
+    cursor = audit_connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT event_type,COUNT(*) FROM audit_events WHERE event_type IN "
+            "('ENGINE_PROFILE_DEFAULT_UPDATED','MODEL_ROUTE_DEFAULT_UPDATED') GROUP BY event_type"
+        )
+        counts = dict(cursor.fetchall())
+        assert counts["ENGINE_PROFILE_DEFAULT_UPDATED"] == 2
+        assert counts["MODEL_ROUTE_DEFAULT_UPDATED"] == 2
+    finally:
+        cursor.close()
+        audit_connection.close()
+    restarted.close()
+
+
+def test_deployment_runtime_revisions_persist_and_reject_stale_writes(
+    tmp_path: Path, mysql_catalog_api_database
+) -> None:
+    from agent_platform.api.app import create_app
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+    from agent_platform.infrastructure.mysql_conversations import MySqlConversationRepository
+    from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
+    from agent_platform.infrastructure.mysql_mcp import MySqlMcpRepository
+    from agent_platform.infrastructure.mysql_resource_center import MySqlResourceCenterRepository
+    from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
+    from agent_platform.ports.storage import LocalObjectStore
+
+    database, config = mysql_catalog_api_database
+    admin = {"X-Fake-User": "admin-local"}
+    member = {"X-Fake-User": "member-local"}
+    other_admin = {"X-Fake-User": "admin-other"}
+
+    def create_mysql_app():
+        connection_factory = lambda: mysql.connect(**config, database=database)
+        return create_app(
+            catalog_repository=MySqlCatalogRepository(connection_factory),
+            execution_repository=MySqlExecutionRepository(connection_factory),
+            conversation_repository=MySqlConversationRepository(connection_factory),
+            mcp_repository=MySqlMcpRepository(connection_factory),
+            resource_center_repository=MySqlResourceCenterRepository(connection_factory),
+            object_store=LocalObjectStore(
+                tmp_path / "deployment-runtime-objects",
+                metadata_repository=MySqlMediaAssetRepository(connection_factory),
+            ),
+        )
+
+    client = TestClient(create_mysql_app())
+    skill = client.post(
+        "/api/v1/skills",
+        headers=admin,
+        json={"name": "配置 Skill", "skill_type": "instruction", "instruction": "执行"},
+    ).json()
+    assert client.post(f"/api/v1/skills/{skill['id']}/publish", headers=admin).status_code == 200
+    employee = client.post(
+        "/api/v1/digital-employees",
+        headers=admin,
+        json={"name": "配置员工", "role_name": "分析员", "description": "配置持久化验收"},
+    ).json()
+    version = client.post(
+        f"/api/v1/digital-employees/{employee['id']}/versions",
+        headers=admin,
+        json={"system_prompt": "处理", "skill_ids": [skill["id"]]},
+    )
+    assert version.status_code == 201
+    assert client.post(
+        f"/api/v1/digital-employees/{employee['id']}/versions/1/publish", headers=admin
+    ).status_code == 200
+    profile = client.post(
+        "/api/v1/execution-profiles", headers=admin, json={"engine_name": "codex_cli"}
+    ).json()
+    route = client.post(
+        "/api/v1/model-routes",
+        headers=admin,
+        json={"alias": "runtime-route", "model_name": "model-a", "provider": "fake"},
+    ).json()
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=admin,
+        json={"employee_id": employee["id"], "version": 1},
+    ).json()
+    deployment_id = deployment["id"]
+    assert deployment["status"] == "PENDING_CONFIGURATION"
+
+    first = client.put(
+        f"/api/v1/deployments/{deployment_id}/runtime-config",
+        headers=admin,
+        json={
+            "expected_config_version": None,
+            "mode": "OVERRIDE",
+            "execution_profile_id": profile["id"],
+            "execution_profile_version": 1,
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["runtime_config_version"] == 1
+    assert first.json()["deployment_status"] == "ACTIVE"
+    second = client.put(
+        f"/api/v1/deployments/{deployment_id}/runtime-config",
+        headers=admin,
+        json={
+            "expected_config_version": 1,
+            "mode": "OVERRIDE",
+            "model_route_id": route["route_id"],
+        },
+    )
+    assert second.status_code == 200
+    assert second.json()["runtime_config_version"] == 2
+    client.close()
+
+    restarted = TestClient(create_mysql_app())
+    current = restarted.get(
+        f"/api/v1/deployments/{deployment_id}/runtime-config", headers=admin
+    )
+    assert current.status_code == 200
+    assert current.json()["runtime_config_version"] == 2
+    assert current.json()["revision"]["config_version"] == 2
+    assert current.json()["revision"]["execution_profile_id"] is None
+    assert current.json()["revision"]["model_route_id"] == route["route_id"]
+    assert "secret_ref" not in current.text
+    stale = restarted.put(
+        f"/api/v1/deployments/{deployment_id}/runtime-config",
+        headers=admin,
+        json={"expected_config_version": 1, "mode": "INHERIT"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "RUNTIME_CONFIG_REVISION_CONFLICT"
+    assert restarted.put(
+        f"/api/v1/deployments/{deployment_id}/runtime-config",
+        headers=admin,
+        json={"expected_config_version": 1, "mode": "INHERIT"},
+    ).json()["code"] == "RUNTIME_CONFIG_REVISION_CONFLICT"
+    assert restarted.get(
+        f"/api/v1/deployments/{deployment_id}/runtime-config", headers=member
+    ).status_code == 200
+    assert restarted.get(
+        f"/api/v1/deployments/{deployment_id}/runtime-config", headers=other_admin
+    ).status_code == 404
+    audit_connection = mysql.connect(**config, database=database)
+    cursor = audit_connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE resource_type='deployment_runtime_config' "
+            "AND resource_id=%s AND event_type='DEPLOYMENT_RUNTIME_CONFIG_UPDATED'",
+            (deployment_id,),
+        )
+        assert cursor.fetchone()[0] == 2
+    finally:
+        cursor.close()
+        audit_connection.close()
+    restarted.close()
 
 
 def test_mysql_lifecycle_api_keeps_run_idempotency_audit_and_version_pinning(
@@ -391,6 +764,7 @@ def test_mysql_lifecycle_api_keeps_run_idempotency_audit_and_version_pinning(
     )
     assert deployment.status_code == 201
     deployment_id = deployment.json()["id"]
+    configure_api_deployment(client, headers, deployment.json())
     session = client.post("/api/v1/sessions", headers=headers, json={"deployment_id": deployment_id})
     assert session.status_code == 201
     session_id = session.json()["id"]
@@ -573,9 +947,53 @@ def test_mysql_employee_patch_draft_put_archive_and_admin_write_scope(
     )
     assert draft.status_code == 200
     assert draft.json()["system_prompt"] == "保存后的草稿"
-    assert client.post(
+    runtime_fields = {
+        "execution_profile_id",
+        "execution_profile_version",
+        "model_route_id",
+        "workspace_profile_id",
+        "sandbox_profile_id",
+        "approval_policy",
+    }
+    assert not runtime_fields & draft.json().keys()
+    published = client.post(
         f"/api/v1/digital-employees/{employee_id}/versions/1/publish", headers=admin
-    ).status_code == 200
+    )
+    assert published.status_code == 200
+    assert not runtime_fields & published.json().keys()
+    forked = client.post(
+        f"/api/v1/digital-employees/{employee_id}/versions/1/fork", headers=admin
+    )
+    assert forked.status_code == 201
+    assert forked.json()["version"] == 2
+    assert not runtime_fields & forked.json().keys()
+
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT execution_profile_id, execution_profile_version, model_route_id, "
+            "workspace_profile_id, workspace_profile_version, sandbox_profile_id, "
+            "sandbox_profile_version, approval_policy_json FROM digital_employee_versions "
+            "WHERE employee_id=%s ORDER BY version",
+            (employee_id,),
+        )
+        assert cursor.fetchall() == [(None,) * 8, (None,) * 8]
+    finally:
+        cursor.close()
+        connection.close()
+
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+
+    restarted_client = TestClient(
+        create_app(mode="fake", catalog_repository=MySqlCatalogRepository(connection_factory))
+    )
+    persisted_fork = restarted_client.get(
+        f"/api/v1/digital-employees/{employee_id}/versions/2", headers=admin
+    )
+    assert persisted_fork.status_code == 200
+    assert persisted_fork.json()["status"] == "DRAFT"
+    assert not runtime_fields & persisted_fork.json().keys()
     immutable = client.put(
         f"/api/v1/digital-employees/{employee_id}/versions/1",
         headers=admin,
@@ -625,6 +1043,7 @@ def test_environment_mysql_app_wires_pool_without_implicit_seed(
     finally:
         cursor.close()
         connection.close()
+
     monkeypatch.setenv("AGENT_PLATFORM_MODE", "mysql")
     monkeypatch.setenv("AGENT_PLATFORM_IDENTITY_PROVIDER", "fake")
     monkeypatch.setenv("MYSQL_HOST", config["host"])
@@ -653,3 +1072,407 @@ def test_environment_mysql_app_wires_pool_without_implicit_seed(
     finally:
         cursor.close()
         connection.close()
+
+
+def test_mysql_model_route_revoke_checks_live_references_and_preserves_row(
+    tmp_path: Path, mysql_catalog_api_database
+) -> None:
+    from agent_platform.api.app import create_app
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+    from agent_platform.infrastructure.mysql_conversations import MySqlConversationRepository
+    from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
+    from agent_platform.infrastructure.mysql_mcp import MySqlMcpRepository
+    from agent_platform.infrastructure.mysql_resource_center import MySqlResourceCenterRepository
+    from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
+    from agent_platform.ports.storage import LocalObjectStore
+
+    database, config = mysql_catalog_api_database
+    admin = {"X-Fake-User": "admin-local"}
+
+    def create_mysql_app():
+        connection_factory = lambda: mysql.connect(**config, database=database)
+        return create_app(
+            catalog_repository=MySqlCatalogRepository(connection_factory),
+            execution_repository=MySqlExecutionRepository(connection_factory),
+            conversation_repository=MySqlConversationRepository(connection_factory),
+            mcp_repository=MySqlMcpRepository(connection_factory),
+            resource_center_repository=MySqlResourceCenterRepository(connection_factory),
+            object_store=LocalObjectStore(
+                tmp_path / "model-route-revoke-objects",
+                metadata_repository=MySqlMediaAssetRepository(connection_factory),
+            ),
+        )
+
+    client = TestClient(create_mysql_app())
+    connection = client.post(
+        "/api/v1/model-connections",
+        headers=admin,
+        json={
+            "name": "待撤销路由连接",
+            "provider_kind": "openai-compatible",
+            "protocol": "openai-chat-completions",
+            "endpoint": "http://host.docker.internal:63072/v1",
+            "secret_id": "revoke-test-secret-ref",
+            "catalog_mode": "MANUAL",
+        },
+    )
+    assert connection.status_code == 201, connection.text
+    connection_id = connection.json()["connection_id"]
+    assert client.post(
+        f"/api/v1/model-connections/{connection_id}/models",
+        headers=admin,
+        json={"model_id": "revoke-test-model", "display_name": "撤销测试模型"},
+    ).status_code == 201
+    route = client.post(
+        "/api/v1/model-routes",
+        headers=admin,
+        json={
+            "alias": "revoke-test-route",
+            "connection_id": connection_id,
+            "catalog_model_id": "revoke-test-model",
+            "model_name": "revoke-test-model",
+        },
+    )
+    assert route.status_code == 201, route.text
+    route_id = route.json()["route_id"]
+    edited_route = client.put(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        json={"expected_route_version": 1, "alias": "revoke-test-route-v2"},
+    )
+    assert edited_route.status_code == 200, edited_route.text
+    assert edited_route.json()["route_version"] == 2
+    stale_edit = client.put(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        json={"expected_route_version": 1, "alias": "stale-route-edit"},
+    )
+    assert stale_edit.status_code == 409
+    assert stale_edit.json()["code"] == "MODEL_ROUTE_VERSION_CONFLICT"
+    assert client.delete(
+        f"/api/v1/model-routes/{route_id}",
+        headers={"X-Fake-User": "admin-other"},
+        params={"expected_route_version": 2},
+    ).status_code == 404
+
+    bound_default = client.put(
+        "/api/v1/model-route-bindings/tenant",
+        headers=admin,
+        json={"route_id": route_id},
+    )
+    assert bound_default.status_code == 200, bound_default.text
+    blocked_by_default = client.delete(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        params={"expected_route_version": 2},
+    )
+    assert blocked_by_default.status_code == 409
+    assert blocked_by_default.json()["code"] == "MODEL_ROUTE_IN_USE"
+    after_default_conflict = client.get(f"/api/v1/model-routes/{route_id}", headers=admin).json()
+    assert after_default_conflict["status"] == "ACTIVE"
+    assert after_default_conflict["route_version"] == 2
+
+    assert client.put(
+        "/api/v1/model-route-bindings/tenant", headers=admin, json={"route_id": None}
+    ).status_code == 200
+    skill = client.post(
+        "/api/v1/skills",
+        headers=admin,
+        json={"name": "撤销验收 Skill", "skill_type": "instruction", "instruction": "执行"},
+    ).json()
+    assert client.post(f"/api/v1/skills/{skill['id']}/publish", headers=admin).status_code == 200
+    employee = client.post(
+        "/api/v1/digital-employees",
+        headers=admin,
+        json={"name": "撤销验收员工", "role_name": "助手", "description": "测试路由引用"},
+    ).json()
+    version = client.post(
+        f"/api/v1/digital-employees/{employee['id']}/versions",
+        headers=admin,
+        json={"system_prompt": "运行", "skill_ids": [skill["id"]]},
+    )
+    assert version.status_code == 201, version.text
+    assert client.post(
+        f"/api/v1/digital-employees/{employee['id']}/versions/1/publish", headers=admin
+    ).status_code == 200
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=admin,
+        json={"employee_id": employee["id"], "version": 1},
+    ).json()
+    active = configure_api_deployment(client, admin, deployment, route_id=route_id)
+    assert active["deployment_status"] == "ACTIVE"
+    blocked_by_deployment = client.delete(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        params={"expected_route_version": 2},
+    )
+    assert blocked_by_deployment.status_code == 409
+    assert blocked_by_deployment.json()["code"] == "MODEL_ROUTE_IN_USE"
+    after_deployment_conflict = client.get(f"/api/v1/model-routes/{route_id}", headers=admin).json()
+    assert after_deployment_conflict["status"] == "ACTIVE"
+    assert after_deployment_conflict["route_version"] == 2
+
+    session = client.post(
+        "/api/v1/sessions", headers=admin, json={"deployment_id": deployment["id"]}
+    )
+    assert session.status_code == 201, session.text
+    run = client.post(
+        f"/api/v1/sessions/{session.json()['id']}/runs",
+        headers=admin,
+        json={"prompt": "固定路由快照", "idempotency_key": "route-revoke-snapshot"},
+    )
+    assert run.status_code == 201, run.text
+    run_id = run.json()["id"]
+    assert run.json()["snapshot"]["model_route_id"] == route_id
+
+    cleared = client.put(
+        f"/api/v1/deployments/{deployment['id']}/runtime-config",
+        headers=admin,
+        json={"expected_config_version": 1, "mode": "INHERIT"},
+    )
+    assert cleared.status_code == 200, cleared.text
+    revoked = client.delete(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        params={"expected_route_version": 2},
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["status"] == "REVOKED"
+    assert revoked.json()["route_version"] == 3
+    assert client.get(f"/api/v1/model-routes/{route_id}", headers=admin).json()["status"] == "REVOKED"
+    old_run = client.get(f"/api/v1/runs/{run_id}", headers=admin)
+    assert old_run.status_code == 200
+    assert old_run.json()["snapshot"]["model_route_id"] == route_id
+    assert old_run.json()["snapshot"]["model_route_snapshot"]["route_alias"] == "revoke-test-route-v2"
+    rejected_new_run = client.post(
+        f"/api/v1/sessions/{session.json()['id']}/runs",
+        headers=admin,
+        json={"prompt": "撤销后不能新运行", "idempotency_key": "route-revoke-new-run"},
+    )
+    assert rejected_new_run.status_code == 409
+    assert rejected_new_run.json()["code"] == "DEPENDENCY_VALIDATION_ERROR"
+    assert all(
+        item["route_id"] != route_id
+        for item in client.get("/api/v1/model-routes/selectable", headers=admin).json()["items"]
+    )
+
+    reenable_route = client.post(
+        "/api/v1/model-routes",
+        headers=admin,
+        json={
+            "alias": "reenable-test-route",
+            "connection_id": connection_id,
+            "catalog_model_id": "revoke-test-model",
+            "model_name": "revoke-test-model",
+        },
+    )
+    assert reenable_route.status_code == 201, reenable_route.text
+    reenable_config = client.put(
+        f"/api/v1/deployments/{deployment['id']}/runtime-config",
+        headers=admin,
+        json={
+            "expected_config_version": 2,
+            "mode": "OVERRIDE",
+            "model_route_id": reenable_route.json()["route_id"],
+        },
+    )
+    assert reenable_config.status_code == 200, reenable_config.text
+    assert client.post(
+        f"/api/v1/deployments/{deployment['id']}/disable", headers=admin
+    ).status_code == 200
+    assert client.delete(
+        f"/api/v1/model-routes/{reenable_route.json()['route_id']}",
+        headers=admin,
+        params={"expected_route_version": 1},
+    ).status_code == 200
+    reenable = client.post(
+        f"/api/v1/deployments/{deployment['id']}/enable", headers=admin
+    )
+    assert reenable.status_code == 409
+    assert reenable.json()["code"] == "DEPENDENCY_VALIDATION_ERROR"
+
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM model_routes WHERE platform_id='plt-local' AND tenant_id='tenant-a' "
+            "AND route_id=%s AND status='REVOKED'",
+            (route_id,),
+        )
+        assert cursor.fetchone()[0] == 1
+        cursor.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE platform_id='plt-local' AND tenant_id='tenant-a' "
+            "AND resource_type='model_route' AND event_type='MODEL_ROUTE_REVOKED' "
+            "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.route_id'))=%s",
+            (route_id,),
+        )
+        assert cursor.fetchone()[0] == 1
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_mysql_model_route_bindings_race_safely_with_revoke(
+    tmp_path: Path, mysql_catalog_api_database
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from agent_platform.api.app import create_app
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+    from agent_platform.infrastructure.mysql_conversations import MySqlConversationRepository
+    from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
+    from agent_platform.infrastructure.mysql_mcp import MySqlMcpRepository
+    from agent_platform.infrastructure.mysql_resource_center import MySqlResourceCenterRepository
+    from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
+    from agent_platform.ports.storage import LocalObjectStore
+
+    database, config = mysql_catalog_api_database
+    admin = {"X-Fake-User": "admin-local"}
+
+    def create_mysql_app():
+        connection_factory = lambda: mysql.connect(**config, database=database)
+        return create_app(
+            catalog_repository=MySqlCatalogRepository(connection_factory),
+            execution_repository=MySqlExecutionRepository(connection_factory),
+            conversation_repository=MySqlConversationRepository(connection_factory),
+            mcp_repository=MySqlMcpRepository(connection_factory),
+            resource_center_repository=MySqlResourceCenterRepository(connection_factory),
+            object_store=LocalObjectStore(
+                tmp_path / "model-route-race-objects",
+                metadata_repository=MySqlMediaAssetRepository(connection_factory),
+            ),
+        )
+
+    client = TestClient(create_mysql_app())
+    connection = client.post(
+        "/api/v1/model-connections",
+        headers=admin,
+        json={
+            "name": "路由竞争连接",
+            "provider_kind": "openai-compatible",
+            "protocol": "openai-chat-completions",
+            "endpoint": "http://host.docker.internal:63072/v1",
+            "secret_id": "route-race-key-ref",
+            "catalog_mode": "MANUAL",
+        },
+    ).json()
+    connection_id = connection["connection_id"]
+    for model_id in ("binding-race-model", "deployment-race-model"):
+        assert client.post(
+            f"/api/v1/model-connections/{connection_id}/models",
+            headers=admin,
+            json={"model_id": model_id, "display_name": model_id},
+        ).status_code == 201
+
+    routes: dict[str, str] = {}
+    for alias, model_id in (
+        ("binding-race-route", "binding-race-model"),
+        ("deployment-race-route", "deployment-race-model"),
+    ):
+        route = client.post(
+            "/api/v1/model-routes",
+            headers=admin,
+            json={
+                "alias": alias,
+                "connection_id": connection_id,
+                "catalog_model_id": model_id,
+                "model_name": model_id,
+            },
+        )
+        assert route.status_code == 201, route.text
+        routes[alias] = route.json()["route_id"]
+
+    def race(bind_operation, revoke_operation):
+        barrier = Barrier(2)
+
+        def execute(operation):
+            with TestClient(create_mysql_app()) as concurrent_client:
+                barrier.wait(timeout=10)
+                return operation(concurrent_client)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            bind_future = executor.submit(execute, bind_operation)
+            revoke_future = executor.submit(execute, revoke_operation)
+            return bind_future.result(timeout=20), revoke_future.result(timeout=20)
+
+    bind_response, revoke_response = race(
+        lambda concurrent_client: concurrent_client.put(
+            "/api/v1/model-route-bindings/tenant",
+            headers=admin,
+            json={"route_id": routes["binding-race-route"]},
+        ),
+        lambda concurrent_client: concurrent_client.delete(
+            f"/api/v1/model-routes/{routes['binding-race-route']}",
+            headers=admin,
+            params={"expected_route_version": 1},
+        ),
+    )
+    if bind_response.status_code == 200:
+        assert revoke_response.status_code == 409
+        assert revoke_response.json()["code"] == "MODEL_ROUTE_IN_USE"
+        assert client.get(
+            f"/api/v1/model-routes/{routes['binding-race-route']}", headers=admin
+        ).json()["status"] == "ACTIVE"
+    else:
+        assert bind_response.status_code in {404, 409}
+        assert revoke_response.status_code == 200, revoke_response.text
+        assert revoke_response.json()["status"] == "REVOKED"
+
+    skill = client.post(
+        "/api/v1/skills",
+        headers=admin,
+        json={"name": "部署竞争 Skill", "skill_type": "instruction", "instruction": "执行"},
+    ).json()
+    assert client.post(f"/api/v1/skills/{skill['id']}/publish", headers=admin).status_code == 200
+    employee = client.post(
+        "/api/v1/digital-employees",
+        headers=admin,
+        json={"name": "部署竞争员工", "role_name": "助手", "description": "配置竞争"},
+    ).json()
+    version = client.post(
+        f"/api/v1/digital-employees/{employee['id']}/versions",
+        headers=admin,
+        json={"system_prompt": "运行", "skill_ids": [skill["id"]]},
+    )
+    assert version.status_code == 201, version.text
+    assert client.post(
+        f"/api/v1/digital-employees/{employee['id']}/versions/1/publish", headers=admin
+    ).status_code == 200
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=admin,
+        json={"employee_id": employee["id"], "version": 1},
+    ).json()
+
+    config_response, revoke_response = race(
+        lambda concurrent_client: concurrent_client.put(
+            f"/api/v1/deployments/{deployment['id']}/runtime-config",
+            headers=admin,
+            json={
+                "expected_config_version": None,
+                "mode": "OVERRIDE",
+                "model_route_id": routes["deployment-race-route"],
+            },
+        ),
+        lambda concurrent_client: concurrent_client.delete(
+            f"/api/v1/model-routes/{routes['deployment-race-route']}",
+            headers=admin,
+            params={"expected_route_version": 1},
+        ),
+    )
+    if config_response.status_code == 200:
+        assert revoke_response.status_code == 409
+        assert revoke_response.json()["code"] == "MODEL_ROUTE_IN_USE"
+        assert client.get(
+            f"/api/v1/model-routes/{routes['deployment-race-route']}", headers=admin
+        ).json()["status"] == "ACTIVE"
+    else:
+        assert config_response.status_code in {404, 409}
+        assert revoke_response.status_code == 200, revoke_response.text
+        assert revoke_response.json()["status"] == "REVOKED"
+        current = client.get(
+            f"/api/v1/deployments/{deployment['id']}/runtime-config", headers=admin
+        ).json()
+        assert current["deployment_status"] == "PENDING_CONFIGURATION"

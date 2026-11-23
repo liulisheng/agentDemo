@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import shutil
@@ -71,7 +72,7 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
 
     assert first.action is PreflightAction.APPLY_MIGRATIONS
     assert first.applied_migrations == (
-        "V001", "V002", "V003", "V004", "V005", "V006", "V007", "V008"
+        "V001", "V002", "V003", "V004", "V005", "V006", "V007", "V008", "V009"
     )
     assert second.action is PreflightAction.UP_TO_DATE
     assert second.applied_migrations == ()
@@ -79,9 +80,9 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 8
+        assert cursor.fetchone()[0] == 9
         cursor.execute("SELECT version FROM schema_migration_history ORDER BY version")
-        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     finally:
         cursor.close()
         connection.close()
@@ -114,7 +115,7 @@ def test_runner_blocks_checksum_mismatch_before_any_write(disposable_mysql_datab
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 8
+        assert cursor.fetchone()[0] == 9
     finally:
         cursor.close()
         connection.close()
@@ -378,7 +379,7 @@ def test_v007_schema_has_tenant_keys_and_chinese_comments(disposable_mysql_datab
             ("fk_session_runtime_lease_run", "session_runtime_leases", "run_id", "runs"),
         } <= references
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 8
+        assert cursor.fetchone()[0] == 9
     finally:
         cursor.close()
         connection.close()
@@ -573,7 +574,7 @@ def test_v008_model_management_schema_has_tenant_keys_and_chinese_comments(
         assert ("model_test_records", "connection_id", "model_connections", "connection_id") in foreign_keys
 
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 8
+        assert cursor.fetchone()[0] == 9
     finally:
         cursor.close()
         connection.close()
@@ -651,13 +652,334 @@ def test_v008_backfills_multiple_legacy_routes_to_one_tenant_connection(
         )
         assert [row[0] for row in cursor.fetchall()] == ["chat-model", "reasoning-model"]
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 8
+        assert cursor.fetchone()[0] == 9
     finally:
         cursor.close()
         connection.close()
 
 
-def test_v008_down_restores_the_v007_schema_boundary(disposable_mysql_database) -> None:
+def test_v009_runtime_configuration_schema_has_tenant_keys_and_chinese_comments(
+    disposable_mysql_database,
+) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    connection_factory = lambda: mysql.connect(**config, database=database)
+    MigrationRunner(
+        connection_factory,
+        Path(__file__).parents[3] / "docs" / "migrations",
+    ).apply()
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        expected_tables = {"model_route_bindings", "deployment_runtime_config_versions"}
+        cursor.execute(
+            "SELECT table_name,table_comment FROM information_schema.tables "
+            "WHERE table_schema=DATABASE() AND table_name IN "
+            "('model_route_bindings','deployment_runtime_config_versions')"
+        )
+        table_comments = dict(cursor.fetchall())
+        assert set(table_comments) == expected_tables
+        assert all(_has_chinese(comment) for comment in table_comments.values())
+
+        for table in expected_tables:
+            cursor.execute(
+                "SELECT column_name,column_comment FROM information_schema.columns "
+                "WHERE table_schema=DATABASE() AND table_name=%s",
+                (table,),
+            )
+            column_comments = dict(cursor.fetchall())
+            assert column_comments
+            assert all(_has_chinese(comment) for comment in column_comments.values())
+
+        cursor.execute(
+            "SELECT is_nullable,column_comment FROM information_schema.columns "
+            "WHERE table_schema=DATABASE() AND table_name='execution_profiles' "
+            "AND column_name='model_alias'"
+        )
+        assert cursor.fetchone() == (
+            "YES",
+            "历史兼容模型别名；新 Session 模型由独立 ModelRoute 或运行时默认解析",
+        )
+
+        changed_columns = {
+            "deployments": {"runtime_config_version"},
+            "sessions": {
+                "runtime_config_version",
+                "runtime_profile_source",
+                "runtime_model_route_source",
+            },
+            "digital_employee_versions": {
+                "execution_profile_id",
+                "execution_profile_version",
+                "approval_policy_json",
+            },
+        }
+        for table, required in changed_columns.items():
+            cursor.execute(
+                "SELECT column_name,column_comment,is_nullable FROM information_schema.columns "
+                "WHERE table_schema=DATABASE() AND table_name=%s",
+                (table,),
+            )
+            columns = {name: (comment, nullable) for name, comment, nullable in cursor.fetchall()}
+            assert required <= columns.keys()
+            assert all(_has_chinese(columns[name][0]) for name in required)
+        assert columns["execution_profile_id"][1] == "YES"
+        assert columns["execution_profile_version"][1] == "YES"
+        assert columns["approval_policy_json"][1] == "YES"
+
+        cursor.execute(
+            "SELECT table_name,column_name,referenced_table_name,referenced_column_name "
+            "FROM information_schema.key_column_usage WHERE table_schema=DATABASE() "
+            "AND referenced_table_name IS NOT NULL AND table_name IN "
+            "('model_route_bindings','deployment_runtime_config_versions','deployments','sessions')"
+        )
+        foreign_keys = set(cursor.fetchall())
+        assert (
+            "model_route_bindings", "route_id", "model_routes", "route_id"
+        ) in foreign_keys
+        assert (
+            "deployment_runtime_config_versions", "deployment_id", "deployments", "deployment_id"
+        ) in foreign_keys
+        assert (
+            "deployment_runtime_config_versions", "execution_profile_id", "execution_profiles", "profile_id"
+        ) in foreign_keys
+        assert (
+            "sessions", "runtime_config_version", "deployment_runtime_config_versions", "config_version"
+        ) in foreign_keys
+
+        cursor.execute(
+            "SELECT constraint_name,check_clause FROM information_schema.check_constraints "
+            "WHERE constraint_schema=DATABASE() AND constraint_name IN "
+            "('ck_runtime_config_mode','ck_runtime_config_inherit_no_engine_route_override',"
+            "'ck_runtime_config_override_has_value')"
+        )
+        checks = dict(cursor.fetchall())
+        assert set(checks) == {
+            "ck_runtime_config_mode",
+            "ck_runtime_config_inherit_no_engine_route_override",
+            "ck_runtime_config_override_has_value",
+        }
+        assert "INHERIT" in checks["ck_runtime_config_mode"]
+        assert "OVERRIDE" in checks["ck_runtime_config_mode"]
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        assert cursor.fetchone()[0] == 9
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v009_backfills_independent_route_defaults_and_active_deployments(
+    tmp_path: Path, disposable_mysql_database
+) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    project_migrations = Path(__file__).parents[3] / "docs" / "migrations"
+    v008_migrations = tmp_path / "migrations-v008"
+    v008_migrations.mkdir()
+    for version in range(1, 9):
+        migration = next(
+            path
+            for path in project_migrations.glob(f"V{version:03d}__*.sql")
+            if ".down." not in path.name
+        )
+        shutil.copyfile(migration, v008_migrations / migration.name)
+    connection_factory = lambda: mysql.connect(**config, database=database)
+    MigrationRunner(connection_factory, v008_migrations).apply()
+
+    platform_id = "p" + "0" * 25
+    tenant_id = "t" + "0" * 25
+    user_id = "u" + "0" * 25
+    employee_id = "e" + "0" * 25
+    profile_id = "f" + "0" * 25
+    binding_id = "b" + "0" * 25
+    workspace_id = "w" + "0" * 25
+    sandbox_id = "s" + "0" * 25
+    connection_id = "model-conn-a"
+    route_id = "route-local"
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO platforms (platform_id,code,name,status) VALUES (%s,'local','本地平台','ACTIVE')",
+            (platform_id,),
+        )
+        cursor.execute(
+            "INSERT INTO tenants (platform_id,tenant_id,code,name,status) VALUES (%s,%s,'tenant-a','租户 A','ACTIVE')",
+            (platform_id, tenant_id),
+        )
+        cursor.execute(
+            "INSERT INTO users (platform_id,tenant_id,user_id,external_subject,username,display_name,status) "
+            "VALUES (%s,%s,%s,'subject-a','admin-a','管理员 A','ACTIVE')",
+            (platform_id, tenant_id, user_id),
+        )
+        cursor.execute(
+            "INSERT INTO model_connections (platform_id,tenant_id,connection_id,name,provider_kind,protocol,"
+            "endpoint,auth_secret_ref,auth_secret_scope,auth_secret_provider,catalog_mode,status,version) "
+            "VALUES (%s,%s,%s,'本地连接','openai-compatible','openai-chat-completions',"
+            "'http://model.local/v1','secret-ref-a','tenant','environment','MANUAL','ACTIVE',1)",
+            (platform_id, tenant_id, connection_id),
+        )
+        cursor.execute(
+            "INSERT INTO model_catalog_items (platform_id,tenant_id,connection_id,model_id,display_name,"
+            "capabilities_json,catalog_source,status) VALUES (%s,%s,%s,'gpt-local','本地模型',JSON_OBJECT(),'MANUAL','ACTIVE')",
+            (platform_id, tenant_id, connection_id),
+        )
+        cursor.execute(
+            "INSERT INTO model_routes (platform_id,tenant_id,route_id,alias,provider,model_name,endpoint,protocol,"
+            "auth_secret_ref,auth_secret_scope,auth_secret_provider,parameters_json,status,model_connection_id,"
+            "catalog_model_id,route_version) VALUES (%s,%s,%s,'local-route','openai-compatible','gpt-local',"
+            "'http://model.local/v1','openai-chat-completions','secret-ref-a','tenant','environment',JSON_OBJECT(),"
+            "'ACTIVE',%s,'gpt-local',1)",
+            (platform_id, tenant_id, route_id, connection_id),
+        )
+        cursor.execute(
+            "INSERT INTO workspace_profiles (platform_id,tenant_id,workspace_profile_id,version,mode,"
+            "policy_json,status) VALUES (%s,%s,%s,1,'no-files',JSON_OBJECT(),'PUBLISHED')",
+            (platform_id, tenant_id, workspace_id),
+        )
+        cursor.execute(
+            "INSERT INTO sandbox_profiles (platform_id,tenant_id,sandbox_profile_id,version,network_policy,"
+            "resource_limits_json,security_policy_json,status) "
+            "VALUES (%s,%s,%s,1,'deny-all',JSON_OBJECT('cpu_limit',1),JSON_OBJECT(),'PUBLISHED')",
+            (platform_id, tenant_id, sandbox_id),
+        )
+        cursor.execute(
+            "INSERT INTO execution_profiles (platform_id,tenant_id,profile_id,version,engine_name,model_alias,"
+            "model_route_id,workspace_profile_id,workspace_profile_version,sandbox_profile_id,sandbox_profile_version,"
+            "tool_policy_json,approval_policy_json,context_policy_json,status) "
+            "VALUES (%s,%s,%s,1,'deepseek_harness','legacy-gpt-local',%s,NULL,NULL,NULL,NULL,JSON_ARRAY(),JSON_OBJECT('name','none'),"
+            "JSON_OBJECT('name','default'),'PUBLISHED')",
+            (platform_id, tenant_id, profile_id, route_id),
+        )
+        cursor.execute(
+            "INSERT INTO execution_profile_bindings (platform_id,tenant_id,binding_id,scope_type,scope_id,"
+            "profile_id,profile_version,status) VALUES (%s,%s,%s,'user',%s,%s,1,'ACTIVE')",
+            (platform_id, tenant_id, binding_id, user_id, profile_id),
+        )
+        cursor.execute(
+            "INSERT INTO digital_employees (platform_id,tenant_id,employee_id,owner_user_id,name,role_name,"
+            "description,status,published_to_gallery) VALUES (%s,%s,%s,%s,'员工 A','分析员','迁移用员工','ACTIVE',FALSE)",
+            (platform_id, tenant_id, employee_id, user_id),
+        )
+        cursor.execute(
+            "INSERT INTO digital_employee_versions (platform_id,tenant_id,employee_id,version,system_prompt,"
+            "execution_profile_id,execution_profile_version,model_route_id,approval_policy_json,status) "
+            "VALUES (%s,%s,%s,1,'请处理任务',%s,1,NULL,JSON_OBJECT('name','none'),'PUBLISHED')",
+            (platform_id, tenant_id, employee_id, profile_id),
+        )
+        cursor.execute(
+            "INSERT INTO digital_employee_versions (platform_id,tenant_id,employee_id,version,system_prompt,"
+            "execution_profile_id,execution_profile_version,model_route_id,workspace_profile_id,"
+            "workspace_profile_version,sandbox_profile_id,sandbox_profile_version,approval_policy_json,status) "
+            "VALUES (%s,%s,%s,2,'请处理任务第二版',%s,1,NULL,%s,1,%s,1,JSON_OBJECT('name','none'),'PUBLISHED')",
+            (platform_id, tenant_id, employee_id, profile_id, workspace_id, sandbox_id),
+        )
+        cursor.execute(
+            "INSERT INTO deployments (platform_id,tenant_id,deployment_id,employee_id,employee_version,status,created_by) "
+            "VALUES (%s,%s,'deployment-a',%s,1,'ACTIVE',%s)",
+            (platform_id, tenant_id, employee_id, user_id),
+        )
+        cursor.execute(
+            "INSERT INTO deployments (platform_id,tenant_id,deployment_id,employee_id,employee_version,status,created_by) "
+            "VALUES (%s,%s,'deployment-b',%s,2,'DISABLED',%s)",
+            (platform_id, tenant_id, employee_id, user_id),
+        )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
+
+    MigrationRunner(connection_factory, project_migrations).apply()
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT scope_type,scope_id,route_id,status FROM model_route_bindings "
+            "WHERE platform_id=%s AND tenant_id=%s",
+            (platform_id, tenant_id),
+        )
+        assert cursor.fetchall() == [("user", user_id, route_id, "ACTIVE")]
+        cursor.execute(
+            "SELECT d.status,d.runtime_config_version,c.config_mode,c.execution_profile_id,"
+            "c.execution_profile_version,c.model_route_id,"
+            "JSON_UNQUOTE(JSON_EXTRACT(c.model_route_snapshot_json,'$.model_id')) "
+            "FROM deployments d JOIN deployment_runtime_config_versions c "
+            "ON c.platform_id=d.platform_id AND c.tenant_id=d.tenant_id "
+            "AND c.deployment_id=d.deployment_id AND c.config_version=d.runtime_config_version "
+            "WHERE d.platform_id=%s AND d.tenant_id=%s AND d.deployment_id='deployment-a'",
+            (platform_id, tenant_id),
+        )
+        assert cursor.fetchone() == (
+            "ACTIVE", 1, "OVERRIDE", profile_id, 1, route_id, "gpt-local"
+        )
+        cursor.execute(
+            "SELECT c.model_route_snapshot_json FROM deployment_runtime_config_versions c "
+            "WHERE c.platform_id=%s AND c.tenant_id=%s AND c.deployment_id='deployment-a'",
+            (platform_id, tenant_id),
+        )
+        raw_route_snapshot = cursor.fetchone()[0]
+        route_snapshot_dict = (
+            json.loads(raw_route_snapshot)
+            if isinstance(raw_route_snapshot, str)
+            else raw_route_snapshot
+        )
+        from agent_platform.domain.model_routes import ModelRouteSnapshot
+
+        restored_route_snapshot = ModelRouteSnapshot.from_snapshot_dict(route_snapshot_dict)
+        assert restored_route_snapshot.tenant_id == tenant_id
+        assert restored_route_snapshot.route_id == route_id
+        assert restored_route_snapshot.route_alias == "local-route"
+        assert restored_route_snapshot.connection_id == connection_id
+        assert restored_route_snapshot.connection_version == 1
+        assert restored_route_snapshot.provider_kind == "openai-compatible"
+        assert restored_route_snapshot.model_id == "gpt-local"
+        assert restored_route_snapshot.secret_ref is not None
+        assert restored_route_snapshot.secret_ref.secret_id == "secret-ref-a"
+        cursor.execute(
+            "SELECT d.status,d.runtime_config_version,c.config_mode,c.workspace_profile_id,"
+            "c.sandbox_profile_id,JSON_UNQUOTE(JSON_EXTRACT(c.approval_policy_json,'$.name')) "
+            "FROM deployments d JOIN deployment_runtime_config_versions c "
+            "ON c.platform_id=d.platform_id AND c.tenant_id=d.tenant_id "
+            "AND c.deployment_id=d.deployment_id AND c.config_version=d.runtime_config_version "
+            "WHERE d.platform_id=%s AND d.tenant_id=%s AND d.deployment_id='deployment-b'",
+            (platform_id, tenant_id),
+        )
+        assert cursor.fetchone() == (
+            "DISABLED", 1, "OVERRIDE", workspace_id, sandbox_id, "none"
+        )
+        cursor.execute(
+            "SELECT model_alias FROM execution_profiles WHERE platform_id=%s AND tenant_id=%s AND profile_id=%s",
+            (platform_id, tenant_id, profile_id),
+        )
+        assert cursor.fetchone()[0] == "legacy-gpt-local"
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        assert cursor.fetchone()[0] == 9
+    finally:
+        cursor.close()
+        connection.close()
+
+    from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
+    from agent_platform.application.catalog_service import CatalogService
+    from agent_platform.application.control_plane import ControlPlaneService
+    from agent_platform.application.engine_providers import EngineProviderRegistry
+    from agent_platform.domain.identity import IdentityContext
+    from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
+
+    identity = IdentityContext(platform_id, tenant_id, user_id, frozenset({"admin", "member"}))
+    runtime = FakeRuntimeAdapter()
+    control_plane = ControlPlaneService(
+        CatalogService(MySqlCatalogRepository(connection_factory)),
+        runtime,
+        engine_providers=EngineProviderRegistry.for_runtime(runtime, simulate_known_engines=True),
+    )
+    migrated_session = control_plane.create_session(identity, "deployment-a")
+    assert migrated_session.model_route_id == route_id
+    assert migrated_session.model_route_snapshot == restored_route_snapshot
+
+
+def test_v009_down_restores_the_v008_schema_boundary(disposable_mysql_database) -> None:
     from agent_platform.infrastructure.migrations import MigrationRunner, split_sql_statements
 
     database, config = disposable_mysql_database
@@ -668,6 +990,53 @@ def test_v008_down_restores_the_v007_schema_boundary(disposable_mysql_database) 
     cursor = connection.cursor()
     try:
         rollback = migration_directory.joinpath(
+            "V009__deployment_runtime_config.down.sql"
+        ).read_text(encoding="utf-8")
+        for statement in split_sql_statements(rollback):
+            cursor.execute(statement)
+        connection.commit()
+        cursor.execute("SELECT MAX(version) FROM schema_version")
+        assert cursor.fetchone()[0] == 8
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() "
+            "AND table_name IN ('model_route_bindings','deployment_runtime_config_versions')"
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+            "AND ((table_name='deployments' AND column_name='runtime_config_version') "
+            "OR (table_name='sessions' AND column_name IN ('runtime_config_version','runtime_profile_source','runtime_model_route_source')))"
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT is_nullable FROM information_schema.columns WHERE table_schema=DATABASE() "
+            "AND table_name='execution_profiles' AND column_name='model_alias'"
+        )
+        assert cursor.fetchone()[0] == "NO"
+    finally:
+        cursor.close()
+        connection.close()
+
+def test_v008_down_restores_the_v007_schema_boundary(tmp_path: Path, disposable_mysql_database) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner, split_sql_statements
+
+    database, config = disposable_mysql_database
+    project_migrations = Path(__file__).parents[3] / "docs" / "migrations"
+    migration_directory = tmp_path / "migrations-v008"
+    migration_directory.mkdir()
+    for version in range(1, 9):
+        migration = next(
+            path
+            for path in project_migrations.glob(f"V{version:03d}__*.sql")
+            if ".down." not in path.name
+        )
+        shutil.copyfile(migration, migration_directory / migration.name)
+    connection_factory = lambda: mysql.connect(**config, database=database)
+    MigrationRunner(connection_factory, migration_directory).apply()
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        rollback = project_migrations.joinpath(
             "V008__tenant_model_management.down.sql"
         ).read_text(encoding="utf-8")
         for statement in split_sql_statements(rollback):

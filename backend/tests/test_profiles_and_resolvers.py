@@ -6,6 +6,7 @@ from agent_platform.application.policy import PolicyResolver
 from agent_platform.application.resolvers import AgentResolver, SkillResolver
 from agent_platform.domain.catalog import ExecutionProfile, LifecycleStatus, SkillType
 from agent_platform.domain.common import DomainError
+from tests._runtime_config_helpers import configure_in_memory_deployment
 
 
 def test_policy_resolver_precedence_and_provenance() -> None:
@@ -34,6 +35,7 @@ def test_skill_and_agent_resolvers_freeze_snapshot() -> None:
     version = catalog.create_employee_version(identity, employee.employee_id, "prompt", [skill.skill_id], [])
     catalog.publish_employee_version(identity, employee.employee_id, version.version)
     deployment = catalog.deploy(identity, employee.employee_id, version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
 
     skills = SkillResolver(catalog).resolve(identity, deployment.employee_version)
     snapshot = AgentResolver(catalog).snapshot(identity, deployment)

@@ -170,7 +170,7 @@ def test_catalog_backed_route_create_update_and_disable_flow() -> None:
     updated = client.put(
         f"/api/v1/model-routes/{route['route_id']}",
         headers=admin,
-        json={"catalog_model_id": "chat-b", "model_name": "chat-b"},
+        json={"expected_route_version": 1, "catalog_model_id": "chat-b", "model_name": "chat-b"},
     )
     assert updated.status_code == 200
     assert updated.json()["profile"]["catalog_model_id"] == "chat-b"

@@ -60,13 +60,16 @@ class HarnessRuntimeAdapter:
         return RuntimeCapabilities(
             resume=True,
             cancellation=can_cancel,
+            tool_calls=True,
             workspace=True,
             mcp=True,
+            sandbox=False,
         )
 
-    def create_session(self) -> str:
+    def create_session(self, request: RuntimeRequest | None = None) -> str:
         """仅分配 opaque Session ID；API/Worker 创建 Session 时不启动 Harness。"""
 
+        del request
         return f"harness-pending:{uuid4().hex}"
 
     def resume_session(self, session_ref: str) -> str:
@@ -203,6 +206,7 @@ class HarnessRuntimeAdapter:
                     for item in context.skill_files
                 ),
                 model_route_id=context.model_route_id,
+                model_alias=context.model_alias,
             )
         elif request.system_prompt or request.skill_instructions or request.skill_file_packages:
             raise ValueError(

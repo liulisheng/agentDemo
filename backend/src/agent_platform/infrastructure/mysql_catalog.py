@@ -24,6 +24,10 @@ from agent_platform.domain.catalog import (
 )
 from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.conversations import CapabilityBinding
+from agent_platform.domain.deployment_runtime import (
+    DeploymentRuntimeConfig,
+    DeploymentRuntimeMode,
+)
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import (
     ModelCatalogItem,
@@ -34,6 +38,11 @@ from agent_platform.domain.model_routes import (
     ModelTestResult,
     SecretRef,
     legacy_model_connection_id,
+)
+from agent_platform.domain.runtime_defaults import (
+    EngineProfileDefaultBinding,
+    ModelRouteDefaultBinding,
+    RuntimeDefaultScope,
 )
 from agent_platform.ports.workspaces import SandboxProfile, WorkspaceMode, WorkspaceProfile
 
@@ -398,7 +407,7 @@ class MySqlCatalogRepository:
                     value.trigger,
                     _json_dump(list(value.workflow_steps)),
                     _json_dump({"name": value.memory_policy}),
-                    _json_dump({"name": value.approval_policy}),
+                    _json_dump({"name": value.approval_policy}) if value.approval_policy is not None else None,
                     value.status.value,
                     value.content_format.value,
                     value.entry_path,
@@ -705,7 +714,9 @@ class MySqlCatalogRepository:
                     value.workspace_profile_version,
                     value.sandbox_profile_id,
                     value.sandbox_profile_version,
-                    _json_dump({"name": value.approval_policy}),
+                    _json_dump({"name": value.approval_policy})
+                    if value.approval_policy is not None
+                    else None,
                     value.status.value,
                 ),
             )
@@ -850,7 +861,7 @@ class MySqlCatalogRepository:
             (identity.platform_id, identity.tenant_id, employee_id, version),
         )
         tool_refs = tuple((str(item[0]), int(item[1])) for item in cursor.fetchall())
-        approval = _json_load(row[11], {"name": "none"})
+        approval = _json_load(row[11], None)
         return DigitalEmployeeVersion(
             employee_id=str(row[0]),
             tenant_id=str(row[1]),
@@ -858,15 +869,19 @@ class MySqlCatalogRepository:
             system_prompt=str(row[3]),
             skill_version_ids=tuple(item[0] for item in skill_refs),
             tool_version_ids=tuple(item[0] for item in tool_refs),
-            execution_profile_id=str(row[4]),
+            execution_profile_id=str(row[4]) if row[4] is not None else None,
             status=LifecycleStatus(str(row[12])),
             model_route_id=str(row[6]) if row[6] is not None else None,
             workspace_profile_id=str(row[7]) if row[7] is not None else None,
             workspace_profile_version=int(row[8]) if row[8] is not None else None,
             sandbox_profile_id=str(row[9]) if row[9] is not None else None,
             sandbox_profile_version=int(row[10]) if row[10] is not None else None,
-            approval_policy=str(approval.get("name", "none")),
-            execution_profile_version=int(row[5]),
+            approval_policy=(
+                str(approval["name"])
+                if isinstance(approval, dict) and approval.get("name") is not None
+                else None
+            ),
+            execution_profile_version=int(row[5]) if row[5] is not None else None,
             skill_version_refs=skill_refs,
             tool_version_refs=tool_refs,
         )
@@ -914,9 +929,7 @@ class MySqlCatalogRepository:
                 "(platform_id, tenant_id, employee_id, version, system_prompt, execution_profile_id, "
                 "execution_profile_version, model_route_id, workspace_profile_id, workspace_profile_version, "
                 "sandbox_profile_id, sandbox_profile_version, approval_policy_json, status) "
-                "SELECT platform_id, tenant_id, employee_id, %s, system_prompt, execution_profile_id, "
-                "execution_profile_version, model_route_id, workspace_profile_id, workspace_profile_version, "
-                "sandbox_profile_id, sandbox_profile_version, approval_policy_json, 'DRAFT' "
+                "SELECT platform_id, tenant_id, employee_id, %s, system_prompt, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'DRAFT' "
                 "FROM digital_employee_versions WHERE platform_id=%s AND tenant_id=%s AND employee_id=%s AND version=%s",
                 (next_version, identity.platform_id, identity.tenant_id, employee_id, source_version),
             )
@@ -1105,7 +1118,7 @@ class MySqlCatalogRepository:
             profile_id=str(row[0]),
             tenant_id=str(row[1]),
             engine_name=str(row[2]),
-            model_alias=str(row[3]),
+            model_alias=str(row[3]) if row[3] is not None else None,
             tool_policy=tuple(tools),
             context_policy=str(context.get("name", "default")),
             version=int(row[4]),
@@ -1176,6 +1189,322 @@ class MySqlCatalogRepository:
                 ),
             )
 
+    def get_engine_profile_default(
+        self, identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> EngineProfileDefaultBinding | None:
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT binding_id, platform_id, tenant_id, scope_type, scope_id, profile_id, "
+                "profile_version, status FROM execution_profile_bindings "
+                "WHERE platform_id=%s AND tenant_id=%s AND scope_type=%s AND scope_id=%s",
+                (identity.platform_id, identity.tenant_id, scope_type, scope_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return EngineProfileDefaultBinding(
+            binding_id=str(row[0]),
+            platform_id=str(row[1]),
+            tenant_id=str(row[2]),
+            scope_type=RuntimeDefaultScope(str(row[3])),
+            scope_id=str(row[4]),
+            profile_id=str(row[5]),
+            profile_version=int(row[6]),
+            status=str(row[7]),
+        )
+
+    def set_engine_profile_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        profile_id: str | None,
+        profile_version: int | None,
+    ) -> EngineProfileDefaultBinding | None:
+        """在一个租户事务中更新 Engine 默认并记录独立审计事件。"""
+
+        scope = RuntimeDefaultScope(scope_type)
+        if scope is RuntimeDefaultScope.USER and scope_id != identity.user_id:
+            raise DomainError("AUTHORIZATION_DENIED", "用户只能修改自己的个人引擎默认")
+        if scope is RuntimeDefaultScope.TENANT and scope_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "不能修改其他租户的引擎默认")
+        if scope is RuntimeDefaultScope.PLATFORM and scope_id != identity.platform_id:
+            raise DomainError("AUTHORIZATION_DENIED", "不能修改其他平台的引擎默认")
+        if (profile_id is None) != (profile_version is None):
+            raise DomainError("INVALID_ARGUMENT", "ExecutionProfile 标识和版本必须同时提供或同时清除")
+
+        with self._transaction() as (_, cursor):
+            profile_row = None
+            if profile_id is not None and profile_version is not None:
+                # 旧 PUBLISHED Profile 可能还带历史 ModelRoute fallback。
+                # 先读其 route，再按 route→profile→binding 的顺序加共享锁。
+                cursor.execute(
+                    "SELECT model_route_id,status FROM execution_profiles WHERE platform_id=%s "
+                    "AND tenant_id=%s AND profile_id=%s AND version=%s",
+                    (identity.platform_id, identity.tenant_id, profile_id, profile_version),
+                )
+                profile_row = cursor.fetchone()
+                if profile_row is None:
+                    raise self._not_found("execution_profile")
+                fallback_route_id = str(profile_row[0]) if profile_row[0] is not None else None
+                if fallback_route_id is not None:
+                    cursor.execute(
+                        "SELECT status FROM model_routes WHERE platform_id=%s AND tenant_id=%s "
+                        "AND route_id=%s FOR SHARE",
+                        (identity.platform_id, identity.tenant_id, fallback_route_id),
+                    )
+                    route_row = cursor.fetchone()
+                    if route_row is None:
+                        raise self._not_found("model_route")
+                    if str(route_row[0]) != "ACTIVE":
+                        raise DomainError("DEPENDENCY_VALIDATION_ERROR", "Profile 的历史 ModelRoute 已停用")
+                cursor.execute(
+                    "SELECT model_route_id,status FROM execution_profiles WHERE platform_id=%s "
+                    "AND tenant_id=%s AND profile_id=%s AND version=%s FOR SHARE",
+                    (identity.platform_id, identity.tenant_id, profile_id, profile_version),
+                )
+                locked_profile = cursor.fetchone()
+                if locked_profile is None or locked_profile[1] != LifecycleStatus.PUBLISHED.value:
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "默认引擎必须引用已发布 Profile")
+                if locked_profile[0] != profile_row[0]:
+                    raise DomainError("RUNTIME_CONFIG_REVISION_CONFLICT", "ExecutionProfile 依赖已变化")
+                profile_row = locked_profile
+            cursor.execute(
+                "SELECT binding_id, profile_id, profile_version, status "
+                "FROM execution_profile_bindings WHERE platform_id=%s AND tenant_id=%s "
+                "AND scope_type=%s AND scope_id=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, scope.value, scope_id),
+            )
+            previous_row = cursor.fetchone()
+            previous = (
+                {"profile_id": str(previous_row[1]), "profile_version": int(previous_row[2])}
+                if previous_row is not None
+                else None
+            )
+            if profile_id is None:
+                if previous_row is not None:
+                    cursor.execute(
+                        "DELETE FROM execution_profile_bindings WHERE platform_id=%s AND tenant_id=%s "
+                        "AND scope_type=%s AND scope_id=%s",
+                        (identity.platform_id, identity.tenant_id, scope.value, scope_id),
+                    )
+                current = None
+            else:
+                binding_id = str(previous_row[0]) if previous_row is not None else generate_database_id()
+                if previous_row is None:
+                    cursor.execute(
+                        "INSERT INTO execution_profile_bindings "
+                        "(platform_id,tenant_id,binding_id,scope_type,scope_id,profile_id,profile_version,status) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,'ACTIVE')",
+                        (
+                            identity.platform_id,
+                            identity.tenant_id,
+                            binding_id,
+                            scope.value,
+                            scope_id,
+                            profile_id,
+                            profile_version,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE execution_profile_bindings SET profile_id=%s,profile_version=%s,status='ACTIVE' "
+                        "WHERE platform_id=%s AND tenant_id=%s AND scope_type=%s AND scope_id=%s",
+                        (
+                            profile_id,
+                            profile_version,
+                            identity.platform_id,
+                            identity.tenant_id,
+                            scope.value,
+                            scope_id,
+                        ),
+                    )
+                current = EngineProfileDefaultBinding(
+                    binding_id=binding_id,
+                    platform_id=identity.platform_id,
+                    tenant_id=identity.tenant_id,
+                    scope_type=scope,
+                    scope_id=scope_id,
+                    profile_id=profile_id,
+                    profile_version=profile_version,
+                )
+
+            current_value = (
+                {"profile_id": current.profile_id, "profile_version": current.profile_version}
+                if current
+                else None
+            )
+            self._record_runtime_default_audit(
+                cursor,
+                identity,
+                "ENGINE_PROFILE_DEFAULT_UPDATED",
+                "execution_profile_binding",
+                f"{scope.value}:{scope_id}",
+                {"scope_type": scope.value, "scope_id": scope_id, "previous": previous, "current": current_value},
+            )
+        return current
+
+    def get_model_route_default(
+        self, identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> ModelRouteDefaultBinding | None:
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT binding_id, platform_id, tenant_id, scope_type, scope_id, route_id, status "
+                "FROM model_route_bindings WHERE platform_id=%s AND tenant_id=%s "
+                "AND scope_type=%s AND scope_id=%s",
+                (identity.platform_id, identity.tenant_id, scope_type, scope_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return ModelRouteDefaultBinding(
+            binding_id=str(row[0]),
+            platform_id=str(row[1]),
+            tenant_id=str(row[2]),
+            scope_type=RuntimeDefaultScope(str(row[3])),
+            scope_id=str(row[4]),
+            route_id=str(row[5]),
+            status=str(row[6]),
+        )
+
+    def set_model_route_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        route_id: str | None,
+    ) -> ModelRouteDefaultBinding | None:
+        """在一个租户事务中更新 ModelRoute 默认并记录独立审计事件。"""
+
+        scope = RuntimeDefaultScope(scope_type)
+        if scope is RuntimeDefaultScope.USER and scope_id != identity.user_id:
+            raise DomainError("AUTHORIZATION_DENIED", "用户只能修改自己的个人模型默认")
+        if scope is RuntimeDefaultScope.TENANT and scope_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "不能修改其他租户的模型默认")
+        if scope is RuntimeDefaultScope.PLATFORM and scope_id != identity.platform_id:
+            raise DomainError("AUTHORIZATION_DENIED", "不能修改其他平台的模型默认")
+
+        with self._transaction() as (_, cursor):
+            # 先锁路由，再锁作用域绑定，与 REVOKED 的加锁顺序一致，避免并发撤销/绑定死锁。
+            if route_id is not None:
+                cursor.execute(
+                    "SELECT status FROM model_routes WHERE platform_id=%s AND tenant_id=%s AND route_id=%s FOR SHARE",
+                    (identity.platform_id, identity.tenant_id, route_id),
+                )
+                route_row = cursor.fetchone()
+                if route_row is None:
+                    raise self._not_found("model_route")
+                if str(route_row[0]) != "ACTIVE":
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "默认模型路由必须处于启用状态")
+            cursor.execute(
+                "SELECT binding_id, route_id, status FROM model_route_bindings "
+                "WHERE platform_id=%s AND tenant_id=%s AND scope_type=%s AND scope_id=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, scope.value, scope_id),
+            )
+            previous_row = cursor.fetchone()
+            previous = {"route_id": str(previous_row[1])} if previous_row is not None else None
+            if route_id is None:
+                if previous_row is not None:
+                    cursor.execute(
+                        "DELETE FROM model_route_bindings WHERE platform_id=%s AND tenant_id=%s "
+                        "AND scope_type=%s AND scope_id=%s",
+                        (identity.platform_id, identity.tenant_id, scope.value, scope_id),
+                    )
+                current = None
+            else:
+                binding_id = str(previous_row[0]) if previous_row is not None else generate_database_id()
+                if previous_row is None:
+                    cursor.execute(
+                        "INSERT INTO model_route_bindings "
+                        "(platform_id,tenant_id,binding_id,scope_type,scope_id,route_id,status,created_by) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,'ACTIVE',%s)",
+                        (
+                            identity.platform_id,
+                            identity.tenant_id,
+                            binding_id,
+                            scope.value,
+                            scope_id,
+                            route_id,
+                            identity.user_id,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE model_route_bindings SET route_id=%s,status='ACTIVE' "
+                        "WHERE platform_id=%s AND tenant_id=%s AND scope_type=%s AND scope_id=%s",
+                        (route_id, identity.platform_id, identity.tenant_id, scope.value, scope_id),
+                    )
+                current = ModelRouteDefaultBinding(
+                    binding_id=binding_id,
+                    platform_id=identity.platform_id,
+                    tenant_id=identity.tenant_id,
+                    scope_type=scope,
+                    scope_id=scope_id,
+                    route_id=route_id,
+                )
+
+            current_value = {"route_id": current.route_id} if current else None
+            self._record_runtime_default_audit(
+                cursor,
+                identity,
+                "MODEL_ROUTE_DEFAULT_UPDATED",
+                "model_route_binding",
+                f"{scope.value}:{scope_id}",
+                {"scope_type": scope.value, "scope_id": scope_id, "previous": previous, "current": current_value},
+            )
+        return current
+
+    @staticmethod
+    def _record_runtime_default_audit(
+        cursor: Any,
+        identity: IdentityContext,
+        event_type: str,
+        resource_type: str,
+        resource_id: str,
+        payload: dict[str, object],
+    ) -> None:
+        cursor.execute(
+            "INSERT INTO audit_events "
+            "(platform_id,tenant_id,event_id,actor_type,actor_user_id,event_type,policy_version,"
+            "resource_type,resource_id,payload_json) "
+            "VALUES (%s,%s,%s,'USER',%s,%s,'1',%s,%s,%s)",
+            (
+                identity.platform_id,
+                identity.tenant_id,
+                generate_database_id(),
+                identity.user_id,
+                event_type,
+                resource_type,
+                resource_id,
+                _json_dump(payload),
+            ),
+        )
+
+    @staticmethod
+    def _record_model_route_audit(
+        cursor: Any,
+        identity: IdentityContext,
+        event_type: str,
+        route_id: str,
+        payload: dict[str, object],
+    ) -> None:
+        """Route ID 长度超过旧审计 resource_id 列时放入 JSON，避免截断或丢失。"""
+
+        cursor.execute(
+            "INSERT INTO audit_events "
+            "(platform_id,tenant_id,event_id,actor_type,actor_user_id,event_type,policy_version,"
+            "resource_type,resource_id,payload_json) "
+            "VALUES (%s,%s,%s,'USER',%s,%s,'1','model_route',NULL,%s)",
+            (
+                identity.platform_id,
+                identity.tenant_id,
+                generate_database_id(),
+                identity.user_id,
+                event_type,
+                _json_dump({**payload, "route_id": route_id}),
+            ),
+        )
+
     def get_profile_version(self, identity: IdentityContext, profile_id: str, version: int) -> ExecutionProfile:
         with self._reader() as (_, cursor):
             cursor.execute(
@@ -1212,6 +1541,22 @@ class MySqlCatalogRepository:
         for row in rows:
             latest.setdefault(str(row[0]), self._load_profile(row))
         return tuple(latest.values())
+
+    def list_profile_versions(
+        self, identity: IdentityContext, profile_id: str
+    ) -> tuple[ExecutionProfile, ...]:
+        """按当前租户读取一个 EngineProfile 的全部历史版本。"""
+
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                self._profile_select()
+                + " WHERE platform_id=%s AND tenant_id=%s AND profile_id=%s ORDER BY version",
+                (identity.platform_id, identity.tenant_id, profile_id),
+            )
+            rows = cursor.fetchall()
+        if not rows:
+            raise self._not_found("execution_profile")
+        return tuple(self._load_profile(row) for row in rows)
 
     @staticmethod
     def _model_connection_from_row(row: tuple[Any, ...]) -> ModelConnection:
@@ -1713,6 +2058,247 @@ class MySqlCatalogRepository:
             route_version=int(row[15]),
         )
 
+    def update_model_route_if_version(
+        self,
+        identity: IdentityContext,
+        expected_route_version: int,
+        value: ModelRoute,
+    ) -> ModelRoute:
+        """锁定精确租户路由，比较期望版本后原子保存新配置版本。"""
+
+        if value.tenant_id != identity.tenant_id or value.profile.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型路由不属于当前租户")
+        profile = value.profile
+        secret = profile.secret_ref
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "SELECT route_version,status FROM model_routes WHERE platform_id=%s AND tenant_id=%s "
+                "AND route_id=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, value.route_id),
+            )
+            current = cursor.fetchone()
+            if current is None:
+                raise self._not_found("model_route")
+            if str(current[1]) == "REVOKED":
+                raise DomainError("INVALID_STATE", "已删除的模型路由不能编辑")
+            current_version = int(current[0])
+            if current_version != expected_route_version:
+                raise DomainError(
+                    "MODEL_ROUTE_VERSION_CONFLICT",
+                    "模型路由已被其他管理员更新，请刷新后重试",
+                    {"current_route_version": current_version},
+                )
+            if value.route_version != expected_route_version + 1:
+                raise DomainError("INVALID_ARGUMENT", "路由版本必须递增一版")
+            cursor.execute(
+                "SELECT route_id FROM model_routes WHERE platform_id=%s AND tenant_id=%s "
+                "AND alias=%s AND route_id<>%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, value.alias, value.route_id),
+            )
+            if cursor.fetchone() is not None:
+                raise DomainError("INVALID_ARGUMENT", "当前租户已存在相同别名的模型路由")
+
+            connection_id = profile.connection_id
+            catalog_model_id = profile.catalog_model_id
+            if connection_id is not None:
+                cursor.execute(
+                    "SELECT provider_kind,protocol,endpoint,auth_secret_ref,auth_secret_scope,"
+                    "auth_secret_provider,status FROM model_connections WHERE platform_id=%s "
+                    "AND tenant_id=%s AND connection_id=%s FOR SHARE",
+                    (identity.platform_id, identity.tenant_id, connection_id),
+                )
+                connection = cursor.fetchone()
+                if connection is None:
+                    raise self._not_found("model_connection")
+                if str(connection[6]) != "ACTIVE":
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "模型连接已停用")
+                if (
+                    str(connection[0]) != profile.provider
+                    or str(connection[1]) != profile.protocol
+                    or str(connection[2]) != profile.endpoint
+                    or connection[3] != (secret.secret_id if secret else None)
+                    or connection[4] != (secret.scope if secret else None)
+                    or connection[5] != (secret.provider if secret else None)
+                ):
+                    raise DomainError("INVALID_ARGUMENT", "ModelProfile 与 ModelConnection 配置不一致")
+                if not catalog_model_id:
+                    raise DomainError("INVALID_ARGUMENT", "连接目录路由必须包含模型目录 ID")
+                cursor.execute(
+                    "SELECT status FROM model_catalog_items WHERE platform_id=%s AND tenant_id=%s "
+                    "AND connection_id=%s AND model_id=%s FOR SHARE",
+                    (identity.platform_id, identity.tenant_id, connection_id, catalog_model_id),
+                )
+                catalog_model = cursor.fetchone()
+                if catalog_model is None:
+                    raise self._not_found("model_catalog_item")
+                if str(catalog_model[0]) != "ACTIVE":
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "模型目录项已停用")
+
+            cursor.execute(
+                "UPDATE model_routes SET alias=%s,provider=%s,model_name=%s,endpoint=%s,protocol=%s,"
+                "auth_secret_ref=%s,auth_secret_scope=%s,auth_secret_provider=%s,pricing_snapshot_ref=%s,"
+                "parameters_json=%s,status=%s,model_connection_id=%s,catalog_model_id=%s,route_version=%s "
+                "WHERE platform_id=%s AND tenant_id=%s AND route_id=%s AND route_version=%s "
+                "AND status IN ('ACTIVE','DISABLED')",
+                (
+                    value.alias,
+                    profile.provider,
+                    profile.model_name,
+                    profile.endpoint,
+                    profile.protocol,
+                    secret.secret_id if secret else None,
+                    secret.scope if secret else None,
+                    secret.provider if secret else None,
+                    profile.pricing_snapshot_ref,
+                    _json_dump(dict(profile.parameters)),
+                    value.status,
+                    connection_id,
+                    catalog_model_id,
+                    value.route_version,
+                    identity.platform_id,
+                    identity.tenant_id,
+                    value.route_id,
+                    expected_route_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise DomainError(
+                    "MODEL_ROUTE_VERSION_CONFLICT",
+                    "模型路由已被其他管理员更新，请刷新后重试",
+                    {"expected_route_version": expected_route_version},
+                )
+            self._record_model_route_audit(
+                cursor,
+                identity,
+                "MODEL_ROUTE_UPDATED",
+                value.route_id,
+                {
+                    "previous_route_version": expected_route_version,
+                    "route_version": value.route_version,
+                    "alias": value.alias,
+                    "model_id": profile.catalog_model_id or profile.model_name,
+                },
+            )
+        return self.get_model_route(identity, value.route_id)
+
+    def revoke_model_route_if_unreferenced(
+        self,
+        identity: IdentityContext,
+        route_id: str,
+        expected_route_version: int,
+    ) -> ModelRoute:
+        """检查有效默认和活动 Deployment 引用后，在事务内逻辑撤销 ModelRoute。"""
+
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "SELECT route_version,status,alias FROM model_routes WHERE platform_id=%s AND tenant_id=%s "
+                "AND route_id=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, route_id),
+            )
+            route_row = cursor.fetchone()
+            if route_row is None:
+                raise self._not_found("model_route")
+            current_version = int(route_row[0])
+            current_status = str(route_row[1])
+            if current_status == "REVOKED":
+                return self.get_model_route(identity, route_id)
+            if current_version != expected_route_version:
+                raise DomainError(
+                    "MODEL_ROUTE_VERSION_CONFLICT",
+                    "模型路由已被其他管理员更新，请刷新后重试",
+                    {"current_route_version": current_version},
+                )
+
+            references: list[dict[str, str]] = []
+            cursor.execute(
+                "SELECT scope_type,scope_id FROM model_route_bindings WHERE platform_id=%s AND tenant_id=%s "
+                "AND route_id=%s AND status='ACTIVE' FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, route_id),
+            )
+            references.extend(
+                {"kind": "model_route_default", "scope_type": str(row[0]), "scope_id": str(row[1])}
+                for row in cursor.fetchall()
+            )
+            cursor.execute(
+                "SELECT d.deployment_id FROM deployments d "
+                "JOIN deployment_runtime_config_versions c ON c.platform_id=d.platform_id "
+                "AND c.tenant_id=d.tenant_id AND c.deployment_id=d.deployment_id "
+                "AND c.config_version=d.runtime_config_version "
+                "WHERE d.platform_id=%s AND d.tenant_id=%s AND d.status='ACTIVE' AND c.model_route_id=%s "
+                "FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, route_id),
+            )
+            deployment_ids = {str(row[0]) for row in cursor.fetchall()}
+            cursor.execute(
+                "SELECT d.deployment_id FROM deployments d "
+                "JOIN digital_employee_versions ev ON ev.platform_id=d.platform_id AND ev.tenant_id=d.tenant_id "
+                "AND ev.employee_id=d.employee_id AND ev.version=d.employee_version "
+                "LEFT JOIN deployment_runtime_config_versions c ON c.platform_id=d.platform_id "
+                "AND c.tenant_id=d.tenant_id AND c.deployment_id=d.deployment_id "
+                "AND c.config_version=d.runtime_config_version "
+                "LEFT JOIN execution_profiles ep ON ep.platform_id=d.platform_id AND ep.tenant_id=d.tenant_id "
+                "AND ep.profile_id=COALESCE(c.execution_profile_id,ev.execution_profile_id) "
+                "AND ep.version=COALESCE(c.execution_profile_version,ev.execution_profile_version) "
+                "WHERE d.platform_id=%s AND d.tenant_id=%s AND d.status='ACTIVE' "
+                "AND (c.model_route_id IS NULL AND (ev.model_route_id=%s OR ep.model_route_id=%s)) FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, route_id, route_id),
+            )
+            deployment_ids.update(str(row[0]) for row in cursor.fetchall())
+            references.extend(
+                {"kind": "deployment", "deployment_id": deployment_id}
+                for deployment_id in sorted(deployment_ids)
+            )
+            cursor.execute(
+                "SELECT b.scope_type,b.scope_id,p.profile_id,p.version FROM execution_profile_bindings b "
+                "JOIN execution_profiles p ON p.platform_id=b.platform_id AND p.tenant_id=b.tenant_id "
+                "AND p.profile_id=b.profile_id AND p.version=b.profile_version "
+                "WHERE b.platform_id=%s AND b.tenant_id=%s AND b.status='ACTIVE' "
+                "AND p.status='PUBLISHED' AND p.model_route_id=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, route_id),
+            )
+            references.extend(
+                {
+                    "kind": "engine_profile_default",
+                    "scope_type": str(row[0]),
+                    "scope_id": str(row[1]),
+                    "profile_id": str(row[2]),
+                    "profile_version": str(row[3]),
+                }
+                for row in cursor.fetchall()
+            )
+            if references:
+                raise DomainError(
+                    "MODEL_ROUTE_IN_USE",
+                    "该模型路由仍被默认运行环境或活动 Deployment 使用，请先解绑",
+                    {"references": references},
+                )
+
+            next_version = current_version + 1
+            cursor.execute(
+                "UPDATE model_routes SET status='REVOKED',route_version=%s WHERE platform_id=%s "
+                "AND tenant_id=%s AND route_id=%s AND route_version=%s AND status IN ('ACTIVE','DISABLED')",
+                (next_version, identity.platform_id, identity.tenant_id, route_id, expected_route_version),
+            )
+            if cursor.rowcount != 1:
+                raise DomainError(
+                    "MODEL_ROUTE_VERSION_CONFLICT",
+                    "模型路由已被其他管理员更新，请刷新后重试",
+                    {"expected_route_version": expected_route_version},
+                )
+            self._record_model_route_audit(
+                cursor,
+                identity,
+                "MODEL_ROUTE_REVOKED",
+                route_id,
+                {
+                    "previous_route_version": current_version,
+                    "route_version": next_version,
+                    "previous_status": current_status,
+                    "status": "REVOKED",
+                },
+            )
+        return self.get_model_route(identity, route_id)
+
     def save(self, identity: IdentityContext, route: ModelRoute) -> None:
         """兼容 ModelRouteRepository 端口的写入名称。"""
 
@@ -1879,7 +2465,14 @@ class MySqlCatalogRepository:
                 previous_version = int(previous[1])
                 status = LifecycleStatus(str(previous[2]))
                 # 用行锁读到的状态返回结果，避免过期快照撤销刚发生的启停操作。
-                saved = Deployment(value.deployment_id, identity.tenant_id, employee_id, target, status)
+                saved = Deployment(
+                    value.deployment_id,
+                    identity.tenant_id,
+                    employee_id,
+                    target,
+                    status,
+                    int(previous[3]) if previous[3] is not None else None,
+                )
                 if previous_version != target.version:
                     cursor.execute(
                         "UPDATE deployments SET employee_version=%s WHERE platform_id=%s AND tenant_id=%s "
@@ -1908,15 +2501,50 @@ class MySqlCatalogRepository:
         if row is None:
             raise self._not_found("deployment")
         employee_id = str(row[0])
+        initial = self.get_deployment(identity, deployment_id)
+        initial_config = self.get_deployment_runtime_config(identity, deployment_id)
+        route_ids = self._deployment_model_route_ids_for_reenable(
+            identity, initial, initial_config
+        )
 
         key = _identity_key(identity, deployment_id)
         with self._transaction() as (_, cursor):
+            # 重新上线先锁定其当前需要消费的路由，再锁员工和 Deployment，
+            # 与路由撤销的 route→deployment 顺序一致，避免恢复已撤销路由。
+            if target_status is LifecycleStatus.ACTIVE:
+                for route_id in sorted(route_ids):
+                    cursor.execute(
+                        "SELECT status FROM model_routes WHERE platform_id=%s AND tenant_id=%s "
+                        "AND route_id=%s FOR SHARE",
+                        (identity.platform_id, identity.tenant_id, route_id),
+                    )
+                    route_row = cursor.fetchone()
+                    if route_row is None:
+                        raise self._not_found("model_route")
+                    if str(route_row[0]) != "ACTIVE":
+                        raise DomainError(
+                            "DEPENDENCY_VALIDATION_ERROR",
+                            "Deployment 固定的 ModelRoute 已停用或删除；请先更新运行配置",
+                            {"deployment_id": deployment_id, "model_route_id": route_id},
+                        )
             employee_status = self._lock_employee_status(cursor, identity, employee_id)
             row = self._read_deployment_row(cursor, identity, deployment_id, lock=True)
             if row is None:
                 raise self._not_found("deployment")
             # 回滚可能已更换固定版本，使用锁定的部署行读取最新绑定。
             current = self._load_deployment(cursor, identity, deployment_id, row, lock_version=True)
+            if target_status is LifecycleStatus.ACTIVE and (
+                current.runtime_config_version != initial.runtime_config_version
+                or current.employee_version.version != initial.employee_version.version
+            ):
+                raise DomainError(
+                    "RUNTIME_CONFIG_REVISION_CONFLICT",
+                    "Deployment 运行配置或员工版本已变化，请刷新后重新上线",
+                    {
+                        "runtime_config_version": current.runtime_config_version,
+                        "employee_version": current.employee_version.version,
+                    },
+                )
             if target_status is LifecycleStatus.DISABLED:
                 updated = current.disable()
                 event_type = "DEPLOYMENT_DISABLED"
@@ -1940,6 +2568,33 @@ class MySqlCatalogRepository:
                 {"previous_status": current.status.value, "status": updated.status.value},
             )
             return updated
+
+    def _deployment_model_route_ids_for_reenable(
+        self,
+        identity: IdentityContext,
+        deployment: Deployment,
+        config: DeploymentRuntimeConfig | None,
+    ) -> set[str]:
+        """读取重新上线时可能被旧字段回退消费的路由 ID。"""
+
+        if config is not None and config.model_route_id is not None:
+            return {config.model_route_id}
+        if deployment.employee_version.model_route_id is not None:
+            return {deployment.employee_version.model_route_id}
+        profile_id = (
+            config.execution_profile_id
+            if config is not None and config.execution_profile_id is not None
+            else deployment.employee_version.execution_profile_id
+        )
+        profile_version = (
+            config.execution_profile_version
+            if config is not None and config.execution_profile_version is not None
+            else deployment.employee_version.execution_profile_version
+        )
+        if profile_id is None or profile_version is None:
+            return set()
+        profile = self.get_profile_version(identity, profile_id, profile_version)
+        return {profile.model_route_id} if profile.model_route_id is not None else set()
 
     @staticmethod
     def _record_deployment_event(
@@ -1966,7 +2621,7 @@ class MySqlCatalogRepository:
     ) -> tuple[Any, ...] | None:
         lock_clause = " FOR UPDATE" if lock else ""
         cursor.execute(
-            "SELECT employee_id, employee_version, status FROM deployments "
+            "SELECT employee_id, employee_version, status, runtime_config_version FROM deployments "
             "WHERE platform_id=%s AND tenant_id=%s AND deployment_id=%s" + lock_clause,
             _identity_key(identity, deployment_id),
         )
@@ -1983,7 +2638,14 @@ class MySqlCatalogRepository:
     ) -> Deployment:
         employee_id = str(row[0])
         version = self._read_employee_version(cursor, identity, employee_id, int(row[1]), lock=lock_version)
-        return Deployment(deployment_id, identity.tenant_id, employee_id, version, LifecycleStatus(str(row[2])))
+        return Deployment(
+            deployment_id,
+            identity.tenant_id,
+            employee_id,
+            version,
+            LifecycleStatus(str(row[2])),
+            int(row[3]) if row[3] is not None else None,
+        )
 
     def get_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
         """读取部署及其固定版本，供运行准入和历史状态查询使用。"""
@@ -2002,6 +2664,170 @@ class MySqlCatalogRepository:
             )
             ids = tuple(str(row[0]) for row in cursor.fetchall())
         return tuple(self.get_deployment(identity, deployment_id) for deployment_id in ids)
+
+    @staticmethod
+    def _load_deployment_runtime_config(row: tuple[Any, ...]) -> DeploymentRuntimeConfig:
+        return DeploymentRuntimeConfig(
+            platform_id=str(row[0]),
+            tenant_id=str(row[1]),
+            deployment_id=str(row[2]),
+            config_version=int(row[3]),
+            config_mode=DeploymentRuntimeMode(str(row[4])),
+            execution_profile_id=str(row[5]) if row[5] is not None else None,
+            execution_profile_version=int(row[6]) if row[6] is not None else None,
+            model_route_id=str(row[7]) if row[7] is not None else None,
+            model_route_snapshot=(
+                _json_load(row[8], {}) if row[8] is not None else None
+            ),
+            workspace_profile_id=str(row[9]) if row[9] is not None else None,
+            workspace_profile_version=int(row[10]) if row[10] is not None else None,
+            sandbox_profile_id=str(row[11]) if row[11] is not None else None,
+            sandbox_profile_version=int(row[12]) if row[12] is not None else None,
+            approval_policy=_json_load(row[13], {}),
+            runtime_options=_json_load(row[14], {}),
+            created_by=str(row[15]) if row[15] is not None else None,
+        )
+
+    @staticmethod
+    def _deployment_runtime_config_select() -> str:
+        return (
+            "SELECT platform_id,tenant_id,deployment_id,config_version,config_mode,"
+            "execution_profile_id,execution_profile_version,model_route_id,model_route_snapshot_json,"
+            "workspace_profile_id,workspace_profile_version,sandbox_profile_id,sandbox_profile_version,"
+            "approval_policy_json,runtime_options_json,created_by FROM deployment_runtime_config_versions"
+        )
+
+    def get_deployment_runtime_config(
+        self, identity: IdentityContext, deployment_id: str
+    ) -> DeploymentRuntimeConfig | None:
+        with self._reader() as (_, cursor):
+            row = self._read_deployment_row(cursor, identity, deployment_id)
+            if row is None:
+                raise self._not_found("deployment")
+            version = int(row[3]) if row[3] is not None else None
+            if version is None:
+                return None
+            cursor.execute(
+                self._deployment_runtime_config_select()
+                + " WHERE platform_id=%s AND tenant_id=%s AND deployment_id=%s AND config_version=%s",
+                (identity.platform_id, identity.tenant_id, deployment_id, version),
+            )
+            config_row = cursor.fetchone()
+        if config_row is None:
+            raise DomainError(
+                "INVALID_STATE", "Deployment 当前配置修订不存在", {"deployment_id": deployment_id}
+            )
+        return self._load_deployment_runtime_config(config_row)
+
+    def save_deployment_runtime_config(
+        self,
+        identity: IdentityContext,
+        deployment_id: str,
+        expected_config_version: int | None,
+        value: DeploymentRuntimeConfig,
+    ) -> DeploymentRuntimeConfig:
+        """锁定 Deployment 行并原子写入下一配置修订、指针和审计记录。"""
+
+        if (
+            value.platform_id != identity.platform_id
+            or value.tenant_id != identity.tenant_id
+            or value.deployment_id != deployment_id
+        ):
+            raise DomainError("AUTHORIZATION_DENIED", "运行配置不属于当前租户 Deployment")
+        key = _identity_key(identity, deployment_id)
+        with self._transaction() as (_, cursor):
+            # 路由行先于 Deployment 行加锁，与逻辑撤销保持相同顺序，避免新修订绑定已撤销路由。
+            if value.model_route_id is not None:
+                cursor.execute(
+                    "SELECT status FROM model_routes WHERE platform_id=%s AND tenant_id=%s "
+                    "AND route_id=%s FOR SHARE",
+                    (identity.platform_id, identity.tenant_id, value.model_route_id),
+                )
+                route_row = cursor.fetchone()
+                if route_row is None:
+                    raise self._not_found("model_route")
+                if str(route_row[0]) != "ACTIVE":
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "Deployment 运行配置只能引用启用的模型路由")
+            deployment_row = self._read_deployment_row(
+                cursor, identity, deployment_id, lock=True
+            )
+            if deployment_row is None:
+                raise self._not_found("deployment")
+            current_version = (
+                int(deployment_row[3]) if deployment_row[3] is not None else None
+            )
+            expected = None if expected_config_version in {None, 0} else expected_config_version
+            if current_version != expected:
+                raise DomainError(
+                    "RUNTIME_CONFIG_REVISION_CONFLICT",
+                    "Deployment 运行配置已被其他管理员更新",
+                    {"current_config_version": current_version},
+                )
+            next_version = (current_version or 0) + 1
+            if value.config_version != next_version:
+                raise DomainError("INVALID_ARGUMENT", "运行配置修订号必须单调递增")
+            current_status = LifecycleStatus(str(deployment_row[2]))
+            if current_status is LifecycleStatus.ARCHIVED:
+                raise DomainError("INVALID_STATE", "已归档 Deployment 不能修改运行配置")
+            next_status = (
+                LifecycleStatus.ACTIVE
+                if current_status is LifecycleStatus.PENDING_CONFIGURATION
+                else current_status
+            )
+            cursor.execute(
+                "INSERT INTO deployment_runtime_config_versions "
+                "(platform_id,tenant_id,deployment_id,config_version,config_mode,execution_profile_id,"
+                "execution_profile_version,model_route_id,model_route_snapshot_json,workspace_profile_id,"
+                "workspace_profile_version,sandbox_profile_id,sandbox_profile_version,approval_policy_json,"
+                "runtime_options_json,created_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    identity.platform_id,
+                    identity.tenant_id,
+                    deployment_id,
+                    value.config_version,
+                    value.config_mode.value,
+                    value.execution_profile_id,
+                    value.execution_profile_version,
+                    value.model_route_id,
+                    _json_dump(dict(value.model_route_snapshot)) if value.model_route_snapshot is not None else None,
+                    value.workspace_profile_id,
+                    value.workspace_profile_version,
+                    value.sandbox_profile_id,
+                    value.sandbox_profile_version,
+                    _json_dump(dict(value.approval_policy)),
+                    _json_dump(dict(value.runtime_options)),
+                    identity.user_id,
+                ),
+            )
+            cursor.execute(
+                "UPDATE deployments SET runtime_config_version=%s,status=%s "
+                "WHERE platform_id=%s AND tenant_id=%s AND deployment_id=%s",
+                (value.config_version, next_status.value, *key),
+            )
+            cursor.execute(
+                "INSERT INTO audit_events "
+                "(platform_id,tenant_id,event_id,actor_type,actor_user_id,event_type,policy_version,"
+                "resource_type,resource_id,payload_json) "
+                "VALUES (%s,%s,%s,'USER',%s,'DEPLOYMENT_RUNTIME_CONFIG_UPDATED','1',"
+                "'deployment_runtime_config',%s,%s)",
+                (
+                    identity.platform_id,
+                    identity.tenant_id,
+                    generate_database_id(),
+                    identity.user_id,
+                    deployment_id,
+                    _json_dump(
+                        {
+                            "previous_config_version": current_version,
+                            "config_version": value.config_version,
+                            "config_mode": value.config_mode.value,
+                            "execution_profile_id": value.execution_profile_id,
+                            "model_route_id": value.model_route_id,
+                        }
+                    ),
+                ),
+            )
+        return value
 
     def list_audit_events(
         self,

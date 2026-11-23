@@ -101,6 +101,13 @@ V008_SENTINEL_OBJECTS = frozenset(
 V008_MODEL_ROUTE_COLUMNS = frozenset(
     {"model_connection_id", "catalog_model_id", "route_version"}
 )
+V009_SENTINEL_OBJECTS = frozenset(
+    {"model_route_bindings", "deployment_runtime_config_versions"}
+)
+V009_DEPLOYMENT_COLUMNS = frozenset({"runtime_config_version"})
+V009_SESSION_COLUMNS = frozenset(
+    {"runtime_config_version", "runtime_profile_source", "runtime_model_route_source"}
+)
 V001_SENTINEL_OBJECTS = frozenset(
     {"schema_version", "platforms", "tenants", "users", "sessions", "runs", "audit_events"}
 )
@@ -399,6 +406,7 @@ class MigrationPreflight:
                     | V006_SENTINEL_OBJECTS
                     | V007_SENTINEL_OBJECTS
                     | V008_SENTINEL_OBJECTS
+                    | V009_SENTINEL_OBJECTS
                 )
                 or baseline.schema_columns.get("skill_versions", frozenset()).intersection(
                     V005_SKILL_COLUMNS
@@ -641,6 +649,58 @@ class MigrationPreflight:
                 current,
                 warnings=tuple(warnings),
                 errors=("partial_v008_schema:" + ",".join(missing),),
+            )
+
+        found_v009_objects = baseline.schema_objects.intersection(V009_SENTINEL_OBJECTS)
+        deployment_columns = baseline.schema_columns.get("deployments", frozenset())
+        found_v009_deployment_columns = deployment_columns.intersection(V009_DEPLOYMENT_COLUMNS)
+        session_columns = baseline.schema_columns.get("sessions", frozenset())
+        found_v009_session_columns = session_columns.intersection(V009_SESSION_COLUMNS)
+        found_any_v009 = bool(
+            found_v009_objects or found_v009_deployment_columns or found_v009_session_columns
+        )
+        complete_v009 = (
+            found_v009_objects == V009_SENTINEL_OBJECTS
+            and found_v009_deployment_columns == V009_DEPLOYMENT_COLUMNS
+            and found_v009_session_columns == V009_SESSION_COLUMNS
+        )
+        if found_any_v009 and not complete_v009:
+            missing = sorted(V009_SENTINEL_OBJECTS.difference(found_v009_objects))
+            missing.extend(
+                "deployments." + column
+                for column in sorted(V009_DEPLOYMENT_COLUMNS.difference(found_v009_deployment_columns))
+            )
+            missing.extend(
+                "sessions." + column
+                for column in sorted(V009_SESSION_COLUMNS.difference(found_v009_session_columns))
+            )
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v009_schema:" + ",".join(missing),),
+            )
+        if complete_v009 and (current is None or current < 9):
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                errors=("v009_objects_present_without_schema_version",),
+            )
+        if current is not None and current >= 9 and not complete_v009:
+            missing = sorted(V009_SENTINEL_OBJECTS.difference(found_v009_objects))
+            missing.extend(
+                "deployments." + column
+                for column in sorted(V009_DEPLOYMENT_COLUMNS.difference(found_v009_deployment_columns))
+            )
+            missing.extend(
+                "sessions." + column
+                for column in sorted(V009_SESSION_COLUMNS.difference(found_v009_session_columns))
+            )
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v009_schema:" + ",".join(missing),),
             )
 
         v003_present = found_v003_objects == V003_SENTINEL_OBJECTS

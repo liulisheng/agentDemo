@@ -91,11 +91,16 @@ class RunSnapshot:
     skill_version_ids: tuple[str, ...]
     tool_version_ids: tuple[str, ...]
     execution_profile_id: str
+    engine_name: str | None = None
     skill_version_refs: tuple[tuple[str, int], ...] = ()
     tool_version_refs: tuple[tuple[str, int], ...] = ()
     execution_profile_version: int = 1
     model_route_id: str | None = None
+    model_alias: str | None = None
     model_route_snapshot: ModelRouteSnapshot | None = None
+    runtime_config_version: int | None = None
+    runtime_profile_source: str | None = None
+    runtime_model_route_source: str | None = None
     hub_resource_refs: tuple[HubResourceSnapshot, ...] = ()
     skill_file_packages: tuple[SkillFilePackageSnapshot, ...] = ()
 
@@ -105,6 +110,8 @@ class RunSnapshot:
             and self.model_route_id != self.model_route_snapshot.route_id
         ):
             raise ValueError("model_route_snapshot must match model_route_id")
+        if self.model_alias is not None and not self.model_alias.strip():
+            raise ValueError("model_alias must be nonblank when provided")
 
 
 @dataclass(slots=True)
@@ -121,6 +128,12 @@ class SessionRecord:
     execution_profile_id: str = ""
     execution_profile_version: int = 1
     model_route_id: str | None = None
+    model_alias: str | None = None
+    model_route_snapshot: ModelRouteSnapshot | None = None
+    runtime_config_version: int | None = None
+    runtime_profile_source: str | None = None
+    runtime_model_route_source: str | None = None
+    engine_name: str = ""
     runtime_session_ref: str | None = None
     harness_home_ref: str | None = None
     status: str = "ACTIVE"

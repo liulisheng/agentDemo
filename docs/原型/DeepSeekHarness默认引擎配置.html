@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="模型管理默认运行环境静态原型，展示 DeepSeek Harness Profile 与 ModelRoute 配置">
+  <title>模型管理 · Agent Platform</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #25363c;
+      --muted: #77858a;
+      --line: #d7e0e2;
+      --canvas: #f3f6f6;
+      --paper: #fff;
+      --pine: #21645f;
+      --pine-dark: #194f4a;
+      --pine-soft: #e8f2f0;
+      --blue: #1673d1;
+      --good: #348345;
+      --amber: #af7417;
+      --bad: #a23d36;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { min-width: 320px; min-height: 100vh; margin: 0; color: var(--ink); background: var(--canvas); }
+    button, input, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    :where(button, a, input, select, summary):focus-visible { outline: 3px solid #78b4a4; outline-offset: 2px; }
+
+    .app { display: grid; min-height: 100vh; grid-template-columns: 230px minmax(0, 1fr); }
+    .sidebar { display: flex; flex-direction: column; gap: 22px; padding: 16px 9px; border-right: 1px solid var(--line); background: #fff; }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 5px 7px; font-size: 14px; font-weight: 800; }
+    .brand-mark { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 8px; color: #fff; background: var(--pine); font-weight: 800; }
+    .nav-label { padding: 0 8px; color: #76858a; font-size: 10px; font-weight: 750; }
+    .side-nav { display: grid; gap: 4px; }
+    .side-nav a { min-height: 37px; padding: 8px 11px; border-radius: 7px; color: #46575d; text-decoration: none; font-size: 12px; font-weight: 650; }
+    .side-nav a:hover { background: #f4f7f6; }
+    .side-nav a[aria-current="page"] { color: var(--pine); background: var(--pine-soft); }
+    .main-column { min-width: 0; }
+    .topbar { display: flex; min-height: 68px; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 26px; border-bottom: 1px solid var(--line); background: #fff; }
+    .tenant-context { display: grid; gap: 3px; }
+    .tenant-context span, .identity label { color: var(--muted); font-size: 10px; }
+    .tenant-context strong { font-size: 13px; }
+    .identity { display: flex; align-items: center; gap: 8px; }
+    .identity select { min-height: 32px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font-size: 11px; }
+    main { padding: 12px 26px 32px; }
+    .page { width: 100%; max-width: 1440px; margin: 0 auto; }
+    .eyebrow { display: block; margin: 0 0 16px; color: #53676a; font-size: 11px; font-weight: 650; }
+    .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 20px; }
+    .page-head h1 { margin: 3px 0 4px; font-size: 28px; font-weight: 700; letter-spacing: -.025em; }
+    .page-head p { margin: 0; color: #5f6f74; font-size: 12px; }
+    .primary { min-height: 38px; padding: 8px 14px; border: 1px solid var(--pine); border-radius: 7px; color: #fff; background: var(--pine); font-size: 11px; font-weight: 750; }
+    .primary:hover { background: var(--pine-dark); }
+    .secondary { min-height: 34px; padding: 6px 11px; border: 1px solid var(--line); border-radius: 7px; color: #3b4d51; background: #fff; font-size: 10px; font-weight: 700; }
+    .link-button { padding: 4px 0; border: 0; color: var(--blue); background: transparent; font-size: 11px; font-weight: 700; }
+    .tabs { display: flex; gap: 26px; margin: 0 0 16px; border-bottom: 1px solid var(--line); }
+    .tab { min-height: 39px; padding: 8px 2px 9px; border: 0; border-bottom: 2px solid transparent; color: #68797d; background: transparent; font-size: 11px; }
+    .tab.active { border-bottom-color: var(--pine); color: var(--pine); font-weight: 750; }
+    .runtime-layout { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+    .card { min-width: 0; overflow: hidden; border: 1px solid #d5dfe1; border-radius: 10px; background: #fff; }
+    .card-head { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 17px; border-bottom: 1px solid #e0e7e8; }
+    .card-head h2 { margin: 0; font-size: 13px; font-weight: 750; }
+    .secondary-text { color: #8b999c; font-size: 10px; }
+    .card-body { display: grid; gap: 12px; padding: 16px 18px; }
+    .intro { margin: 0; color: #647672; font-size: 11px; line-height: 1.6; }
+    .fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 12px; }
+    .field { display: grid; min-width: 0; gap: 4px; }
+    .field label { color: #4f6368; font-size: 10px; font-weight: 700; }
+    .field select { width: 100%; min-height: 36px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font-size: 10px; }
+    .priority-note { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 7px; color: #647672; background: #f4f7f7; font-size: 10px; line-height: 1.5; }
+    .priority-note strong { color: #183330; font-weight: 650; }
+    .effective-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; color: #647672; font-size: 10px; }
+    .effective-strip .title { color: #183330; font-weight: 700; }
+    .tag { display: inline-flex; align-items: center; padding: 3px 7px; border: 1px solid #d4e0dc; border-radius: 5px; color: #53676a; background: #f8fbfa; font-size: 9px; white-space: nowrap; }
+    .tag.good { border-color: #b8e3bd; color: var(--good); background: #f3fff3; }
+    .tag.warn { border-color: #ead6a5; color: var(--amber); background: #fff9e9; }
+    .tag.bad { border-color: #ecc4c0; color: var(--bad); background: #fff7f6; }
+    .tag.blue { border-color: #b9d9fa; color: var(--blue); background: #f3f9ff; }
+    .inline-note { color: #77858a; font-size: 10px; line-height: 1.55; }
+    .inline-note a { color: var(--blue); }
+    .feedback { min-height: 16px; color: var(--good); font-size: 10px; }
+    .feedback.error { color: var(--bad); }
+    .save-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding-top: 4px; }
+    .save-actions > span { color: #77858a; font-size: 10px; }
+    .save-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+    .alert { display: flex; gap: 10px; padding: 12px 13px; border: 1px solid #b7d9f7; border-radius: 8px; color: #33526b; background: #f1f8ff; font-size: 10px; line-height: 1.55; }
+    .alert-mark { display: grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; border-radius: 50%; color: #fff; background: #4389c4; font-size: 11px; font-weight: 800; }
+    .alert strong { display: block; margin-bottom: 3px; color: #263f54; font-size: 11px; }
+    .alert.error { border-color: #ecc4c0; color: #903f35; background: #fff5f3; }
+    .alert.error .alert-mark { background: var(--bad); }
+    .table-wrap { width: 100%; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 10px; text-align: left; }
+    th { padding: 9px 8px; color: #596d74; background: #f5f8f8; font-weight: 750; white-space: nowrap; }
+    td { padding: 9px 8px; border-bottom: 1px solid #e5ebec; color: #50646a; vertical-align: middle; }
+    td strong { display: block; color: #263b40; font-size: 10px; }
+    td code { display: block; margin-top: 3px; color: #6c7c80; font-size: 9px; overflow-wrap: anywhere; }
+    .status-stack { display: flex; flex-wrap: wrap; gap: 4px; }
+    .policy { color: #74858b; font-size: 9px; white-space: nowrap; }
+    .row-actions { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
+    .row-actions[hidden] { display: none; }
+    .empty-state, .loading-state { display: grid; min-height: 175px; place-content: center; gap: 8px; padding: 20px; color: #65746c; text-align: center; }
+    .empty-state strong, .loading-state strong { color: #34484d; font-size: 12px; }
+    .empty-state span, .loading-state span { max-width: 48ch; color: #7c8a8c; font-size: 10px; line-height: 1.55; }
+    .spinner { width: 21px; height: 21px; justify-self: center; border: 2px solid #dce7e4; border-top-color: var(--pine); border-radius: 50%; animation: spin .85s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .state-preview { margin-top: 14px; padding: 0 2px; }
+    .state-preview summary { width: fit-content; color: #77858a; cursor: pointer; font-size: 9px; }
+    .state-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .state-buttons button { min-height: 30px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 6px; color: #53676a; background: #fff; font-size: 9px; }
+    .prototype-note { margin-top: 14px; color: #84918c; font-size: 9px; line-height: 1.5; }
+    .mobile-nav { display: none; }
+
+    dialog { width: min(520px, calc(100vw - 24px)); max-height: calc(100vh - 32px); padding: 0; overflow: auto; border: 0; border-radius: 10px; color: var(--ink); box-shadow: 0 18px 60px rgba(22, 44, 54, .22); }
+    dialog::backdrop { background: rgba(25, 38, 43, .38); }
+    .dialog-head { padding: 18px 20px 13px; border-bottom: 1px solid #e0e7e8; }
+    .dialog-head h2 { margin: 0 0 5px; font-size: 16px; }
+    .dialog-head p { margin: 0; color: #68797d; font-size: 11px; line-height: 1.55; }
+    .dialog-body { display: grid; gap: 14px; padding: 16px 20px 18px; }
+    .dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid #e3e9ea; }
+    .toast { position: fixed; z-index: 6; top: 82px; right: 22px; max-width: min(420px, calc(100vw - 28px)); padding: 11px 14px; border: 1px solid #b8dfbd; border-radius: 7px; color: #286239; background: #f5fff5; box-shadow: 0 4px 18px rgba(33, 65, 55, .12); font-size: 11px; }
+    .toast[hidden] { display: none; }
+
+    @media (max-width: 960px) {
+      .runtime-layout { grid-template-columns: 1fr; }
+      .fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 720px) {
+      .sidebar { display: none; }
+      .app { grid-template-columns: 1fr; }
+      main { padding: 20px 14px 28px; }
+      .topbar { min-height: 68px; flex-wrap: wrap; gap: 8px 14px; padding: 10px 14px; }
+      .identity { gap: 6px; }
+      .identity label { display: none; }
+      .identity select { min-width: 145px; max-width: 48vw; }
+      .mobile-nav { display: flex; min-height: 46px; gap: 8px; overflow-x: auto; padding: 0 14px; border-bottom: 1px solid var(--line); background: #fff; }
+      .mobile-nav a { display: inline-flex; flex: 0 0 auto; align-items: center; padding: 0 10px; color: #586a72; font-size: 11px; text-decoration: none; white-space: nowrap; }
+      .mobile-nav a.selected { border-bottom: 2px solid var(--pine); color: var(--pine); font-weight: 650; }
+      .page-head { align-items: flex-start; gap: 14px; }
+      .page-head h1 { font-size: 23px; }
+      .page-head > .primary { align-self: flex-start; }
+      .fields { grid-template-columns: 1fr; }
+      .save-actions { align-items: flex-start; flex-direction: column; }
+      .tabs { gap: 18px; overflow-x: auto; }
+    }
+    @media (max-width: 420px) {
+      .card-head { align-items: flex-start; flex-direction: column; }
+      .save-buttons { width: 100%; }
+      .save-buttons button { flex: 1; }
+      .row-actions { align-items: flex-start; flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="管理导航">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">A</span><span>Agent Platform</span></div>
+      <div>
+        <div class="nav-label">管理控制台</div>
+        <nav class="side-nav">
+          <a href="#employees">数字员工</a>
+          <a href="#workbench">运行工作台</a>
+          <a href="#resources">资源中心</a>
+          <a href="#models" aria-current="page">模型管理</a>
+          <a href="#deployments">部署记录</a>
+        </nav>
+      </div>
+    </aside>
+
+    <div class="main-column">
+      <header class="topbar">
+        <div class="tenant-context"><span>当前租户</span><strong id="tenant-name">租户 A</strong></div>
+        <div class="identity">
+          <label for="identity-select">登录身份</label>
+          <select id="identity-select" aria-label="当前身份">
+            <option value="tenant-a-admin">租户 A · 管理员</option>
+            <option value="tenant-a-member">租户 A · 成员</option>
+            <option value="tenant-b-admin">租户 B · 管理员</option>
+          </select>
+        </div>
+      </header>
+      <nav class="mobile-nav" aria-label="移动管理导航">
+        <a href="#employees">数字员工</a><a href="#workbench">运行工作台</a><a href="#resources">资源中心</a><a class="selected" href="#models">模型管理</a><a href="#deployments">部署记录</a>
+      </nav>
+
+      <main id="models">
+        <div class="page">
+          <p class="eyebrow">平台配置</p>
+          <div class="page-head">
+            <div><h1>模型管理</h1><p>管理租户模型连接、目录、路由与可用性测试。</p></div>
+            <button class="primary" type="button" id="add-connection">添加连接</button>
+          </div>
+          <div class="tabs" role="tablist" aria-label="模型管理页面">
+            <button type="button" class="tab" role="tab" aria-selected="false" data-tab="connections">连接与模型</button>
+            <button type="button" class="tab" role="tab" aria-selected="false" data-tab="routes">模型路由</button>
+            <button type="button" class="tab active" role="tab" aria-selected="true" data-tab="runtime-defaults">默认运行环境</button>
+          </div>
+
+          <div class="runtime-layout" id="runtime-defaults-panel">
+            <section class="card" aria-labelledby="runtime-title">
+              <div class="card-head"><h2 id="runtime-title">默认运行环境</h2><span class="secondary-text">仅影响后续新 Session</span></div>
+              <div class="card-body">
+                <p class="intro">ExecutionProfile 只决定执行引擎与策略，ModelRoute 单独选择。更换引擎不会替换模型；Session 创建前校验兼容性。</p>
+                <form id="defaults-form">
+                  <div class="fields">
+                    <div class="field"><label for="default-scope">默认作用域</label><select id="default-scope"><option value="user">个人默认（当前用户）</option><option value="tenant">租户默认（成员回退值）</option></select></div>
+                    <div class="field"><label for="default-profile">默认执行引擎（ExecutionProfile）</label><select id="default-profile"><option value="">不设置（继承下一作用域）</option><option value="profile-deepseek@1">DeepSeek Harness · v1</option></select></div>
+                    <div class="field"><label for="default-route">默认模型（ModelRoute）</label><select id="default-route"><option value="">不设置（继承下一作用域）</option><option value="route-local">本地模型测试 · gpt-6.1-sol</option><option value="route-incompatible">北岸 OpenAI · GPT-5.4 Responses（不兼容示例）</option></select></div>
+                  </div>
+                </form>
+                <div class="priority-note"><span>优先级</span><strong>Deployment 覆盖 → 个人默认 → 租户默认 → 平台/系统</strong></div>
+                <div class="effective-strip" aria-live="polite"><span class="title">当前身份解析</span><span>引擎：<b id="effective-engine">未设置</b> <span class="tag" id="effective-engine-source">无来源</span></span><span>模型：<b id="effective-model">未设置</b> <span class="tag" id="effective-model-source">无来源</span></span></div>
+                <div class="alert error" id="compatibility-warning" hidden><span class="alert-mark">!</span><div><strong>当前引擎和模型路由协议不兼容</strong>系统不会自动替换模型；新建 Session 前需要调整其中一项。</div></div>
+                <p class="inline-note" id="scope-note">仅影响租户 A · 管理员新建的 Session。</p>
+                <p class="inline-note" id="member-note" hidden>租户默认只读；个人默认可自行调整，管理员设置的租户默认仍会作为回退值。</p>
+                <p class="inline-note" id="route-empty-hint" hidden>当前租户没有可用模型路由，请先在“模型路由”中创建并启用路由。</p>
+                <div class="feedback" id="save-feedback" role="status" aria-live="polite"></div>
+                <div class="save-actions"><span id="save-scope-note">仅影响当前用户新建的 Session</span><div class="save-buttons"><button class="secondary" type="button" id="save-engine">保存引擎默认</button><button class="primary" type="button" id="save-model">保存模型默认</button></div></div>
+              </div>
+            </section>
+
+            <section class="card" aria-labelledby="profiles-title">
+              <div class="card-head"><h2 id="profiles-title">ExecutionProfile 方案</h2><button class="primary admin-only" id="new-profile" type="button">新建 Profile</button></div>
+              <div class="card-body">
+                <div class="alert"><span class="alert-mark">i</span><div><strong>Profile 决定引擎与运行策略；模型在上方单独选择。</strong>发布版本保持不变。编辑已发布方案时，先在同一 Profile ID 下创建下一版草稿；发布后默认绑定仍指向原版本，需显式切换。</div></div>
+                <div class="state-slot" id="profile-state-slot">
+                  <div class="table-wrap" id="profile-table-wrap">
+                    <table aria-label="ExecutionProfile 版本列表"><thead><tr><th>ExecutionProfile</th><th>版本</th><th>状态</th><th>环境策略</th><th>操作</th></tr></thead><tbody id="profile-table-body">
+                      <tr data-tenant="tenant-a" data-profile="deepseek-harness" data-version="2"><td><strong>deepseek_harness</strong><code>profile-deepseek</code></td><td>v2</td><td><div class="status-stack"><span class="tag warn">草稿</span></div></td><td><span class="policy">审批 none</span></td><td><div class="row-actions admin-only"><button class="link-button edit-draft" type="button">编辑草稿</button><button class="link-button publish-draft" type="button">发布</button></div></td></tr>
+                      <tr data-tenant="tenant-a" data-profile="deepseek-harness" data-version="1"><td><strong>deepseek_harness</strong><code>profile-deepseek</code></td><td>v1</td><td><div class="status-stack"><span class="tag good">已发布</span></div></td><td><span class="policy">审批 none</span></td><td><div class="row-actions admin-only"><button class="link-button fork-profile" type="button">创建新版本</button></div></td></tr>
+                      <tr data-tenant="tenant-a" data-profile="fake"><td><strong>fake</strong><code>profile-fake</code></td><td>v1</td><td><div class="status-stack"><span class="tag good">已发布</span><span class="tag blue">演示</span><span class="tag bad">引擎未启用</span></div></td><td><span class="policy">审批 none</span></td><td><div class="row-actions admin-only"><button class="link-button fork-profile" type="button">创建新版本</button></div></td></tr>
+                    </tbody></table>
+                  </div>
+                  <div class="loading-state" id="loading-state" hidden><span class="spinner" aria-hidden="true"></span><strong>正在读取 Profile 版本</strong><span>正在加载已授权的 ExecutionProfile 与版本信息。</span></div>
+                  <div class="empty-state" id="empty-state" hidden><strong>还没有 ExecutionProfile</strong><span>创建一个只配置引擎和运行策略的 Profile，再分别设置模型路由默认。</span><button class="primary admin-only" type="button" data-open-profile>创建第一个 Profile</button></div>
+                  <div class="alert error" id="error-state" hidden><span class="alert-mark">!</span><div><strong>无法读取 Profile 版本</strong>运行时目录暂时不可用。可以重试读取，不会修改已有配置。<button class="link-button" type="button" data-retry>重试</button></div></div>
+                </div>
+                <p class="inline-note">DeepSeek Harness 是当前原生引擎；Fake Profile 保留历史记录，但在此环境不可用于新 Session。</p>
+                <details class="state-preview"><summary>静态状态预览</summary><div class="state-buttons" role="group" aria-label="Profile 状态预览"><button type="button" data-state="loading">加载中</button><button type="button" data-state="empty">空目录</button><button type="button" data-state="error">读取失败</button><button type="button" data-state="ready">恢复结果</button></div></details>
+              </div>
+            </section>
+          </div>
+          <p class="prototype-note">静态原型 · 租户、Profile 与 ModelRoute 均为演示数据；表单和状态只在本页模拟，不连接 API。</p>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="profile-dialog" aria-labelledby="dialog-title">
+    <form id="profile-form">
+      <div class="dialog-head"><h2 id="dialog-title">新建 ExecutionProfile</h2><p id="dialog-description">选择已注册引擎并创建已发布版本。引擎默认需要在主页面单独保存。</p></div>
+      <div class="dialog-body">
+        <div class="field"><label for="engine-provider">EngineProvider</label><select id="engine-provider" required><option value="deepseek_harness">DeepSeek Harness · 已启用</option></select></div>
+        <div class="alert"><span class="alert-mark">i</span><div><strong>本期 Profile 只配置引擎</strong>Profile 不保存模型 ID、ModelRoute 或凭据；请在默认运行环境或 Deployment 中独立选择 ModelRoute。</div></div>
+        <div class="alert error" id="dialog-error" hidden><span class="alert-mark">!</span><div><strong>创建失败</strong><span id="dialog-error-text">Provider 当前不可用，请检查运行环境配置。</span></div></div>
+        <div class="dialog-foot" id="create-actions"><button class="secondary" id="cancel-dialog" type="button">取消</button><button class="primary" type="submit">创建并发布</button></div>
+        <div class="dialog-foot" id="edit-actions" hidden><button class="secondary" id="close-edit" type="button">关闭</button><button class="secondary" id="save-draft" type="button">保存草稿</button><button class="primary" id="publish-edit" type="button">发布此版本</button></div>
+      </div>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script>
+    const identitySelect = document.getElementById('identity-select')
+    const scopeSelect = document.getElementById('default-scope')
+    const toast = document.getElementById('toast')
+    const dialog = document.getElementById('profile-dialog')
+    let profileSequence = 1
+    let editingRow = null
+    let toastTimer
+
+    function notify(message) {
+      toast.textContent = message
+      toast.hidden = false
+      window.clearTimeout(toastTimer)
+      toastTimer = window.setTimeout(() => { toast.hidden = true }, 2800)
+    }
+
+    function isAdmin() { return identitySelect.value !== 'tenant-a-member' }
+    function syncIdentity() {
+      const member = identitySelect.value === 'tenant-a-member'
+      const tenantB = identitySelect.value === 'tenant-b-admin'
+      document.getElementById('tenant-name').textContent = tenantB ? '租户 B' : '租户 A'
+      document.getElementById('scope-note').textContent = `仅影响 ${tenantB ? '租户 B' : '租户 A'} · ${member ? '成员' : '管理员'} 新建的 Session。`
+      document.getElementById('save-scope-note').textContent = scopeSelect.value === 'user'
+        ? '仅影响当前用户新建的 Session'
+        : '没有个人默认的成员会继承此值'
+      document.getElementById('member-note').hidden = !member
+      scopeSelect.querySelector('option[value="tenant"]').disabled = member
+      if (member && scopeSelect.value === 'tenant') scopeSelect.value = 'user'
+      document.querySelectorAll('.admin-only').forEach((element) => {
+        element.hidden = member
+      })
+      const tenantId = tenantB ? 'tenant-b' : 'tenant-a'
+      const tenantProfiles = [...document.querySelectorAll('#profile-table-body tr')].filter((row) => {
+        row.hidden = row.dataset.tenant !== tenantId
+        return !row.hidden
+      })
+      const profileOptions = [['', '不设置（继承下一作用域）']]
+      tenantProfiles
+        .filter((row) => row.dataset.profile === 'deepseek-harness' && row.querySelector('.tag.good') && !row.querySelector('.tag.bad'))
+        .forEach((row) => {
+          const profileId = row.querySelector('code').textContent
+          const version = row.dataset.version
+          profileOptions.push([`${profileId}@${version}`, `DeepSeek Harness · v${version}`])
+        })
+      fillSelect('default-profile', profileOptions)
+      fillSelect('default-route', tenantB
+        ? [['', '不设置（继承下一作用域）']]
+        : [['', '不设置（继承下一作用域）'], ['route-local', '本地模型测试 · gpt-6.1-sol'], ['route-incompatible', '北岸 OpenAI · GPT-5.4 Responses（不兼容示例）']])
+      document.getElementById('route-empty-hint').hidden = !tenantB
+      showState(tenantProfiles.length ? 'ready' : 'empty')
+    }
+
+    function fillSelect(id, options) {
+      const select = document.getElementById(id)
+      const previousValue = select.value
+      select.replaceChildren(...options.map(([value, label]) => new Option(label, value)))
+      if (options.some(([value]) => value === previousValue)) select.value = previousValue
+    }
+
+    function showState(state) {
+      document.getElementById('profile-table-wrap').hidden = state !== 'ready'
+      document.getElementById('loading-state').hidden = state !== 'loading'
+      document.getElementById('empty-state').hidden = state !== 'empty'
+      document.getElementById('error-state').hidden = state !== 'error'
+    }
+
+    function syncCompatibility() {
+      const incompatible = document.getElementById('default-route').value === 'route-incompatible'
+        && Boolean(document.getElementById('default-profile').value)
+      document.getElementById('compatibility-warning').hidden = !incompatible
+    }
+
+    function openProfileDialog() {
+      if (!isAdmin()) return
+      editingRow = null
+      document.getElementById('dialog-title').textContent = '新建 ExecutionProfile'
+      document.getElementById('dialog-description').textContent = '选择已注册引擎并创建已发布版本。引擎默认需要在主页面单独保存。'
+      document.getElementById('create-actions').hidden = false
+      document.getElementById('edit-actions').hidden = true
+      document.getElementById('dialog-error').hidden = true
+      dialog.showModal()
+    }
+
+    function openEditDialog(row) {
+      if (!isAdmin()) return
+      editingRow = row
+      document.getElementById('dialog-title').textContent = '编辑 Profile 草稿'
+      document.getElementById('dialog-description').textContent = `${row.querySelector('code').textContent} · v${row.dataset.version} 草稿；发布不会自动切换个人或租户默认。`
+      document.getElementById('create-actions').hidden = true
+      document.getElementById('edit-actions').hidden = false
+      document.getElementById('dialog-error').hidden = true
+      dialog.showModal()
+    }
+
+    identitySelect.addEventListener('change', syncIdentity)
+    scopeSelect.addEventListener('change', syncIdentity)
+    document.getElementById('new-profile').addEventListener('click', openProfileDialog)
+    document.querySelector('[data-open-profile]').addEventListener('click', openProfileDialog)
+    document.getElementById('cancel-dialog').addEventListener('click', () => dialog.close())
+    document.getElementById('profile-form').addEventListener('submit', (event) => {
+      event.preventDefault()
+      if (!isAdmin()) return
+      const profileId = `profile-deepseek-new-${profileSequence}`
+      const tenantId = identitySelect.value === 'tenant-b-admin' ? 'tenant-b' : 'tenant-a'
+      const row = document.getElementById('profile-table-body').insertRow(0)
+      row.dataset.tenant = tenantId
+      row.dataset.profile = 'deepseek-harness'
+      row.dataset.version = '1'
+      row.innerHTML = `<td><strong>deepseek_harness</strong><code>${profileId}</code></td><td>v1</td><td><div class="status-stack"><span class="tag good">已发布</span></div></td><td><span class="policy">审批 none</span></td><td><div class="row-actions admin-only"><button class="link-button fork-profile" type="button">创建新版本</button></div></td>`
+      document.getElementById('default-profile').add(new Option(`DeepSeek Harness · v1 (${profileId})`, `${profileId}@1`))
+      profileSequence += 1
+      showState('ready')
+      dialog.close()
+      document.getElementById('profile-form').reset()
+      notify('ExecutionProfile 已创建并发布；默认绑定未自动切换。')
+    })
+    document.getElementById('close-edit').addEventListener('click', () => dialog.close())
+    document.getElementById('save-draft').addEventListener('click', () => notify('ExecutionProfile 草稿已保存。'))
+    document.getElementById('publish-edit').addEventListener('click', () => {
+      if (!editingRow) return
+      editingRow.querySelector('.status-stack').innerHTML = '<span class="tag good">已发布</span>'
+      editingRow.querySelector('.row-actions').innerHTML = '<button class="link-button fork-profile" type="button">创建新版本</button>'
+      dialog.close()
+      notify('ExecutionProfile 版本已发布；默认绑定仍指向原版本。')
+    })
+    document.getElementById('save-engine').addEventListener('click', () => {
+      document.getElementById('save-feedback').className = 'feedback'
+      document.getElementById('save-feedback').textContent = scopeSelect.value === 'user' ? '个人引擎默认已保存' : '租户引擎默认已保存'
+      const selected = document.getElementById('default-profile').value
+      document.getElementById('effective-engine').textContent = selected ? 'DeepSeek Harness · v1' : '未设置'
+      document.getElementById('effective-engine-source').textContent = selected ? (scopeSelect.value === 'user' ? '个人默认' : '租户默认') : '无来源'
+      syncCompatibility()
+    })
+    document.getElementById('save-model').addEventListener('click', () => {
+      document.getElementById('save-feedback').className = 'feedback'
+      document.getElementById('save-feedback').textContent = scopeSelect.value === 'user' ? '个人模型默认已保存' : '租户模型默认已保存'
+      const selected = document.getElementById('default-route').value
+      document.getElementById('effective-model').textContent = selected === 'route-local' ? '本地模型测试 · gpt-6.1-sol' : selected ? '北岸 OpenAI · GPT-5.4 Responses' : '未设置'
+      document.getElementById('effective-model-source').textContent = selected ? (scopeSelect.value === 'user' ? '个人默认' : '租户默认') : '无来源'
+      syncCompatibility()
+      const incompatible = selected === 'route-incompatible' && Boolean(document.getElementById('default-profile').value)
+      if (incompatible) document.getElementById('save-feedback').textContent = '默认值已保存；当前引擎与模型协议不兼容。'
+    })
+    document.getElementById('profile-table-body').addEventListener('click', (event) => {
+      const button = event.target.closest('button')
+      if (!button) return
+      const row = button.closest('tr')
+      if (button.classList.contains('edit-draft')) openEditDialog(row)
+      if (button.classList.contains('publish-draft')) {
+        row.querySelector('.status-stack').innerHTML = '<span class="tag good">已发布</span>'
+        row.querySelector('.row-actions').innerHTML = '<button class="link-button fork-profile" type="button">创建新版本</button>'
+        notify('ExecutionProfile 版本已发布；默认绑定仍指向原版本。')
+      }
+      if (button.classList.contains('fork-profile')) {
+        const nextVersion = Number(row.dataset.version || 1) + 1
+        const newRow = document.getElementById('profile-table-body').insertRow(0)
+        newRow.dataset.tenant = row.dataset.tenant
+        newRow.dataset.profile = row.dataset.profile
+        newRow.dataset.version = String(nextVersion)
+        newRow.innerHTML = `<td><strong>${row.querySelector('strong').textContent}</strong><code>${row.querySelector('code').textContent}</code></td><td>v${nextVersion}</td><td><div class="status-stack"><span class="tag warn">草稿</span></div></td><td><span class="policy">审批 none</span></td><td><div class="row-actions admin-only"><button class="link-button edit-draft" type="button">编辑草稿</button><button class="link-button publish-draft" type="button">发布</button></div></td>`
+        notify(`已创建 ${row.querySelector('code').textContent} 的 v${nextVersion} 草稿；发布后再切换默认。`)
+      }
+    })
+    document.querySelectorAll('[data-retry]').forEach((button) => button.addEventListener('click', () => {
+      showState('loading')
+      window.setTimeout(() => showState('ready'), 500)
+    }))
+    document.querySelectorAll('[data-state]').forEach((button) => button.addEventListener('click', () => showState(button.dataset.state)))
+    document.querySelectorAll('[data-tab]').forEach((button) => button.addEventListener('click', () => {
+      document.querySelectorAll('[data-tab]').forEach((tab) => {
+        const active = tab === button
+        tab.classList.toggle('active', active)
+        tab.setAttribute('aria-selected', String(active))
+      })
+      if (button.dataset.tab !== 'runtime-defaults') notify('此静态原型聚焦“默认运行环境”标签。')
+    }))
+    document.getElementById('add-connection').addEventListener('click', () => notify('连接配置位于“连接与模型”标签。'))
+    syncIdentity()
+  </script>
+</body>
+</html>

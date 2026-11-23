@@ -22,11 +22,14 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import {
+  ApiError,
   addManualModel,
   createModelConnection,
   createModelRoute,
+  deleteModelRoute,
   getModelTest,
   listConnectionModels,
   listModelConnections,
@@ -36,6 +39,7 @@ import {
   setModelRouteStatus,
   syncConnectionModels,
   updateModelConnection,
+  updateModelRoute,
 } from '../../api/client'
 import type {
   ModelCatalogSummary,
@@ -44,6 +48,7 @@ import type {
   ModelTestRecord,
 } from '../../api/client'
 import { useTenantContext } from '../management/TenantContext'
+import { DefaultRuntimeEnvironmentTab } from './DefaultRuntimeEnvironmentTab'
 
 const { Paragraph, Text, Title } = Typography
 
@@ -61,6 +66,32 @@ const testStateColors: Record<ModelTestRecord['state'], string> = {
   SUCCEEDED: 'success',
   FAILED: 'error',
   UNKNOWN: 'warning',
+}
+
+function modelRouteOperationError(error: unknown): string {
+  if (!(error instanceof ApiError)) return error instanceof Error ? error.message : '模型路由操作失败'
+  if (error.code === 'MODEL_ROUTE_VERSION_CONFLICT') {
+    return '这条路由已被其他管理员更新，请刷新列表后重新编辑。'
+  }
+  if (error.code === 'MODEL_ROUTE_IN_USE') {
+    const references = Array.isArray(error.details?.references)
+      ? error.details.references as Array<Record<string, unknown>>
+      : []
+    const labels = references.map((reference) => {
+      if (reference.kind === 'deployment') return `Deployment ${String(reference.deployment_id ?? '')}`
+      if (reference.kind === 'model_route_default') {
+        return `${String(reference.scope_type ?? '')} 默认 ${String(reference.scope_id ?? '')}`
+      }
+      if (reference.kind === 'engine_profile_default') {
+        return `Profile ${String(reference.profile_id ?? '')} v${String(reference.profile_version ?? '')} 默认`
+      }
+      return '运行配置'
+    }).filter((label) => label.trim())
+    return labels.length
+      ? `该路由仍被以下配置使用，请先解绑：${labels.join('、')}`
+      : error.message
+  }
+  return error.message
 }
 
 function authorizationSourceLabel(source?: string) {
@@ -127,6 +158,7 @@ export function ModelManagementPage() {
 
 function ModelManagementWorkspace() {
   const { fakeUser, currentIdentity } = useTenantContext()
+  const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const [selectedConnectionId, setSelectedConnectionId] = useState<string>()
   const [connectionDrawerOpen, setConnectionDrawerOpen] = useState(false)
@@ -134,6 +166,10 @@ function ModelManagementWorkspace() {
   const [manualModelOpen, setManualModelOpen] = useState(false)
   const [routeDrawerOpen, setRouteDrawerOpen] = useState(false)
   const [routeModel, setRouteModel] = useState<ModelCatalogSummary>()
+  const [editingRoute, setEditingRoute] = useState<ModelRouteSummary>()
+  const [routeConnectionId, setRouteConnectionId] = useState<string>()
+  const [routeCatalogModelId, setRouteCatalogModelId] = useState<string>()
+  const [routeActionError, setRouteActionError] = useState<string | null>(null)
   const [testConfirmationRoute, setTestConfirmationRoute] = useState<ModelRouteSummary>()
   const [activeTestId, setActiveTestId] = useState<string>()
   const [connectionForm] = Form.useForm()
@@ -157,6 +193,11 @@ function ModelManagementWorkspace() {
     queryKey: ['connection-models', fakeUser, selectedConnectionId],
     queryFn: () => listConnectionModels(selectedConnectionId!, fakeUser),
     enabled: Boolean(selectedConnectionId),
+  })
+  const routeFormModels = useQuery({
+    queryKey: ['model-route-form-models', fakeUser, routeConnectionId],
+    queryFn: () => listConnectionModels(routeConnectionId!, fakeUser),
+    enabled: routeDrawerOpen && Boolean(routeConnectionId) && !routeModel,
   })
   const testRecord = useQuery({
     queryKey: ['model-test', fakeUser, activeTestId],
@@ -201,6 +242,9 @@ function ModelManagementWorkspace() {
     queryClient.invalidateQueries({ queryKey: ['model-connections', fakeUser] }),
     queryClient.invalidateQueries({ queryKey: ['connection-models', fakeUser] }),
     queryClient.invalidateQueries({ queryKey: ['model-routes', fakeUser] }),
+    queryClient.invalidateQueries({ queryKey: ['selectable-model-routes', fakeUser] }),
+    queryClient.invalidateQueries({ queryKey: ['runtime-default-route', fakeUser] }),
+    queryClient.invalidateQueries({ queryKey: ['runtime-default-route-effective', fakeUser] }),
   ])
 
   const createConnectionMutation = useMutation({
@@ -282,22 +326,55 @@ function ModelManagementWorkspace() {
   })
   const createRouteMutation = useMutation({
     mutationFn: (values: ReturnType<typeof routeForm.getFieldsValue>) => {
-      if (!selectedConnectionId || !routeModel) throw new Error('请选择模型')
+      const connectionId = routeModel?.connection_id ?? routeConnectionId
+      const modelId = routeModel?.model_id ?? routeCatalogModelId
+      if (!connectionId || !modelId) throw new Error('请选择模型连接和目录模型')
       return createModelRoute({
         alias: values.alias,
-        connection_id: selectedConnectionId,
-        catalog_model_id: routeModel.model_id,
-        model_name: routeModel.model_id,
+        connection_id: connectionId,
+        catalog_model_id: modelId,
+        model_name: modelId,
         parameters: values.temperature === undefined ? {} : { temperature: values.temperature },
       }, fakeUser)
     },
     onSuccess: async () => {
       setRouteDrawerOpen(false)
       setRouteModel(undefined)
+      setEditingRoute(undefined)
+      setRouteActionError(null)
       routeForm.resetFields()
-      await queryClient.invalidateQueries({ queryKey: ['model-routes', fakeUser] })
+      await invalidateCatalog()
       message.success('模型路由已创建')
     },
+    onError: (error) => setRouteActionError(error instanceof Error ? error.message : '模型路由创建失败'),
+  })
+  const updateRouteMutation = useMutation({
+    mutationFn: (values: ReturnType<typeof routeForm.getFieldsValue>) => {
+      if (!editingRoute) throw new Error('当前没有正在编辑的路由')
+      const parameters = { ...(editingRoute.profile.parameters ?? {}) }
+      if (values.temperature === undefined) delete parameters.temperature
+      else parameters.temperature = values.temperature
+      const connectionTarget = editingRoute.profile.connection_id ? {
+        connection_id: routeConnectionId || editingRoute.profile.connection_id,
+        catalog_model_id: routeCatalogModelId || editingRoute.profile.catalog_model_id || undefined,
+        model_name: routeCatalogModelId || editingRoute.profile.catalog_model_id || editingRoute.profile.model_name,
+      } : {}
+      return updateModelRoute(editingRoute.route_id, {
+        expected_route_version: editingRoute.route_version ?? 1,
+        alias: values.alias,
+        ...connectionTarget,
+        parameters,
+      }, fakeUser)
+    },
+    onSuccess: async () => {
+      setRouteDrawerOpen(false)
+      setEditingRoute(undefined)
+      setRouteActionError(null)
+      routeForm.resetFields()
+      await invalidateCatalog()
+      message.success('模型路由已更新为新版本')
+    },
+    onError: (error) => setRouteActionError(modelRouteOperationError(error)),
   })
   const routeTestMutation = useMutation({
     mutationFn: (route: ModelRouteSummary) => queueModelRouteTest(route.route_id, fakeUser),
@@ -317,6 +394,24 @@ function ModelManagementWorkspace() {
     onSuccess: async (route) => {
       await invalidateCatalog()
       message.success(route.status === 'ACTIVE' ? '模型路由已启用' : '模型路由已停用')
+    },
+    onError: (error) => setRouteActionError(error instanceof Error ? error.message : '模型路由状态更新失败'),
+  })
+  const revokeRouteMutation = useMutation({
+    mutationFn: (route: ModelRouteSummary) => deleteModelRoute(
+      route.route_id,
+      route.route_version ?? 1,
+      fakeUser,
+    ),
+    onSuccess: async () => {
+      setRouteActionError(null)
+      await invalidateCatalog()
+      message.success('模型路由已逻辑删除，历史运行快照保留。')
+    },
+    onError: (error) => {
+      const description = modelRouteOperationError(error)
+      setRouteActionError(description)
+      message.error(description)
     },
   })
 
@@ -366,11 +461,7 @@ function ModelManagementWorkspace() {
         <Button
           type="link"
           disabled={!isAdmin || model.status !== 'ACTIVE' || selectedConnection?.status !== 'ACTIVE'}
-          onClick={() => {
-            setRouteModel(model)
-            routeForm.setFieldsValue({ alias: model.model_id, temperature: undefined })
-            setRouteDrawerOpen(true)
-          }}
+          onClick={() => openCreateRouteForModel(model)}
         >
           创建路由
         </Button>
@@ -412,18 +503,27 @@ function ModelManagementWorkspace() {
       title: '状态',
       dataIndex: 'status',
       width: 95,
-      render: (status: string) => <Tag color={status === 'ACTIVE' ? 'success' : 'default'}>{status === 'ACTIVE' ? '启用中' : '已停用'}</Tag>,
+      render: (status: string) => (
+        <Tag color={status === 'ACTIVE' ? 'success' : status === 'REVOKED' ? 'error' : 'default'}>
+          {status === 'ACTIVE' ? '启用中' : status === 'REVOKED' ? '已删除' : '已停用'}
+        </Tag>
+      ),
     },
     {
       title: '操作',
       key: 'actions',
-      width: 180,
+      width: 300,
       render: (_value, route) => (
         <Space size={2}>
+          {isAdmin && route.status !== 'REVOKED' && (
+            <Button type="link" onClick={() => openEditRoute(route)}>
+              编辑
+            </Button>
+          )}
           <Button type="link" disabled={!isAdmin || route.status !== 'ACTIVE'} onClick={() => setTestConfirmationRoute(route)}>
             测试模型
           </Button>
-          {isAdmin && (
+          {isAdmin && route.status !== 'REVOKED' && (
             <Popconfirm
               title={route.status === 'ACTIVE' ? '停用此模型路由？' : '重新启用此模型路由？'}
               description="员工版本将只能选择启用且当前身份有权使用的路由。"
@@ -433,6 +533,19 @@ function ModelManagementWorkspace() {
             >
               <Button type="link" loading={routeStatusMutation.isPending}>
                 {route.status === 'ACTIVE' ? '停用' : '启用'}
+              </Button>
+            </Popconfirm>
+          )}
+          {isAdmin && route.status !== 'REVOKED' && (
+            <Popconfirm
+              title="逻辑删除此模型路由？"
+              description="删除后不再用于新的默认值或 Deployment；历史运行快照保留。仍有活动引用时系统会拒绝删除。"
+              okText="确认删除路由"
+              cancelText="取消"
+              onConfirm={() => revokeRouteMutation.mutate(route)}
+            >
+              <Button type="link" danger loading={revokeRouteMutation.isPending}>
+                删除
               </Button>
             </Popconfirm>
           )}
@@ -463,6 +576,52 @@ function ModelManagementWorkspace() {
       catalog_mode: selectedConnection.catalog_mode,
     })
     setConnectionDrawerOpen(true)
+  }
+  const openNewRoute = () => {
+    const firstActive = connectionRows.find((connection) => connection.status === 'ACTIVE')
+    const connectionId = selectedConnection?.status === 'ACTIVE'
+      ? selectedConnection.connection_id
+      : firstActive?.connection_id
+    setRouteModel(undefined)
+    setEditingRoute(undefined)
+    setRouteActionError(null)
+    setRouteConnectionId(connectionId)
+    setRouteCatalogModelId(undefined)
+    routeForm.resetFields()
+    routeForm.setFieldsValue({ alias: '', connection_id: connectionId, catalog_model_id: undefined })
+    setRouteDrawerOpen(true)
+  }
+  const openCreateRouteForModel = (model: ModelCatalogSummary) => {
+    setRouteModel(model)
+    setEditingRoute(undefined)
+    setRouteActionError(null)
+    setRouteConnectionId(model.connection_id)
+    setRouteCatalogModelId(model.model_id)
+    routeForm.resetFields()
+    routeForm.setFieldsValue({
+      alias: model.model_id,
+      connection_id: model.connection_id,
+      catalog_model_id: model.model_id,
+      temperature: undefined,
+    })
+    setRouteDrawerOpen(true)
+  }
+  const openEditRoute = (route: ModelRouteSummary) => {
+    setRouteModel(undefined)
+    setEditingRoute(route)
+    setRouteActionError(null)
+    setRouteConnectionId(route.profile.connection_id ?? undefined)
+    setRouteCatalogModelId(route.profile.catalog_model_id ?? route.profile.model_name)
+    routeForm.resetFields()
+    routeForm.setFieldsValue({
+      alias: route.alias,
+      connection_id: route.profile.connection_id ?? undefined,
+      catalog_model_id: route.profile.catalog_model_id ?? route.profile.model_name,
+      temperature: typeof route.profile.parameters?.temperature === 'number'
+        ? route.profile.parameters.temperature
+        : undefined,
+    })
+    setRouteDrawerOpen(true)
   }
 
   return (
@@ -509,6 +668,13 @@ function ModelManagementWorkspace() {
 
       <Tabs
         className="model-management-tabs"
+        activeKey={searchParams.get('tab') ?? 'connections'}
+        onChange={(tab) => setSearchParams((current) => {
+          const next = new URLSearchParams(current)
+          if (tab === 'connections') next.delete('tab')
+          else next.set('tab', tab)
+          return next
+        }, { replace: true })}
         items={[
           {
             key: 'connections',
@@ -650,13 +816,21 @@ function ModelManagementWorkspace() {
             key: 'routes',
             label: '模型路由',
             children: (
-              <Card className="management-card model-routes-card" title="ModelRoute" extra={<Text type="secondary">员工版本绑定路由别名；运行时固定连接和模型版本。</Text>}>
+              <Card className="management-card model-routes-card" title="ModelRoute" extra={(
+                <Space>
+                  <Text type="secondary">员工版本绑定路由别名；运行时固定连接和模型版本。</Text>
+                  {isAdmin && <Button type="primary" onClick={openNewRoute}>创建路由</Button>}
+                </Space>
+              )}>
+                {routeActionError && <Alert className="model-route-action-error" type="error" showIcon message="路由操作未完成" description={routeActionError} />}
                 {routes.isPending ? (
                   <div className="management-loading"><Spin /><span>正在读取模型路由</span></div>
                 ) : routes.isError ? (
                   <Alert type="error" showIcon message="无法读取模型路由" description={(routes.error as Error).message} action={<Button onClick={() => void routes.refetch()}>重试</Button>} />
                 ) : (routes.data?.items.length ?? 0) === 0 ? (
-                  <Empty className="management-empty" description="还没有模型路由。先在连接目录中选择模型并创建路由。" />
+                  <Empty className="management-empty" description="还没有模型路由。选择当前租户启用的连接和目录模型后创建路由。">
+                    {isAdmin && <Button type="primary" onClick={openNewRoute}>创建路由</Button>}
+                  </Empty>
                 ) : (
                   <Table
                     rowKey="route_id"
@@ -664,11 +838,16 @@ function ModelManagementWorkspace() {
                     pagination={{ pageSize: 10, showSizeChanger: false }}
                     dataSource={routes.data?.items ?? []}
                     columns={routeColumns}
-                    scroll={{ x: 820 }}
+                    scroll={{ x: 980 }}
                   />
                 )}
               </Card>
             ),
+          },
+          {
+            key: 'runtime-defaults',
+            label: '默认运行环境',
+            children: <DefaultRuntimeEnvironmentTab />,
           },
         ]}
       />
@@ -754,11 +933,27 @@ function ModelManagementWorkspace() {
       </Drawer>
 
       <Drawer
-        title="创建模型路由"
+        title={editingRoute ? '编辑模型路由' : '创建模型路由'}
         open={routeDrawerOpen}
         width={440}
-        onClose={() => { setRouteDrawerOpen(false); setRouteModel(undefined); routeForm.resetFields() }}
-        extra={<Button type="primary" loading={createRouteMutation.isPending} onClick={() => void routeForm.submit()}>创建路由</Button>}
+        onClose={() => {
+          setRouteDrawerOpen(false)
+          setRouteModel(undefined)
+          setEditingRoute(undefined)
+          setRouteActionError(null)
+          setRouteConnectionId(undefined)
+          setRouteCatalogModelId(undefined)
+          routeForm.resetFields()
+        }}
+        extra={(
+          <Button
+            type="primary"
+            loading={createRouteMutation.isPending || updateRouteMutation.isPending}
+            onClick={() => void routeForm.submit()}
+          >
+            {editingRoute ? '保存路由' : '创建路由'}
+          </Button>
+        )}
       >
         {routeModel && (
           <div className="model-route-target">
@@ -767,7 +962,57 @@ function ModelManagementWorkspace() {
             <code>{routeModel.model_id}</code>
           </div>
         )}
-        <Form form={routeForm} layout="vertical" onFinish={(values) => createRouteMutation.mutate(values)}>
+        <Form
+          form={routeForm}
+          layout="vertical"
+          onFinish={(values) => editingRoute
+            ? updateRouteMutation.mutate(values)
+            : createRouteMutation.mutate(values)}
+        >
+          {routeActionError && <Alert type="error" showIcon message="路由操作未完成" description={routeActionError} />}
+        {!routeModel && (!editingRoute || editingRoute.profile.connection_id) && (
+          <>
+            <Form.Item label="模型连接" required>
+              <select
+                className="model-route-form-select"
+                aria-label="模型连接"
+                value={routeConnectionId ?? ''}
+                onChange={(event) => {
+                  setRouteConnectionId(event.target.value || undefined)
+                  setRouteCatalogModelId(undefined)
+                }}
+              >
+                <option value="">选择一个启用的连接</option>
+                {connectionRows.filter((connection) => connection.status === 'ACTIVE').map((connection) => (
+                  <option key={connection.connection_id} value={connection.connection_id}>{connection.name}</option>
+                ))}
+              </select>
+            </Form.Item>
+            <Form.Item label="模型目录" required>
+              <select
+                className="model-route-form-select"
+                aria-label="模型目录"
+                disabled={!routeConnectionId || routeFormModels.isError}
+                value={routeCatalogModelId ?? ''}
+                onChange={(event) => setRouteCatalogModelId(event.target.value || undefined)}
+              >
+                <option value="">{routeFormModels.isPending ? '正在读取模型目录' : '选择一个可用模型'}</option>
+                {(routeFormModels.data?.items ?? []).filter((model) => model.status === 'ACTIVE').map((model) => (
+                  <option key={model.model_id} value={model.model_id}>{model.display_name} · {model.model_id}</option>
+                ))}
+              </select>
+            </Form.Item>
+            {routeFormModels.isError && (
+              <Alert type="error" showIcon message="无法读取模型目录" description={(routeFormModels.error as Error).message} action={<Button onClick={() => void routeFormModels.refetch()}>重试</Button>} />
+            )}
+            {!routeFormModels.isPending && !routeFormModels.isError && routeConnectionId && (routeFormModels.data?.items ?? []).filter((model) => model.status === 'ACTIVE').length === 0 && (
+              <Alert type="info" showIcon message="此连接还没有可用模型" description="先返回“连接与模型”页签同步目录或添加模型 ID。" />
+            )}
+          </>
+        )}
+        {editingRoute && !editingRoute.profile.connection_id && (
+          <Alert type="info" showIcon message="历史直连路由" description="此路由还没有连接目录引用；本次可编辑别名和非敏感参数。" />
+        )}
           <Form.Item name="alias" label="路由别名" rules={[{ required: true, message: '请输入员工版本中显示的路由别名' }]}>
             <Input maxLength={128} placeholder="例如：客服主模型" />
           </Form.Item>
@@ -775,6 +1020,7 @@ function ModelManagementWorkspace() {
             <InputNumber min={0} max={2} step={0.1} className="model-form-full-width" />
           </Form.Item>
           {createRouteMutation.isError && <Alert type="error" showIcon message="路由未创建" description={(createRouteMutation.error as Error).message} />}
+          {updateRouteMutation.isError && <Alert type="error" showIcon message="路由未更新" description={(updateRouteMutation.error as Error).message} />}
         </Form>
       </Drawer>
 

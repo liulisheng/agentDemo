@@ -7,9 +7,14 @@ import json
 from dataclasses import dataclass, replace
 
 from agent_platform.application.catalog_service import CatalogService
+from agent_platform.application.engine_providers import (
+    EngineProviderRegistry,
+    validate_profile_worker_policy,
+)
 from agent_platform.domain.catalog import (
     Deployment,
     DigitalEmployeeVersion,
+    ExecutionProfile,
     LifecycleStatus,
     SkillContentFormat,
     SkillFileEntry,
@@ -41,6 +46,8 @@ from agent_platform.ports.runtime import RuntimeMcpServer, RuntimeSkillFile, Run
 from agent_platform.ports.storage import ObjectStore, ObjectStoreError
 
 _CURRENT_MODEL_ROUTE = object()
+_CURRENT_MODEL_ALIAS = object()
+_CURRENT_RUNTIME_PROFILE = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,11 +222,13 @@ class AgentResolver:
         object_store: ObjectStore | None = None,
         mcp_repository: McpRepository | None = None,
         model_authorization_provider: ModelAuthorizationProvider | None = None,
+        engine_providers: EngineProviderRegistry | None = None,
     ) -> None:
         self.catalog = catalog
         self.object_store = object_store
         self.mcp_repository = mcp_repository
         self.model_authorization_provider = model_authorization_provider
+        self.engine_providers = engine_providers
         self.hub = (
             HubResourceResolver(resource_center_repository)
             if resource_center_repository is not None
@@ -304,6 +313,41 @@ class AgentResolver:
             pricing_snapshot_ref=profile.pricing_snapshot_ref,
         )
 
+    def resolve_model_route_snapshot(
+        self,
+        identity: IdentityContext,
+        route_id: str | None,
+        *,
+        snapshot_override: ModelRouteSnapshot | None | object = _CURRENT_MODEL_ROUTE,
+        authorization_identity: IdentityContext | None = None,
+    ) -> ModelRouteSnapshot | None:
+        """固定 Session 使用的路由快照；已配置覆盖保持原连接/模型版本。"""
+
+        if route_id is None:
+            if snapshot_override is not _CURRENT_MODEL_ROUTE and snapshot_override is not None:
+                raise DomainError(
+                    "DEPENDENCY_VALIDATION_ERROR",
+                    "Session 没有 ModelRoute，不能携带路由快照",
+                )
+            return None
+        if snapshot_override is _CURRENT_MODEL_ROUTE:
+            return self._resolve_model_route_snapshot(identity, route_id)
+        if (
+            not isinstance(snapshot_override, ModelRouteSnapshot)
+            or snapshot_override.route_id != route_id
+        ):
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "Deployment 运行配置中的模型路由快照与路由标识不一致",
+                {"model_route_id": route_id},
+            )
+        self._reauthorize_pinned_model_route(
+            identity,
+            snapshot_override,
+            authorization_identity=authorization_identity,
+        )
+        return snapshot_override
+
     def _require_model_authorization(
         self,
         identity: IdentityContext,
@@ -385,13 +429,94 @@ class AgentResolver:
         identity: IdentityContext,
         deployment: Deployment,
         *,
+        runtime_profile: ExecutionProfile | None = None,
+        runtime_profile_id: str | None | object = _CURRENT_RUNTIME_PROFILE,
+        runtime_profile_version: int | None = None,
+        runtime_model_route_id: str | None | object = _CURRENT_MODEL_ROUTE,
+        runtime_model_alias: str | None | object = _CURRENT_MODEL_ALIAS,
+        runtime_config_version: int | None = None,
+        runtime_profile_source: str | None = None,
+        runtime_model_route_source: str | None = None,
         model_route_snapshot_override: ModelRouteSnapshot | None | object = _CURRENT_MODEL_ROUTE,
         model_authorization_identity: IdentityContext | None = None,
     ) -> ResolvedAgent:
         version = deployment.employee_version
-        profile = self.catalog.repository.get_profile_version(
-            identity, version.execution_profile_id, version.execution_profile_version
-        )
+        deployment_config = None
+        if runtime_profile is None and (
+            runtime_profile_id is _CURRENT_RUNTIME_PROFILE
+            or runtime_model_route_id is _CURRENT_MODEL_ROUTE
+        ):
+            try:
+                deployment_config = self.catalog.repository.get_deployment_runtime_config(
+                    identity, deployment.deployment_id
+                )
+            except DomainError as error:
+                if error.code != "RESOURCE_NOT_FOUND":
+                    raise
+                # 直接解析历史内存快照时尚无 Deployment 行；旧版本固定列仍可兼容读取。
+                deployment_config = None
+            if deployment_config is not None:
+                runtime_config_version = (
+                    runtime_config_version or deployment_config.config_version
+                )
+                if (
+                    runtime_profile_id is _CURRENT_RUNTIME_PROFILE
+                    and version.execution_profile_id is None
+                    and deployment_config.execution_profile_id is not None
+                ):
+                    runtime_profile_id = deployment_config.execution_profile_id
+                    runtime_profile_version = deployment_config.execution_profile_version
+                    runtime_profile_source = runtime_profile_source or "DEPLOYMENT_OVERRIDE"
+                if (
+                    runtime_model_route_id is _CURRENT_MODEL_ROUTE
+                    and deployment_config.model_route_id is not None
+                ):
+                    runtime_model_route_id = deployment_config.model_route_id
+                    runtime_model_route_source = (
+                        runtime_model_route_source or "DEPLOYMENT_OVERRIDE"
+                    )
+                    if (
+                        model_route_snapshot_override is _CURRENT_MODEL_ROUTE
+                        and deployment_config.model_route_snapshot is not None
+                    ):
+                        model_route_snapshot_override = ModelRouteSnapshot.from_snapshot_dict(
+                            deployment_config.model_route_snapshot
+                        )
+        if runtime_profile is not None:
+            if runtime_profile.tenant_id != identity.tenant_id:
+                raise DomainError(
+                    "AUTHORIZATION_DENIED",
+                    "运行 Profile 不属于当前租户",
+                )
+            profile = runtime_profile
+        else:
+            if runtime_profile_id is _CURRENT_RUNTIME_PROFILE:
+                selected_profile_id = version.execution_profile_id
+                selected_profile_version = version.execution_profile_version
+            else:
+                selected_profile_id = runtime_profile_id
+                selected_profile_version = runtime_profile_version
+            if selected_profile_id is None or selected_profile_version is None:
+                raise DomainError(
+                    "RUNTIME_CONFIGURATION_REQUIRED",
+                    "Session 未固定可用的 ExecutionProfile",
+                    {"deployment_id": deployment.deployment_id},
+                )
+            profile = self.catalog.repository.get_profile_version(
+                identity, str(selected_profile_id), selected_profile_version
+            )
+        if profile.status is not LifecycleStatus.PUBLISHED:
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "Session 固定的 ExecutionProfile 已不可用",
+                {"profile_id": profile.profile_id, "version": profile.version},
+            )
+        validate_profile_worker_policy(profile)
+        if self.engine_providers is not None:
+            # 历史 Profile 可能使用连字符别名；快照与 Session 必须保存注册表稳定 ID。
+            provider = self.engine_providers.resolve(profile.engine_name)
+            if profile.engine_name != provider.engine_name:
+                profile = replace(profile, engine_name=provider.engine_name)
         source_refs: list[HubResourceSnapshot] = []
         imported_content: dict[tuple[HubResourceType, str, int], dict[str, object]] = {}
 
@@ -787,7 +912,22 @@ class AgentResolver:
         unique_refs: dict[tuple[str, int, str], HubResourceSnapshot] = {}
         for reference in source_refs:
             unique_refs[(reference.hub_resource_id, reference.hub_version, reference.mode)] = reference
-        model_route_id = version.model_route_id or profile.model_route_id
+        if runtime_model_route_id is _CURRENT_MODEL_ROUTE:
+            model_route_id = version.model_route_id or profile.model_route_id
+        else:
+            model_route_id = (
+                str(runtime_model_route_id)
+                if isinstance(runtime_model_route_id, str)
+                else None
+            )
+        if runtime_model_alias is _CURRENT_MODEL_ALIAS:
+            model_alias = profile.model_alias if model_route_id is None else None
+        else:
+            model_alias = (
+                str(runtime_model_alias)
+                if isinstance(runtime_model_alias, str)
+                else None
+            )
         if model_route_snapshot_override is _CURRENT_MODEL_ROUTE:
             model_route_snapshot = self._resolve_model_route_snapshot(identity, model_route_id)
         else:
@@ -812,12 +952,17 @@ class AgentResolver:
             employee_version=version.version,
             skill_version_ids=tuple(skill.skill_id for skill in resolved_skills),
             tool_version_ids=tuple(tool_id for tool_id, _ in resolved_tool_refs),
-            execution_profile_id=version.execution_profile_id,
+            execution_profile_id=profile.profile_id,
+            engine_name=profile.engine_name,
             skill_version_refs=tuple(version.skill_version_refs),
             tool_version_refs=tuple(resolved_tool_refs),
-            execution_profile_version=version.execution_profile_version,
+            execution_profile_version=profile.version,
             model_route_id=model_route_id,
+            model_alias=model_alias,
             model_route_snapshot=model_route_snapshot,
+            runtime_config_version=runtime_config_version,
+            runtime_profile_source=runtime_profile_source,
+            runtime_model_route_source=runtime_model_route_source,
             hub_resource_refs=tuple(unique_refs.values()),
             skill_file_packages=tuple(skill_file_packages),
         )
@@ -859,6 +1004,13 @@ class AgentResolver:
         resolved = self.resolve(
             identity,
             pinned_deployment,
+            runtime_profile_id=snapshot.execution_profile_id,
+            runtime_profile_version=snapshot.execution_profile_version,
+            runtime_model_route_id=snapshot.model_route_id,
+            runtime_model_alias=snapshot.model_alias,
+            runtime_config_version=snapshot.runtime_config_version,
+            runtime_profile_source=snapshot.runtime_profile_source,
+            runtime_model_route_source=snapshot.runtime_model_route_source,
             model_route_snapshot_override=snapshot.model_route_snapshot,
             model_authorization_identity=authorization_identity,
         )

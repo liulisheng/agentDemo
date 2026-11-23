@@ -9,14 +9,22 @@ from fastapi import APIRouter, Query
 from agent_platform.api.schemas import (
     DeploymentCreateRequest,
     DeploymentRollbackRequest,
+    DeploymentRuntimeConfigRequest,
     RunCreateRequest,
     SessionCreateRequest,
 )
 from agent_platform.domain.catalog import LifecycleStatus
 
-from .common import Catalog, ControlPlane, Identity, _check_tenant
+from .common import (
+    Catalog,
+    ControlPlane,
+    DeploymentRuntimeConfigManagement,
+    Identity,
+    _check_tenant,
+)
 from .serializers import (
     _deployment_response,
+    _deployment_runtime_config_response,
     _run_response,
     _session_response,
     _span_response,
@@ -31,6 +39,42 @@ def create_deployment(
 ) -> dict[str, object]:
     _check_tenant(identity, request)
     return _deployment_response(service.deploy(identity, request.employee_id, request.version))
+
+
+@router.get("/deployments/{deployment_id}/runtime-config")
+def get_deployment_runtime_config(
+    deployment_id: str,
+    identity: Identity,
+    service: DeploymentRuntimeConfigManagement,
+) -> dict[str, object]:
+    deployment, config = service.get(identity, deployment_id)
+    return _deployment_runtime_config_response(deployment, config)
+
+
+@router.put("/deployments/{deployment_id}/runtime-config")
+def save_deployment_runtime_config(
+    deployment_id: str,
+    request: DeploymentRuntimeConfigRequest,
+    identity: Identity,
+    service: DeploymentRuntimeConfigManagement,
+) -> dict[str, object]:
+    _check_tenant(identity, request)
+    deployment, config = service.save(
+        identity,
+        deployment_id,
+        expected_config_version=request.expected_config_version,
+        mode=request.mode,
+        execution_profile_id=request.execution_profile_id,
+        execution_profile_version=request.execution_profile_version,
+        model_route_id=request.model_route_id,
+        workspace_profile_id=request.workspace_profile_id,
+        workspace_profile_version=request.workspace_profile_version,
+        sandbox_profile_id=request.sandbox_profile_id,
+        sandbox_profile_version=request.sandbox_profile_version,
+        approval_policy=request.approval_policy,
+        runtime_options=request.runtime_options,
+    )
+    return _deployment_runtime_config_response(deployment, config)
 
 
 @router.get("/deployments")

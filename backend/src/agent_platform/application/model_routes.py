@@ -26,6 +26,20 @@ class ModelRouteRepository(Protocol):
 
     def list(self, identity: IdentityContext) -> tuple[ModelRoute, ...]: ...
 
+    def update_model_route_if_version(
+        self,
+        identity: IdentityContext,
+        expected_route_version: int,
+        value: ModelRoute,
+    ) -> ModelRoute: ...
+
+    def revoke_model_route_if_unreferenced(
+        self,
+        identity: IdentityContext,
+        route_id: str,
+        expected_route_version: int,
+    ) -> ModelRoute: ...
+
 
 class InMemoryModelRouteRepository:
     def __init__(self) -> None:
@@ -42,6 +56,54 @@ class InMemoryModelRouteRepository:
             route for (platform_id, tenant_id, _), route in self._routes.items()
             if platform_id == identity.platform_id and tenant_id == identity.tenant_id
         )
+
+    def update_model_route_if_version(
+        self,
+        identity: IdentityContext,
+        expected_route_version: int,
+        value: ModelRoute,
+    ) -> ModelRoute:
+        current = self.get(identity, value.route_id)
+        if current is None:
+            raise DomainError("RESOURCE_NOT_FOUND", "模型路由不存在")
+        if current.status == "REVOKED":
+            raise DomainError("INVALID_STATE", "已删除的模型路由不能编辑")
+        if current.route_version != expected_route_version:
+            raise DomainError(
+                "MODEL_ROUTE_VERSION_CONFLICT",
+                "模型路由已被其他管理员更新，请刷新后重试",
+                {"current_route_version": current.route_version},
+            )
+        self.save(identity, value)
+        return value
+
+    def revoke_model_route_if_unreferenced(
+        self,
+        identity: IdentityContext,
+        route_id: str,
+        expected_route_version: int,
+    ) -> ModelRoute:
+        current = self.get(identity, route_id)
+        if current is None:
+            raise DomainError("RESOURCE_NOT_FOUND", "模型路由不存在")
+        if current.status == "REVOKED":
+            return current
+        if current.route_version != expected_route_version:
+            raise DomainError(
+                "MODEL_ROUTE_VERSION_CONFLICT",
+                "模型路由已被其他管理员更新，请刷新后重试",
+                {"current_route_version": current.route_version},
+            )
+        revoked = ModelRoute(
+            route_id=current.route_id,
+            tenant_id=current.tenant_id,
+            alias=current.alias,
+            profile=current.profile,
+            status="REVOKED",
+            route_version=current.route_version + 1,
+        )
+        self.save(identity, revoked)
+        return revoked
 
 
 class ModelRouteService:
@@ -166,6 +228,7 @@ class ModelRouteService:
         identity: IdentityContext,
         route_id: str,
         *,
+        expected_route_version: int | None = None,
         alias: str | None = None,
         connection_id: str | None = None,
         model_id: str | None = None,
@@ -175,6 +238,15 @@ class ModelRouteService:
         """发布路由的新配置版本；Run 快照继续固定已提交时的值。"""
 
         current = self.get(identity, route_id)
+        if current.status == "REVOKED":
+            raise DomainError("INVALID_STATE", "已删除的模型路由不能编辑")
+        expected_version = expected_route_version or current.route_version
+        if current.route_version != expected_version:
+            raise DomainError(
+                "MODEL_ROUTE_VERSION_CONFLICT",
+                "模型路由已被其他管理员更新，请刷新后重试",
+                {"current_route_version": current.route_version},
+            )
         selected_alias = alias if alias is not None else current.alias
         self._ensure_alias_available(identity, selected_alias, excluding_route_id=route_id)
         selected_connection_id = connection_id or current.profile.connection_id
@@ -215,6 +287,9 @@ class ModelRouteService:
             status=current.status,
             route_version=current.route_version + 1,
         )
+        updater = getattr(self.repository, "update_model_route_if_version", None)
+        if callable(updater):
+            return updater(identity, expected_version, updated)
         self.repository.save(identity, updated)
         return self.get(identity, route_id)
 
@@ -222,9 +297,13 @@ class ModelRouteService:
         """停用路由或在其连接和模型仍有效时重新启用。"""
 
         current = self.get(identity, route_id)
+        if current.status == "REVOKED":
+            raise DomainError("INVALID_STATE", "已删除的模型路由不能重新启用或停用")
         normalized = status.upper().strip()
         if normalized not in {"ACTIVE", "DISABLED"}:
             raise DomainError("INVALID_ARGUMENT", "模型路由状态只能为 ACTIVE 或 DISABLED")
+        if current.status == normalized:
+            return current
         if normalized == "ACTIVE" and current.profile.connection_id is not None:
             self._catalog_connection(identity, current.profile.connection_id)
             self._catalog_item(
@@ -242,6 +321,17 @@ class ModelRouteService:
         )
         self.repository.save(identity, updated)
         return self.get(identity, route_id)
+
+    def revoke(self, identity: IdentityContext, route_id: str, expected_route_version: int) -> ModelRoute:
+        """在仓储事务内拒绝仍被运行配置引用的路由并逻辑撤销。"""
+
+        route = self.get(identity, route_id)
+        if route.status == "REVOKED":
+            return route
+        revoker = getattr(self.repository, "revoke_model_route_if_unreferenced", None)
+        if not callable(revoker):
+            raise DomainError("INVALID_STATE", "ModelRoute 仓储不支持事务化逻辑删除")
+        return revoker(identity, route_id, expected_route_version)
 
     def disable(self, identity: IdentityContext, route_id: str) -> ModelRoute:
         return self.set_status(identity, route_id, "DISABLED")

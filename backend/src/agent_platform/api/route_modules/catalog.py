@@ -15,20 +15,59 @@ from agent_platform.api.schemas import (
     EmployeeVersionTestRequest,
     EmployeeVersionUpdateRequest,
     ExecutionProfileCreateRequest,
+    ExecutionProfileVersionUpdateRequest,
     ModelRouteCreateRequest,
     ModelRouteUpdateRequest,
     SkillCreateRequest,
     ToolCreateRequest,
     ToolUpdateRequest,
 )
+from agent_platform.application.engine_providers import (
+    normalize_engine_provider_name,
+    unsupported_profile_runtime_fields,
+)
 from agent_platform.domain.agents import FakeDigitalEmployeeRepository
 from agent_platform.domain.catalog import LifecycleStatus
 from agent_platform.domain.common import DomainError
 
-from .common import Catalog, ControlPlane, Identity, ModelManagement, _check_tenant
+from .common import Catalog, ControlPlane, EngineProviders, Identity, ModelManagement, _check_tenant
 from .serializers import _employee_response, _skill_response, _tool_response, _version_response
 
 router = APIRouter()
+
+
+def _execution_profile_response(profile, available: tuple[dict[str, object], ...]) -> dict[str, object]:
+    """统一序列化精确 Profile 版本，并标记当前 Provider 是否已注册。"""
+
+    provider = next(
+        (
+            item
+            for item in available
+            if normalize_engine_provider_name(str(item["engine_name"]))
+            == normalize_engine_provider_name(profile.engine_name)
+        ),
+        None,
+    )
+    return {
+        "id": profile.profile_id,
+        "tenant_id": profile.tenant_id,
+        "version": profile.version,
+        "engine_name": str(provider["engine_name"]) if provider else profile.engine_name,
+        "engine_available": provider is not None,
+        "engine_execution_mode": provider["execution_mode"] if provider else None,
+        "runtime_policy_supported": not unsupported_profile_runtime_fields(profile),
+        "unsupported_runtime_fields": list(unsupported_profile_runtime_fields(profile)),
+        "model_alias": profile.model_alias,
+        "tool_policy": list(profile.tool_policy),
+        "context_policy": profile.context_policy,
+        "model_route_id": profile.model_route_id,
+        "workspace_profile_id": profile.workspace_profile_id,
+        "workspace_profile_version": profile.workspace_profile_version,
+        "sandbox_profile_id": profile.sandbox_profile_id,
+        "sandbox_profile_version": profile.sandbox_profile_version,
+        "approval_policy": profile.approval_policy,
+        "status": profile.status.value,
+    }
 
 # 旧 Gallery 列表仅用于兼容遗留路径；新管理台从 Catalog API 查询员工。
 employee_repository = FakeDigitalEmployeeRepository()
@@ -171,7 +210,7 @@ def list_digital_employee_versions(
 def get_digital_employee_version(
     employee_id: str, version: int, identity: Identity, service: Catalog
 ) -> dict[str, object]:
-    """返回员工不可变版本的执行配置和精确 Skill/Tool 绑定。"""
+    """返回员工不可变内容与精确 Skill/Tool 绑定，不包含 Deployment 运行配置。"""
 
     return _version_response(service.get_employee_version(identity, employee_id, version))
 
@@ -180,7 +219,7 @@ def get_digital_employee_version(
 def fork_digital_employee_version(
     employee_id: str, source_version: int, identity: Identity, service: Catalog
 ) -> dict[str, object]:
-    """基于固定的已发布或已下线版本创建完整继承配置的新员工草稿。"""
+    """基于已发布或已下线版本创建员工内容草稿，不复制运行配置。"""
 
     return _version_response(service.fork_employee_version(identity, employee_id, source_version))
 
@@ -216,14 +255,6 @@ def update_digital_employee_version(
         tool_version_refs=tuple(
             (item.resource_id, item.version) for item in request.tool_version_refs
         ),
-        execution_profile_id=request.execution_profile_id,
-        execution_profile_version=request.execution_profile_version,
-        model_route_id=request.model_route_id,
-        workspace_profile_id=request.workspace_profile_id,
-        workspace_profile_version=request.workspace_profile_version,
-        sandbox_profile_id=request.sandbox_profile_id,
-        sandbox_profile_version=request.sandbox_profile_version,
-        approval_policy=request.approval_policy,
     )
     return _version_response(updated)
 
@@ -415,13 +446,6 @@ def create_employee_version(
             request.system_prompt,
             request.skill_ids,
             request.tool_ids,
-            request.execution_profile_id,
-            request.model_route_id,
-            request.workspace_profile_id,
-            request.sandbox_profile_id,
-            request.approval_policy,
-            request.workspace_profile_version,
-            request.sandbox_profile_version,
         )
     )
 
@@ -434,11 +458,17 @@ def publish_employee_version(
 
 
 @router.post("/execution-profiles", status_code=201)
-def create_execution_profile(request: ExecutionProfileCreateRequest, identity: Identity, service: Catalog) -> dict[str, object]:
+def create_execution_profile(
+    request: ExecutionProfileCreateRequest,
+    identity: Identity,
+    service: Catalog,
+    providers: EngineProviders,
+) -> dict[str, object]:
     _check_tenant(identity, request)
+    provider = providers.resolve(request.engine_name)
     profile = service.create_profile(
         identity,
-        request.engine_name,
+        provider.engine_name,
         request.model_alias,
         model_route_id=request.model_route_id,
         workspace_profile_id=request.workspace_profile_id,
@@ -447,47 +477,77 @@ def create_execution_profile(request: ExecutionProfileCreateRequest, identity: I
         sandbox_profile_version=request.sandbox_profile_version,
         approval_policy=request.approval_policy,
     )
-    return {
-        "id": profile.profile_id,
-        "tenant_id": profile.tenant_id,
-        "version": profile.version,
-        "engine_name": profile.engine_name,
-        "model_alias": profile.model_alias,
-        "tool_policy": list(profile.tool_policy),
-        "context_policy": profile.context_policy,
-        "model_route_id": profile.model_route_id,
-        "workspace_profile_id": profile.workspace_profile_id,
-        "workspace_profile_version": profile.workspace_profile_version,
-        "sandbox_profile_id": profile.sandbox_profile_id,
-        "sandbox_profile_version": profile.sandbox_profile_version,
-        "approval_policy": profile.approval_policy,
-        "status": profile.status.value,
-    }
+    return _execution_profile_response(profile, providers.available())
 
 
 @router.get("/execution-profiles")
-def list_execution_profiles(identity: Identity, service: Catalog) -> dict[str, object]:
+def list_execution_profiles(
+    identity: Identity, service: Catalog, providers: EngineProviders
+) -> dict[str, object]:
+    available = providers.available()
     return {
         "items": [
-            {
-                "id": profile.profile_id,
-                "tenant_id": profile.tenant_id,
-                "version": profile.version,
-                "engine_name": profile.engine_name,
-                "model_alias": profile.model_alias,
-                "tool_policy": list(profile.tool_policy),
-                "context_policy": profile.context_policy,
-                "model_route_id": profile.model_route_id,
-                "workspace_profile_id": profile.workspace_profile_id,
-                "workspace_profile_version": profile.workspace_profile_version,
-                "sandbox_profile_id": profile.sandbox_profile_id,
-                "sandbox_profile_version": profile.sandbox_profile_version,
-                "approval_policy": profile.approval_policy,
-                "status": profile.status.value,
-            }
+            _execution_profile_response(profile, available)
             for profile in service.list_profiles(identity)
         ]
     }
+
+
+@router.get("/execution-profiles/{profile_id}/versions")
+def list_execution_profile_versions(
+    profile_id: str, identity: Identity, service: Catalog, providers: EngineProviders
+) -> dict[str, object]:
+    return {
+        "items": [
+            _execution_profile_response(profile, providers.available())
+            for profile in service.list_profile_versions(identity, profile_id)
+        ]
+    }
+
+
+@router.post("/execution-profiles/{profile_id}/versions/{source_version}/fork", status_code=201)
+def fork_execution_profile_version(
+    profile_id: str, source_version: int, identity: Identity, service: Catalog,
+    providers: EngineProviders,
+) -> dict[str, object]:
+    profile = service.fork_profile_version(identity, profile_id, source_version)
+    return _execution_profile_response(profile, providers.available())
+
+
+@router.put("/execution-profiles/{profile_id}/versions/{version}")
+def update_execution_profile_draft(
+    profile_id: str,
+    version: int,
+    request: ExecutionProfileVersionUpdateRequest,
+    identity: Identity,
+    service: Catalog,
+    providers: EngineProviders,
+) -> dict[str, object]:
+    _check_tenant(identity, request)
+    provider = providers.resolve(request.engine_name)
+    profile = service.update_profile_draft(
+        identity,
+        profile_id,
+        version,
+        engine_name=provider.engine_name,
+        workspace_profile_id=request.workspace_profile_id,
+        workspace_profile_version=request.workspace_profile_version,
+        sandbox_profile_id=request.sandbox_profile_id,
+        sandbox_profile_version=request.sandbox_profile_version,
+        approval_policy=request.approval_policy,
+    )
+    return _execution_profile_response(profile, providers.available())
+
+
+@router.post("/execution-profiles/{profile_id}/versions/{version}/publish")
+def publish_execution_profile_version(
+    profile_id: str, version: int, identity: Identity, service: Catalog,
+    providers: EngineProviders,
+) -> dict[str, object]:
+    profile = service.repository.get_profile_version(identity, profile_id, version)
+    providers.resolve(profile.engine_name)
+    published = service.publish_profile_version(identity, profile_id, version)
+    return _execution_profile_response(published, providers.available())
 
 
 @router.post("/model-routes", status_code=201)
@@ -544,13 +604,33 @@ def update_model_route(
     _check_tenant(identity, request)
     values = request.model_dump(exclude_unset=True)
     values.pop("tenant_id", None)
+    expected_route_version = int(values.pop("expected_route_version"))
     model_id = values.pop("catalog_model_id", None)
     model_name = values.pop("model_name", None)
     if model_id is not None and model_name is not None and model_id != model_name:
         raise DomainError("INVALID_ARGUMENT", "model_name 与 catalog_model_id 不一致")
     if model_id is not None or model_name is not None:
         values["model_id"] = model_id or model_name
-    return management.update_route(identity, route_id, values).to_public_dict()
+    return management.update_route(
+        identity,
+        route_id,
+        values,
+        expected_route_version=expected_route_version,
+    ).to_public_dict()
+
+
+@router.delete("/model-routes/{route_id}")
+def revoke_model_route(
+    route_id: str,
+    identity: Identity,
+    management: ModelManagement,
+    expected_route_version: Annotated[int, Query(ge=1)],
+) -> dict[str, object]:
+    """保留历史路由行，检查当前租户引用后执行 REVOKED 逻辑删除。"""
+
+    return management.revoke_route(
+        identity, route_id, expected_route_version
+    ).to_public_dict()
 
 
 @router.post("/model-routes/{route_id}/disable")

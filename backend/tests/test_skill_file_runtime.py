@@ -10,6 +10,7 @@ from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.skill_files import SkillFilePackageService
 from agent_platform.domain.catalog import SkillType
 from agent_platform.ports.storage import LocalObjectStore
+from tests._runtime_config_helpers import configure_in_memory_deployment
 
 
 class CapturingRuntime(FakeRuntimeAdapter):
@@ -46,6 +47,7 @@ def test_fake_runtime_receives_fixed_entry_and_read_only_file_refs_without_execu
     )
     catalog.publish_employee_version(identity, employee.employee_id, employee_version.version)
     deployment = catalog.deploy(identity, employee.employee_id, employee_version.version)
+    deployment = configure_in_memory_deployment(catalog, identity, deployment)
     runtime = CapturingRuntime()
     control_plane = ControlPlaneService(catalog, runtime, object_store=storage)
     session = control_plane.create_session(identity, deployment.deployment_id)

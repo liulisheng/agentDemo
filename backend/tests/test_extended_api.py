@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from agent_platform.api.app import create_app
+from tests._runtime_config_helpers import configure_api_deployment
 
 
 def test_model_route_and_conversation_api_contracts() -> None:
@@ -28,6 +29,153 @@ def test_model_route_and_conversation_api_contracts() -> None:
     )
     assert routed.status_code == 200
     assert routed.json()["session_ids"] == []
+
+
+def test_model_route_update_rejects_a_stale_expected_version() -> None:
+    client = TestClient(create_app())
+    admin = {"X-Fake-User": "admin-local"}
+    created = client.post(
+        "/api/v1/model-routes",
+        headers=admin,
+        json={"alias": "route-lifecycle", "model_name": "model-a", "provider": "fake"},
+    )
+    assert created.status_code == 201
+    route_id = created.json()["route_id"]
+
+    updated = client.put(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        json={"expected_route_version": 1, "alias": "route-lifecycle-v2"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["route_version"] == 2
+
+    stale = client.put(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        json={"expected_route_version": 1, "alias": "stale-route-edit"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "MODEL_ROUTE_VERSION_CONFLICT"
+
+
+def test_model_route_delete_revokes_unreferenced_route_and_is_idempotent() -> None:
+    client = TestClient(create_app())
+    admin = {"X-Fake-User": "admin-local"}
+    member = {"X-Fake-User": "member-local"}
+    created = client.post(
+        "/api/v1/model-routes",
+        headers=admin,
+        json={"alias": "revoke-me", "model_name": "model-b", "provider": "fake"},
+    )
+    assert created.status_code == 201
+    route_id = created.json()["route_id"]
+
+    denied = client.delete(
+        f"/api/v1/model-routes/{route_id}",
+        headers=member,
+        params={"expected_route_version": 1},
+    )
+    assert denied.status_code == 403
+
+    revoked = client.delete(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        params={"expected_route_version": 1},
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["status"] == "REVOKED"
+    assert revoked.json()["route_version"] == 2
+    assert client.get(f"/api/v1/model-routes/{route_id}", headers=admin).json()["status"] == "REVOKED"
+    assert all(
+        route["route_id"] != route_id
+        for route in client.get("/api/v1/model-routes/selectable", headers=admin).json()["items"]
+    )
+
+    repeated = client.delete(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        params={"expected_route_version": 1},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["route_version"] == 2
+
+
+def test_model_route_delete_rejects_route_used_by_a_tenant_default() -> None:
+    client = TestClient(create_app())
+    admin = {"X-Fake-User": "admin-local"}
+    created = client.post(
+        "/api/v1/model-routes",
+        headers=admin,
+        json={"alias": "bound-route", "model_name": "model-c", "provider": "fake"},
+    )
+    assert created.status_code == 201
+    route_id = created.json()["route_id"]
+    bound = client.put(
+        "/api/v1/model-route-bindings/tenant",
+        headers=admin,
+        json={"route_id": route_id},
+    )
+    assert bound.status_code == 200, bound.text
+    in_use = client.delete(
+        f"/api/v1/model-routes/{route_id}",
+        headers=admin,
+        params={"expected_route_version": 1},
+    )
+    assert in_use.status_code == 409
+    assert in_use.json()["code"] == "MODEL_ROUTE_IN_USE"
+
+
+def test_disabled_deployment_cannot_reenable_with_a_revoked_model_route() -> None:
+    client = TestClient(create_app())
+    admin = {"X-Fake-User": "admin-local"}
+    route = client.post(
+        "/api/v1/model-routes",
+        headers=admin,
+        json={"alias": "deployment-route", "model_name": "model-deploy", "provider": "fake"},
+    )
+    assert route.status_code == 201
+    skill = client.post(
+        "/api/v1/skills",
+        headers=admin,
+        json={"name": "路由重新上线验收 Skill", "skill_type": "instruction", "instruction": "执行"},
+    ).json()
+    assert client.post(f"/api/v1/skills/{skill['id']}/publish", headers=admin).status_code == 200
+    employee = client.post(
+        "/api/v1/digital-employees",
+        headers=admin,
+        json={"name": "路由重新上线验收员工", "role_name": "助手", "description": "停用后撤销路由"},
+    ).json()
+    version = client.post(
+        f"/api/v1/digital-employees/{employee['id']}/versions",
+        headers=admin,
+        json={"system_prompt": "运行", "skill_ids": [skill["id"]]},
+    )
+    assert version.status_code == 201
+    assert client.post(
+        f"/api/v1/digital-employees/{employee['id']}/versions/1/publish", headers=admin
+    ).status_code == 200
+    deployment = client.post(
+        "/api/v1/deployments",
+        headers=admin,
+        json={"employee_id": employee["id"], "version": 1},
+    ).json()
+    active = configure_api_deployment(
+        client, admin, deployment, route_id=route.json()["route_id"]
+    )
+    assert active["deployment_status"] == "ACTIVE"
+    deployment_id = deployment["id"]
+
+    assert client.post(f"/api/v1/deployments/{deployment_id}/disable", headers=admin).status_code == 200
+    revoked = client.delete(
+        f"/api/v1/model-routes/{route.json()['route_id']}",
+        headers=admin,
+        params={"expected_route_version": 1},
+    )
+    assert revoked.status_code == 200, revoked.text
+    enabled = client.post(f"/api/v1/deployments/{deployment_id}/enable", headers=admin)
+    assert enabled.status_code == 409
+    assert enabled.json()["code"] == "DEPENDENCY_VALIDATION_ERROR"
 
 
 def test_employee_conversation_list_returns_stable_pages_and_hides_other_tenants() -> None:
@@ -127,6 +275,7 @@ def test_conversation_turn_is_queued_idempotent_and_keeps_sync_run_api_separate(
         headers=headers,
         json={"employee_id": employee["id"], "version": version["version"]},
     ).json()
+    configure_api_deployment(client, headers, deployment)
     session = client.post(
         "/api/v1/sessions", headers=headers, json={"deployment_id": deployment["id"]}
     ).json()
@@ -224,6 +373,7 @@ def test_run_submitter_can_cancel_queued_run_but_another_user_cannot() -> None:
         headers=headers,
         json={"employee_id": employee["id"], "version": version["version"]},
     ).json()
+    configure_api_deployment(client, headers, deployment)
     session = client.post(
         "/api/v1/sessions", headers=headers, json={"deployment_id": deployment["id"]}
     ).json()

@@ -16,14 +16,23 @@ from agent_platform.ports.runtime import (
 class FakeRuntimeAdapter:
     """用确定性文本和无副作用 echo 工具验证平台 Runtime 边界。"""
 
+    engine_name = "fake"
     capabilities = RuntimeCapabilities(
-        streaming=False, resume=True, cancellation=True, approvals=False, mcp=False, workspace=True
+        streaming=False,
+        resume=True,
+        cancellation=True,
+        tool_calls=True,
+        approvals=False,
+        mcp=False,
+        workspace=True,
+        sandbox=False,
     )
 
     def __init__(self) -> None:
         self._sessions: set[str] = set()
 
-    def create_session(self) -> str:
+    def create_session(self, request=None) -> str:
+        del request
         session_ref = f"fake-session-{uuid4().hex}"
         self._sessions.add(session_ref)
         return session_ref

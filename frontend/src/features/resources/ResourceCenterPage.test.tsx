@@ -21,12 +21,14 @@ const summary = {
 
 let resourceModes: string[] = []
 let publishedByMe = false
+let hubResourceType: string = 'SKILL'
 let fetchCalls: { url: string; init?: RequestInit }[] = []
 
 beforeEach(() => {
   window.localStorage.clear()
   resourceModes = []
   publishedByMe = false
+  hubResourceType = 'SKILL'
   fetchCalls = []
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -36,7 +38,7 @@ beforeEach(() => {
       return {
         ok: true,
         json: async () => ({
-          items: [{ ...summary, available_modes: resourceModes, is_publisher: owned || publishedByMe }],
+          items: [{ ...summary, resource_type: hubResourceType, available_modes: resourceModes, is_publisher: owned || publishedByMe }],
         }),
       }
     }
@@ -44,7 +46,7 @@ beforeEach(() => {
       return {
         ok: true,
         json: async () => ({
-          ...summary,
+          ...summary, resource_type: hubResourceType,
           available_modes: resourceModes,
           version: 1,
           manifest_sha256: 'a'.repeat(64),
@@ -74,13 +76,22 @@ beforeEach(() => {
         ok: true,
         json: async () => ({ items: [{
           import_id: 'import-1', hub_resource_id: 'hub-1', hub_version: 1,
-          mode: 'REFERENCE', local_resource_type: 'SKILL', local_resource_id: 'local-skill',
+          mode: 'REFERENCE', local_resource_type: hubResourceType, local_resource_id: 'local-skill',
           local_resource_version: 1, manifest_sha256: 'a'.repeat(64), status: 'ACTIVE',
+          runtime_configuration_required: hubResourceType === 'DIGITAL_EMPLOYEE',
+          next_action: hubResourceType === 'DIGITAL_EMPLOYEE' ? 'CONFIGURE_DEPLOYMENT_RUNTIME' : null,
         }] }),
       }
     }
     if (url === '/api/v1/hub/imports' && init?.method === 'POST') {
-      return { ok: true, json: async () => ({ import_id: 'import-1', mode: 'REFERENCE' }) }
+      return {
+        ok: true,
+        json: async () => ({
+          import_id: 'import-1', mode: 'REFERENCE',
+          runtime_configuration_required: hubResourceType === 'DIGITAL_EMPLOYEE',
+          next_action: hubResourceType === 'DIGITAL_EMPLOYEE' ? 'CONFIGURE_DEPLOYMENT_RUNTIME' : null,
+        }),
+      }
     }
     if (url === '/api/v1/hub/imports/import-1' && init?.method === 'DELETE') {
       return { ok: true, json: async () => ({ import_id: 'import-1', status: 'REVOKED' }) }
@@ -156,6 +167,24 @@ test('authorized Reference imports show dependencies and remain read-only in My 
   await waitFor(() => expect(fetchCalls.some(({ url, init }) => (
     url === '/api/v1/hub/imports/import-1' && init?.method === 'DELETE'
   ))).toBe(true))
+}, 15000)
+
+test('employee import tells the recipient to choose a local runtime', async () => {
+  hubResourceType = 'DIGITAL_EMPLOYEE'
+  resourceModes = ['REFERENCE']
+  const user = userEvent.setup()
+  renderResourceCenter()
+
+  await user.click(screen.getByRole('tab', { name: '发现资源' }))
+  expect(await screen.findByText('工单 Skill')).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: '详情' }))
+  await user.click(await screen.findByRole('button', { name: '引用为只读资源' }))
+
+  await waitFor(() => expect(fetchCalls.some(({ url, init }) => (
+    url === '/api/v1/hub/imports' && init?.method === 'POST'
+  ))).toBe(true))
+  await user.click(screen.getByRole('tab', { name: '我导入的' }))
+  expect(await screen.findByText('待配置本地运行环境')).toBeInTheDocument()
 }, 15000)
 
 test('publisher can open an exact-version Grant and create recipient permissions', async () => {

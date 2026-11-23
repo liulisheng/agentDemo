@@ -231,20 +231,13 @@ def import_hub_resource(
         request.hub_version,
         request.mode,
     )
-    return {
-        "import_id": imported.import_id,
-        "hub_resource_id": imported.hub_resource_id,
-        "hub_version": imported.hub_version,
-        "mode": imported.mode.value,
-        "local_resource_type": imported.local_resource_type.value,
-        "local_resource_id": imported.local_resource_id,
-        "local_resource_version": imported.local_resource_version,
-        "manifest_sha256": imported.manifest_sha256,
-        "status": imported.status.value,
-    }
+    return _hub_import_response(imported)
 
 
 def _hub_import_response(imported: object) -> dict[str, object]:
+    """提示员工包接收方在本地部署配置自己的运行环境。"""
+
+    is_employee = imported.local_resource_type is HubResourceType.DIGITAL_EMPLOYEE
     return {
         "import_id": imported.import_id,
         "hub_resource_id": imported.hub_resource_id,
@@ -255,6 +248,8 @@ def _hub_import_response(imported: object) -> dict[str, object]:
         "local_resource_version": imported.local_resource_version,
         "manifest_sha256": imported.manifest_sha256,
         "status": imported.status.value,
+        "runtime_configuration_required": is_employee,
+        "next_action": "CONFIGURE_DEPLOYMENT_RUNTIME" if is_employee else None,
     }
 
 

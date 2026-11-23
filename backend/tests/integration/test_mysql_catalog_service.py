@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_config_helpers import configure_in_memory_deployment
+
 mysql = pytest.importorskip("mysql.connector")
 
 
@@ -115,6 +117,7 @@ def test_catalog_service_publishes_deploys_rolls_back_and_scopes_tenant(mysql_ca
     service.publish_skill(identity, skill.skill_id)
     published1 = service.publish_employee_version(identity, employee.employee_id, version1.version)
     deployment = service.deploy(identity, employee.employee_id, published1.version)
+    deployment = configure_in_memory_deployment(service, identity, deployment)
     from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
     from agent_platform.application.control_plane import ControlPlaneService
 
@@ -199,7 +202,7 @@ def test_mysql_employee_fork_and_type_specific_bindings_preserve_other_configura
     assert draft.skill_version_refs == ((first_skill.skill_id, 1),)
     assert draft.tool_version_refs == ((first_tool.tool_id, 1),)
     assert draft.system_prompt == "保持系统指令"
-    assert draft.approval_policy == "required"
+    assert draft.approval_policy is None
     assert {(item.slot, item.module_id, item.module_version) for item in service.repository.list_capability_bindings(
         identity, employee.employee_id, draft.version
     )} == {
@@ -213,7 +216,7 @@ def test_mysql_employee_fork_and_type_specific_bindings_preserve_other_configura
     assert changed_skills.skill_version_refs == ((second_skill.skill_id, 1),)
     assert changed_skills.tool_version_refs == ((first_tool.tool_id, 1),)
     assert changed_skills.system_prompt == "保持系统指令"
-    assert changed_skills.approval_policy == "required"
+    assert changed_skills.approval_policy is None
     assert {(item.slot, item.module_id) for item in service.repository.list_capability_bindings(
         identity, employee.employee_id, draft.version
     )} == {("skill", second_skill.skill_id), ("tool", first_tool.tool_id)}
@@ -248,6 +251,7 @@ def test_mysql_lifecycle_transitions_rollback_with_audit_and_serialize_concurren
     published2 = service.create_employee_version(identity, employee.employee_id, "版本二", [skill.skill_id], [])
     service.publish_employee_version(identity, employee.employee_id, published2.version)
     deployment = service.deploy(identity, employee.employee_id, published2.version)
+    deployment = configure_in_memory_deployment(service, identity, deployment)
 
     def create_rejecting_audit_trigger(trigger_name: str) -> None:
         connection = mysql.connect(**config, database=database)

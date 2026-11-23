@@ -221,7 +221,7 @@ def test_draft_version_test_uses_fake_runtime_without_creating_deployment_or_run
         json={"prompt": "请预览"},
     )
 
-    assert tested.status_code == 200
+    assert tested.status_code == 200, tested.text
     assert tested.json()["status"] == "succeeded"
     assert tested.json()["result"] == "fake: 请预览"
     assert repository.list_deployments(

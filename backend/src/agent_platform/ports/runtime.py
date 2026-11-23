@@ -17,14 +17,16 @@ from agent_platform.domain.observability import SkillFilePackageSnapshot
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
-    """调用方可据此判断 Runtime 是否支持恢复、取消、审批和工作区。"""
+    """EngineProvider 选择时用于判断工具、协议、安全与生命周期能力。"""
 
     streaming: bool = False
     resume: bool = True
     cancellation: bool = False
+    tool_calls: bool = False
     approvals: bool = False
     mcp: bool = False
     workspace: bool = False
+    sandbox: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +65,7 @@ class RuntimeEmployeeContext:
     skill_instructions: tuple[str, ...] = field(default=(), repr=False)
     skill_files: tuple[RuntimeSkillFile, ...] = ()
     model_route_id: str | None = None
+    model_alias: str | None = None
 
     def __post_init__(self) -> None:
         if not self.employee_id.strip() or self.employee_version < 1:
@@ -80,6 +83,8 @@ class RuntimeEmployeeContext:
             raise TypeError("skill_files must contain RuntimeSkillFile values")
         if self.model_route_id is not None and not self.model_route_id.strip():
             raise ValueError("model_route_id must be nonblank when provided")
+        if self.model_alias is not None and not self.model_alias.strip():
+            raise ValueError("model_alias must be nonblank when provided")
         object.__setattr__(self, "skill_refs", refs)
         object.__setattr__(self, "skill_instructions", instructions)
         object.__setattr__(self, "skill_files", files)
@@ -231,9 +236,10 @@ class RuntimeResult:
 class RuntimeAdapter(Protocol):
     """所有 Runtime 适配器必须实现的最小生命周期协议。"""
 
+    engine_name: str
     capabilities: RuntimeCapabilities
 
-    def create_session(self) -> str:
+    def create_session(self, request: RuntimeRequest | None = None) -> str:
         ...
 
     def resume_session(self, session_ref: str) -> str:

@@ -428,7 +428,12 @@ class DeepSeekHarnessEngine(LifecycleEngine):
                 if pinned_model_config is not None
                 else provider
             ),
-            model=(pinned_model_config.model_id if pinned_model_config is not None else model),
+            # 迁移前固定在 ExecutionProfile 的 alias 仅在没有独立 ModelRoute 时兼容。
+            model=(
+                pinned_model_config.model_id
+                if pinned_model_config is not None
+                else request.employee_context.model_alias or model
+            ),
             max_tokens=request.max_tokens,
             mcp_tools=tuple(
                 item.name

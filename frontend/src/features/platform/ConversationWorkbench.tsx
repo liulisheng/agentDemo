@@ -38,6 +38,13 @@ export interface WorkbenchSnapshot {
   sessionId: string
   skills: string[]
   allowedTools: string[]
+  engineName?: string
+  executionProfileVersion?: number
+  modelRouteAlias?: string
+  modelName?: string
+  runtimeConfigVersion?: number | null
+  runtimeProfileSource?: string | null
+  runtimeModelRouteSource?: string | null
 }
 
 export interface WorkbenchApprovalPreview {
@@ -52,6 +59,9 @@ export interface ConversationWorkbenchProps {
   employeeName?: string
   employeeOptions?: Array<{ id: string; name: string }>
   selectedEmployeeId?: string
+  deploymentStatus?: 'ACTIVE' | 'DISABLED' | 'PENDING_CONFIGURATION'
+  runtimeConfigVersion?: number | null
+  runtimeConfigNotice?: string | null
   conversations?: WorkbenchConversation[]
   selectedConversationId?: string | null
   timeline?: WorkbenchTimelineEvent[]
@@ -63,6 +73,7 @@ export interface ConversationWorkbenchProps {
   submitting?: boolean
   approvalBusy?: boolean
   onEmployeeChange?: (employeeId: string) => void
+  onOpenRuntimeConfig?: () => void
   onSelectConversation?: (conversationId: string) => void
   onLoadMore?: () => void
   onNewConversation?: () => void
@@ -108,6 +119,9 @@ export function ConversationWorkbench({
   employeeName = '选择一名员工',
   employeeOptions = [],
   selectedEmployeeId,
+  deploymentStatus,
+  runtimeConfigVersion,
+  runtimeConfigNotice = null,
   conversations = [],
   selectedConversationId = null,
   timeline = [],
@@ -119,6 +133,7 @@ export function ConversationWorkbench({
   submitting = false,
   approvalBusy = false,
   onEmployeeChange,
+  onOpenRuntimeConfig,
   onSelectConversation,
   onLoadMore,
   onNewConversation,
@@ -181,10 +196,21 @@ export function ConversationWorkbench({
           ) : (
             <strong>{employeeName}</strong>
           )}
+          <div className="workbench-heading-runtime-actions">
+            {deploymentStatus === 'PENDING_CONFIGURATION' ? (
+              <span className="workbench-config-pending">运行环境待设置</span>
+            ) : runtimeConfigVersion ? (
+              <span className="workbench-config-revision">配置 v{runtimeConfigVersion}</span>
+            ) : null}
+            <button type="button" className="workbench-runtime-config-button" onClick={onOpenRuntimeConfig} disabled={!onOpenRuntimeConfig}>
+              运行配置
+            </button>
+          </div>
         </div>
       </header>
 
       {error && <div className="workbench-page-error" role="alert">{error}</div>}
+      {runtimeConfigNotice && <div className="workbench-runtime-config-notice" role="status">{runtimeConfigNotice}</div>}
 
       <div className="workbench-grid">
         <nav className="workbench-panel workbench-conversation-panel" aria-label="对话列表">
@@ -383,6 +409,15 @@ export function ConversationWorkbench({
                 <span>Session</span>
                 <code>{snapshot.sessionId}</code>
               </div>
+              {(snapshot.engineName || snapshot.modelName || snapshot.runtimeConfigVersion) && (
+                <div className="workbench-snapshot-row workbench-snapshot-runtime">
+                  <span>运行配置来源</span>
+                  <strong>引擎 · {snapshot.engineName ?? '未记录'}{snapshot.executionProfileVersion ? ` · Profile v${snapshot.executionProfileVersion}` : ''}</strong>
+                  <small>{snapshot.runtimeProfileSource ?? '来源未知'}{snapshot.runtimeConfigVersion ? ` · Deployment v${snapshot.runtimeConfigVersion}` : ''}</small>
+                  <strong>模型 · {snapshot.modelRouteAlias ?? snapshot.modelName ?? '未记录'}</strong>
+                  <small>{snapshot.runtimeModelRouteSource ?? '来源未知'}</small>
+                </div>
+              )}
               <div className="workbench-snapshot-section">
                 <span>Skill 指令</span>
                 {snapshot.skills.length ? (

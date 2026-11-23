@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from agent_platform.api.app import create_app
+from tests._runtime_config_helpers import configure_api_deployment
 
 
 def test_full_fake_flow_includes_catalog_runtime_trace_and_channel_contracts() -> None:
@@ -23,6 +24,7 @@ def test_full_fake_flow_includes_catalog_runtime_trace_and_channel_contracts() -
     ).json()
     client.post(f"/api/v1/digital-employees/{employee['id']}/versions/1/publish", headers=headers)
     deployment = client.post("/api/v1/deployments", headers=headers, json={"employee_id": employee["id"], "version": version["version"]}).json()
+    configure_api_deployment(client, headers, deployment)
     session = client.post("/api/v1/sessions", headers=headers, json={"deployment_id": deployment["id"]}).json()
     run = client.post(f"/api/v1/sessions/{session['id']}/runs", headers=headers, json={"prompt": "echo: e2e", "idempotency_key": "e2e-1"}).json()
     trace = client.get(f"/api/v1/runs/{run['id']}/trace", headers=headers).json()

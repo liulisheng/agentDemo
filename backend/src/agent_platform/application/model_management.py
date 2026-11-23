@@ -585,10 +585,28 @@ class ModelManagementService:
         return self.routes.create(identity, alias, model_name, provider, endpoint, secret_id)
 
     def update_route(
-        self, identity: IdentityContext, route_id: str, updates: Mapping[str, object]
+        self,
+        identity: IdentityContext,
+        route_id: str,
+        updates: Mapping[str, object],
+        *,
+        expected_route_version: int,
     ) -> ModelRoute:
         self._require(identity, "model:manage", "model-routes")
-        return self.routes.update(identity, route_id, **dict(updates))
+        return self.routes.update(
+            identity,
+            route_id,
+            expected_route_version=expected_route_version,
+            **dict(updates),
+        )
+
+    def revoke_route(
+        self, identity: IdentityContext, route_id: str, expected_route_version: int
+    ) -> ModelRoute:
+        """只有租户管理员可以撤销路由，仓储负责事务化引用检查。"""
+
+        self._require(identity, "model:manage", "model-routes")
+        return self.routes.revoke(identity, route_id, expected_route_version)
 
     def set_route_status(
         self, identity: IdentityContext, route_id: str, status: str

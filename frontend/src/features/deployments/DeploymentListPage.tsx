@@ -36,7 +36,7 @@ import { useTenantContext } from '../management/TenantContext'
 
 const { Paragraph, Text, Title } = Typography
 
-const deploymentStatusLabels = { ACTIVE: '已上线', DISABLED: '已下线' }
+const deploymentStatusLabels = { ACTIVE: '已上线', DISABLED: '已下线', PENDING_CONFIGURATION: '待配置运行环境' }
 
 /** 逐页定位最新部署，再核对员工和当前固定版本。确认读取独立于列表缓存。 */
 async function readEnableConfirmation(item: DeploymentSummary, fakeUser: string) {
@@ -211,7 +211,7 @@ function DeploymentList() {
             {employees.get(employeeId)?.name ?? employeeId}
           </Link>
           <Text type="secondary">Deployment {item.id}</Text>
-          <Tag color={item.status === 'ACTIVE' ? 'green' : 'default'}>{deploymentStatusLabels[item.status] ?? '状态未知'}</Tag>
+          <Tag color={item.status === 'ACTIVE' ? 'green' : item.status === 'PENDING_CONFIGURATION' ? 'orange' : 'default'}>{deploymentStatusLabels[item.status] ?? '状态未知'}</Tag>
         </Space>
       ),
     },
@@ -226,7 +226,7 @@ function DeploymentList() {
             {item.version_summary.skill_count} Skill · {item.version_summary.tool_count} Tool
           </Text>
           <Text type="secondary">
-            {item.version_summary.execution_profile_id} · v{item.version_summary.execution_profile_version}
+            {item.runtime_config_version === null ? '运行配置待设置' : `运行配置修订 v${item.runtime_config_version}`}
           </Text>
         </Space>
       ),

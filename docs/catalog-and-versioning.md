@@ -11,8 +11,9 @@ flowchart TD
   Tool[ToolVersion] --> Skill[SkillVersion]
   Skill --> EmployeeVersion[DigitalEmployeeVersion]
   Tool --> EmployeeVersion
-  Profile[ExecutionProfile] --> EmployeeVersion
-  EmployeeVersion --> Deployment
+  EmployeeVersion --> Deployment[Deployment + RuntimeConfigRevision]
+  Profile[ExecutionProfile] --> Deployment
+  Route[ModelRoute] --> Deployment
   Deployment --> Session
 ~~~
 
@@ -27,11 +28,11 @@ stateDiagram-v2
   ACTIVE --> RUNNING: Session 创建 Run
 ~~~
 
-已发布版本是冻结数据类；编辑行为需要创建新版本。Deployment 只接受同一租户的 PUBLISHED DigitalEmployeeVersion，并在 Run 创建时复制 Skill/Tool/Profile 引用。
+已发布版本是冻结数据类；编辑行为需要创建新版本。EmployeeVersion 只固定系统指令和精确 Skill/Tool 绑定。Deployment 只接受同一租户的 PUBLISHED DigitalEmployeeVersion，并独立固定接收方的运行配置修订；新建 Session 时再解析引擎和模型。
 
 ## 绑定规则
 
-Skill 声明的 Tool、员工版本绑定的 Tool、ExecutionProfile 的 Tool policy 和当前租户授权共同取交集。任何未发布、跨租户或不在交集中的 Tool 都不能进入 RuntimeRequest。
+Skill 声明的 Tool、员工版本绑定的 Tool、Deployment EngineProfile 的 Tool policy 和当前租户授权共同取交集。任何未发布、跨租户或不在交集中的 Tool 都不能进入 RuntimeRequest；员工版本编辑器只预览员工绑定与 Skill 声明的交集。
 
 ## 验证
 

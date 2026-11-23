@@ -12,17 +12,25 @@ from threading import Lock
 
 from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.context import BusinessContextAssembler
+from agent_platform.application.engine_providers import (
+    EngineProviderRegistry,
+    validate_profile_worker_policy,
+)
 from agent_platform.application.resolvers import AgentResolver, ResolvedAgent
+from agent_platform.application.runtime_defaults import RuntimeDefaultsService
 from agent_platform.domain.catalog import (
     Deployment,
+    ExecutionProfile,
     LifecycleStatus,
     compute_tool_input_schema_sha256,
 )
 from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.context import BusinessContextPolicy
+from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig
 from agent_platform.domain.execution import RuntimeReference, RuntimeStatus, UsageRecord
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.mcp import McpProfileStatus, McpRiskLevel, ToolApprovalRequest
+from agent_platform.domain.model_routes import ModelRouteSnapshot
 from agent_platform.domain.observability import (
     RunRecord,
     RunTimeline,
@@ -46,7 +54,7 @@ from agent_platform.ports.storage import ObjectStore, UploadRequest
 
 
 class ControlPlaneService:
-    """同步执行本地 Fake Runtime，并保存可查询的租户级 Trace。"""
+    """按 Session 固定的 EngineProvider 执行 Run，并保存租户级 Trace。"""
 
     def __init__(
         self,
@@ -58,6 +66,8 @@ class ControlPlaneService:
         mcp_repository: McpRepository | None = None,
         conversation_repository: ConversationRepository | None = None,
         model_authorization_provider: ModelAuthorizationProvider | None = None,
+        runtime_defaults: RuntimeDefaultsService | None = None,
+        engine_providers: EngineProviderRegistry | None = None,
     ) -> None:
         self.catalog = catalog
         self.runtime = runtime
@@ -65,12 +75,15 @@ class ControlPlaneService:
         self.object_store = object_store
         self.mcp_repository = mcp_repository
         self.conversation_repository = conversation_repository
+        self.runtime_defaults = runtime_defaults
+        self.engine_providers = engine_providers
         self.agent_resolver = AgentResolver(
             catalog,
             resource_center_repository,
             object_store=object_store,
             mcp_repository=mcp_repository,
             model_authorization_provider=model_authorization_provider,
+            engine_providers=engine_providers,
         )
         self.context_assembler = BusinessContextAssembler(BusinessContextPolicy())
         self._sessions: dict[tuple[str, str, str], SessionRecord] = {}
@@ -128,20 +141,254 @@ class ControlPlaneService:
 
     def _require_active_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
         deployment = self.catalog.resolve_deployment(identity, deployment_id)
+        if deployment.status is LifecycleStatus.PENDING_CONFIGURATION:
+            raise DomainError(
+                "RUNTIME_CONFIGURATION_REQUIRED",
+                "部署尚未配置接收方运行环境",
+                {"deployment_id": deployment_id},
+            )
         # 只用部署状态准入。固定版本下线后，已上线的部署仍可运行。
         if deployment.status is LifecycleStatus.DISABLED:
             raise DomainError("DEPLOYMENT_DISABLED", "部署已下线", {"deployment_id": deployment_id})
         if deployment.status is not LifecycleStatus.ACTIVE:
             raise DomainError("INVALID_STATE", "部署当前未上线")
+        if deployment.runtime_config_version is None:
+            raise DomainError(
+                "RUNTIME_CONFIGURATION_REQUIRED",
+                "部署没有固定的运行配置修订",
+                {"deployment_id": deployment_id},
+            )
         return deployment
+
+    def _resolve_session_agent(
+        self,
+        identity: IdentityContext,
+        session: SessionRecord,
+        deployment: Deployment,
+        *,
+        model_authorization_identity: IdentityContext | None = None,
+    ) -> ResolvedAgent:
+        """Run 使用 Session 固定的员工版本和运行配置，不读取 Deployment 新默认。"""
+
+        employee_version = self.catalog.repository.get_employee_version(
+            identity, session.employee_id or deployment.employee_id, session.employee_version
+        )
+        pinned_deployment = replace(deployment, employee_version=employee_version)
+        resolver_options: dict[str, object] = {}
+        if session.model_route_snapshot is not None:
+            resolver_options["model_route_snapshot_override"] = session.model_route_snapshot
+        return self.agent_resolver.resolve(
+            identity,
+            pinned_deployment,
+            runtime_profile_id=session.execution_profile_id,
+            runtime_profile_version=session.execution_profile_version,
+            runtime_model_route_id=session.model_route_id,
+            runtime_model_alias=session.model_alias,
+            runtime_config_version=session.runtime_config_version,
+            runtime_profile_source=session.runtime_profile_source,
+            runtime_model_route_source=session.runtime_model_route_source,
+            model_authorization_identity=model_authorization_identity,
+            **resolver_options,
+        )
+
+    def _runtime_for_run(self, session: SessionRecord, run: RunRecord) -> RuntimeAdapter:
+        """Worker 依据 RunSnapshot 选引擎，并与所属 Session 固定引擎交叉校验。"""
+
+        selected_engine = run.snapshot.engine_name or session.engine_name
+        if not selected_engine.strip():
+            raise DomainError(
+                "ENGINE_PROVIDER_UNAVAILABLE",
+                "RunSnapshot 未固定 EngineProvider",
+                {"run_id": run.run_id},
+            )
+        if session.engine_name and selected_engine != session.engine_name:
+            raise DomainError(
+                "ENGINE_PROVIDER_UNAVAILABLE",
+                "RunSnapshot 的 EngineProvider 与 Session 固定值不一致",
+                {"engine_name": selected_engine},
+            )
+        if self.engine_providers is None:
+            return self.runtime
+        return self.engine_providers.resolve(selected_engine).adapter
+
+    def _resolve_session_runtime(
+        self, identity: IdentityContext, deployment: Deployment
+    ) -> tuple[DeploymentRuntimeConfig, ExecutionProfile, str | None, str, str, ModelRouteSnapshot | None]:
+        """按 Deployment 修订和独立默认解析引擎/模型，并固定各自来源。"""
+
+        repository = self.catalog.repository
+        config = repository.get_deployment_runtime_config(identity, deployment.deployment_id)
+        if config is None or config.config_version != deployment.runtime_config_version:
+            raise DomainError(
+                "RUNTIME_CONFIGURATION_REQUIRED",
+                "Deployment 没有可用的运行配置修订",
+                {"deployment_id": deployment.deployment_id},
+            )
+
+        profile: ExecutionProfile | None = None
+        profile_source: str | None = None
+        if config.execution_profile_id is not None:
+            profile = repository.get_profile_version(
+                identity,
+                config.execution_profile_id,
+                config.execution_profile_version or 1,
+            )
+            profile_source = "DEPLOYMENT_OVERRIDE"
+        elif self.runtime_defaults is not None:
+            resolved_profile = self.runtime_defaults.resolve_engine_profile_default(identity)
+            if resolved_profile is not None:
+                profile = resolved_profile.profile
+                profile_source = resolved_profile.source
+        else:
+            for scope_type, scope_id, source in (
+                ("user", identity.user_id, "USER_DEFAULT"),
+                ("tenant", identity.tenant_id, "TENANT_DEFAULT"),
+                ("platform", identity.platform_id, "PLATFORM_DEFAULT"),
+            ):
+                binding = repository.get_engine_profile_default(identity, scope_type, scope_id)
+                if binding is None or binding.status != "ACTIVE":
+                    continue
+                profile = repository.get_profile_version(
+                    identity, binding.profile_id, binding.profile_version
+                )
+                profile_source = source
+                break
+        if profile is None:
+            raise DomainError(
+                "RUNTIME_CONFIGURATION_REQUIRED",
+                "没有可用于新 Session 的 ExecutionProfile 默认或 Deployment 覆盖",
+                {"deployment_id": deployment.deployment_id},
+            )
+        if profile.status is not LifecycleStatus.PUBLISHED:
+            raise DomainError(
+                "DEPENDENCY_VALIDATION_ERROR",
+                "Session 运行配置引用的 ExecutionProfile 已不可用",
+                {"profile_id": profile.profile_id, "version": profile.version},
+            )
+        validate_profile_worker_policy(profile)
+        if (
+            config.workspace_profile_id is not None
+            and (
+                config.workspace_profile_id != profile.workspace_profile_id
+                or config.workspace_profile_version != profile.workspace_profile_version
+            )
+        ) or (
+            config.sandbox_profile_id is not None
+            and (
+                config.sandbox_profile_id != profile.sandbox_profile_id
+                or config.sandbox_profile_version != profile.sandbox_profile_version
+            )
+        ):
+            raise DomainError(
+                "ENGINE_CAPABILITY_UNSUPPORTED",
+                "Deployment 配置含未由 ExecutionProfile/Worker 固定的 Workspace 或 Sandbox 覆盖",
+                {"deployment_id": deployment.deployment_id},
+            )
+        required_approvals = config.approval_policy.get("require_approval_for", [])
+        legacy_approval_name = config.approval_policy.get("name")
+        if required_approvals or (
+            legacy_approval_name is not None
+            and str(legacy_approval_name) != profile.approval_policy
+        ):
+            raise DomainError(
+                "ENGINE_CAPABILITY_UNSUPPORTED",
+                "Deployment 附加审批策略尚未接入当前 Worker 工具审批流程",
+                {"deployment_id": deployment.deployment_id},
+            )
+
+        route_id: str | None = None
+        route_source = "SYSTEM_DEFAULT"
+        route_snapshot: ModelRouteSnapshot | None = None
+        if config.model_route_id is not None:
+            route_id = config.model_route_id
+            route_source = "DEPLOYMENT_OVERRIDE"
+            if config.model_route_snapshot is not None:
+                route_snapshot = ModelRouteSnapshot.from_snapshot_dict(
+                    config.model_route_snapshot
+                )
+            if self.runtime_defaults is not None:
+                self.runtime_defaults.get_selectable_model_route(identity, route_id)
+            else:
+                repository.get_model_route(identity, route_id)
+        elif self.runtime_defaults is not None:
+            resolved_route = self.runtime_defaults.resolve_model_route_default(identity)
+            if resolved_route is not None:
+                route_id = resolved_route.route.route_id
+                route_source = resolved_route.source
+            else:
+                route_id = (
+                    deployment.employee_version.model_route_id or profile.model_route_id
+                )
+                if route_id is not None:
+                    self.runtime_defaults.get_selectable_model_route(identity, route_id)
+                    route_source = "LEGACY_PROFILE"
+                elif profile.model_alias is not None:
+                    route_source = "LEGACY_PROFILE"
+        else:
+            for scope_type, scope_id, source in (
+                ("user", identity.user_id, "USER_DEFAULT"),
+                ("tenant", identity.tenant_id, "TENANT_DEFAULT"),
+                ("platform", identity.platform_id, "PLATFORM_DEFAULT"),
+            ):
+                binding = repository.get_model_route_default(identity, scope_type, scope_id)
+                if binding is None or binding.status != "ACTIVE":
+                    continue
+                route_id = binding.route_id
+                route_source = source
+                break
+            if route_id is None:
+                route_id = deployment.employee_version.model_route_id or profile.model_route_id
+                if route_id is not None:
+                    repository.get_model_route(identity, route_id)
+                    route_source = "LEGACY_PROFILE"
+                elif profile.model_alias is not None:
+                    route_source = "LEGACY_PROFILE"
+
+        return (
+            config,
+            profile,
+            route_id,
+            str(profile_source),
+            route_source,
+            route_snapshot,
+        )
 
     def create_session(self, identity: IdentityContext, deployment_id: str) -> SessionRecord:
         deployment = self._require_active_deployment(identity, deployment_id)
-        profile = self.catalog.repository.get_profile_version(
-            identity,
-            deployment.employee_version.execution_profile_id,
-            deployment.employee_version.execution_profile_version,
-        )
+        (
+            runtime_config,
+            profile,
+            model_route_id,
+            profile_source,
+            model_route_source,
+            model_route_snapshot,
+        ) = self._resolve_session_runtime(identity, deployment)
+        if model_route_snapshot is not None:
+            pinned_model_route = self.agent_resolver.resolve_model_route_snapshot(
+                identity,
+                model_route_id,
+                snapshot_override=model_route_snapshot,
+            )
+        else:
+            pinned_model_route = self.agent_resolver.resolve_model_route_snapshot(
+                identity, model_route_id
+            )
+        if self.engine_providers is not None:
+            employee_version = deployment.employee_version
+            selected_tools = tuple(
+                self.catalog.repository.get_tool_version(identity, tool_id, version)
+                for tool_id, version in employee_version.tool_version_refs
+            )
+            provider = self.engine_providers.validate(
+                profile,
+                pinned_model_route,
+                requires_tools=bool(selected_tools),
+                requires_mcp=any(tool.protocol == "mcp" for tool in selected_tools),
+            )
+            engine_name = provider.engine_name
+        else:
+            self._validate_engine_model_compatibility(profile, pinned_model_route)
+            engine_name = profile.engine_name
         session_id = self._new_id("session")
         trace_id = self._new_id("trace")
         session = SessionRecord(
@@ -152,9 +399,15 @@ class ControlPlaneService:
             trace_id=trace_id,
             employee_version=deployment.employee_version.version,
             employee_id=deployment.employee_version.employee_id,
-            execution_profile_id=deployment.employee_version.execution_profile_id,
-            execution_profile_version=deployment.employee_version.execution_profile_version,
-            model_route_id=deployment.employee_version.model_route_id or profile.model_route_id,
+            execution_profile_id=profile.profile_id,
+            execution_profile_version=profile.version,
+            model_route_id=model_route_id,
+            model_alias=profile.model_alias if model_route_id is None else None,
+            model_route_snapshot=pinned_model_route,
+            runtime_config_version=runtime_config.config_version,
+            runtime_profile_source=profile_source,
+            runtime_model_route_source=model_route_source,
+            engine_name=engine_name,
             harness_home_ref=(
                 "harness-session:"
                 + hashlib.sha256(
@@ -172,15 +425,99 @@ class ControlPlaneService:
                 "session_id": session_id,
                 "deployment_id": deployment_id,
                 "employee_version": deployment.employee_version.version,
+                "runtime_config_version": runtime_config.config_version,
+                "execution_profile_id": profile.profile_id,
+                "engine_name": engine_name,
+                "model_route_id": model_route_id,
+                "runtime_profile_source": profile_source,
+                "runtime_model_route_source": model_route_source,
             },
         )
         session.span_id = session_span.span_id
         self._sessions[self._scope(identity, session_id)] = session
         if self.persistence is not None and hasattr(self.persistence, "save_session"):
-            self.persistence.save_session(identity, session, engine_name=profile.engine_name)
+            self.persistence.save_session(identity, session, engine_name=engine_name)
         elif self.persistence is not None and hasattr(self.persistence, "register_session"):
             self.persistence.register_session(identity, session_id, deployment_id, trace_id)
         return session
+
+    @staticmethod
+    def _validate_engine_model_compatibility(
+        profile: ExecutionProfile,
+        route: ModelRouteSnapshot | None,
+    ) -> None:
+        """在创建 Session 前拒绝已知引擎无法消费的模型协议，不替换用户路由。"""
+
+        if route is None or profile.engine_name == "fake":
+            return
+        normalized_engine = profile.engine_name.casefold().replace("-", "_")
+        supported_protocols = {
+            "codex_cli": {
+                "openai-compatible",
+                "openai-chat-completions",
+                "openai-completions",
+                "openai-responses",
+            },
+            "deepseek": {
+                "openai-compatible",
+                "openai-chat-completions",
+                "openai-completions",
+            },
+            "deepseek_harness": {
+                "openai-compatible",
+                "openai-chat-completions",
+                "openai-completions",
+            },
+        }.get(normalized_engine)
+        if supported_protocols is not None and route.protocol not in supported_protocols:
+            raise DomainError(
+                "ENGINE_MODEL_INCOMPATIBLE",
+                "当前 ExecutionProfile 不支持所选 ModelRoute 协议",
+                {
+                    "engine_name": profile.engine_name,
+                    "model_route_id": route.route_id,
+                    "protocol": route.protocol,
+                },
+            )
+
+    def _build_runtime_request(
+        self,
+        session: SessionRecord,
+        run: RunRecord,
+        prompt: str,
+        resolved_agent: ResolvedAgent,
+    ) -> RuntimeRequest:
+        """只用 RunSnapshot 组装 Runtime 输入，不读取当前员工或 Deployment 默认。"""
+
+        snapshot = run.snapshot
+        return RuntimeRequest(
+            run_id=run.run_id,
+            session_ref=session.runtime_session_ref,
+            harness_home_ref=session.harness_home_ref,
+            prompt=prompt,
+            skill_instructions=resolved_agent.skill_instructions,
+            allowed_tools=resolved_agent.allowed_tools,
+            system_prompt=resolved_agent.system_prompt,
+            skill_file_packages=resolved_agent.skill_file_packages,
+            employee_context=RuntimeEmployeeContext(
+                employee_id=snapshot.employee_id,
+                employee_version=snapshot.employee_version,
+                system_prompt=resolved_agent.system_prompt,
+                skill_refs=snapshot.skill_version_refs,
+                skill_instructions=resolved_agent.skill_instructions,
+                skill_files=resolved_agent.skill_file_contents,
+                model_route_id=snapshot.model_route_id,
+                model_alias=snapshot.model_alias,
+            ),
+            tool_definitions=resolved_agent.tool_definitions,
+            mcp_servers=resolved_agent.mcp_servers,
+            model_route_snapshot=snapshot.model_route_snapshot,
+            metadata={
+                "execution_mode": "session_run",
+                "engine_name": snapshot.engine_name or session.engine_name,
+                "runtime_config_version": str(snapshot.runtime_config_version or ""),
+            },
+        )
 
     def _event_to_span(
         self,
@@ -650,7 +987,7 @@ class ControlPlaneService:
         if session.status != "ACTIVE":
             raise DomainError("INVALID_STATE", "Session 不是 ACTIVE 状态")
         deployment = self._require_active_deployment(identity, session.deployment_id)
-        resolved_agent = self.agent_resolver.resolve(identity, deployment)
+        resolved_agent = self._resolve_session_agent(identity, session, deployment)
         snapshot_data = asdict(resolved_agent.snapshot)
         request_payload = {
             "conversation_id": conversation_id,
@@ -727,7 +1064,32 @@ class ControlPlaneService:
         idempotency_key: str | None,
     ) -> RunRecord | tuple[RunRecord, ResolvedAgent]:
         session_id = session.session_id
-        prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        digest_payload = {
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "employee_id": session.employee_id,
+            "employee_version": session.employee_version,
+            "execution_profile_id": session.execution_profile_id,
+            "execution_profile_version": session.execution_profile_version,
+            "model_route_id": session.model_route_id,
+            "model_alias": session.model_alias,
+            "runtime_config_version": session.runtime_config_version,
+            "runtime_profile_source": session.runtime_profile_source,
+            "runtime_model_route_source": session.runtime_model_route_source,
+            "model_route_snapshot": (
+                session.model_route_snapshot.to_snapshot_dict()
+                if session.model_route_snapshot is not None
+                else None
+            ),
+        }
+        prompt_digest = hashlib.sha256(
+            json.dumps(
+                digest_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
         # 已提交请求按原摘要重放；只有新请求需要通过当前部署准入。
         previous = self._get_idempotent_run(identity, session_id, idempotency_key, prompt_digest)
         if previous is not None:
@@ -745,7 +1107,7 @@ class ControlPlaneService:
                 return previous
             raise
 
-        resolved_agent = self.agent_resolver.resolve(identity, deployment)
+        resolved_agent = self._resolve_session_agent(identity, session, deployment)
         snapshot = resolved_agent.snapshot
         run = RunRecord(
             run_id=self._new_id("run"),
@@ -850,37 +1212,65 @@ class ControlPlaneService:
                 "total_tokens": context_snapshot.total_tokens,
             },
         )
-        try:
-            result = self.runtime.run(
-                RuntimeRequest(
-                    run_id=run.run_id,
-                    session_ref=session.runtime_session_ref,
-                    harness_home_ref=session.harness_home_ref,
-                    prompt=prompt,
-                    skill_instructions=resolved_agent.skill_instructions,
-                    allowed_tools=resolved_agent.allowed_tools,
-                    system_prompt=resolved_agent.system_prompt,
-                    skill_file_packages=resolved_agent.skill_file_packages,
-                    employee_context=RuntimeEmployeeContext(
-                        employee_id=snapshot.employee_id,
-                        employee_version=snapshot.employee_version,
-                        system_prompt=resolved_agent.system_prompt,
-                        skill_refs=snapshot.skill_version_refs,
-                        skill_instructions=resolved_agent.skill_instructions,
-                        skill_files=resolved_agent.skill_file_contents,
-                        model_route_id=snapshot.model_route_id,
-                    ),
-                    tool_definitions=resolved_agent.tool_definitions,
-                    mcp_servers=resolved_agent.mcp_servers,
-                    model_route_snapshot=snapshot.model_route_snapshot,
-                )
-            )
-        except Exception:
-            run.status = RuntimeStatus.UNKNOWN
-            run.error_category = "RUNTIME_RESULT_UNKNOWN"
+
+        def finish_runtime_error(status: RuntimeStatus, error_category: str) -> RunRecord:
+            """Trace 记录稳定错误类别；UNKNOWN 必须隔离 Session 且不得重试。"""
+
+            run.status = status
+            run.error_category = error_category
             self._runs[self._scope(identity, run.run_id)] = run
-            if fencing_token is not None and hasattr(self.persistence, "mark_unknown"):
+            self._append_span(
+                session.trace_id,
+                run_id=run.run_id,
+                span_type=SpanType.RUNTIME,
+                status="failed" if status is RuntimeStatus.FAILED else "unknown",
+                parent_span_id=run.span_id,
+                attributes={
+                    "engine": run.snapshot.engine_name or session.engine_name,
+                    "error_category": error_category,
+                    "runtime_config_version": run.snapshot.runtime_config_version,
+                },
+            )
+            if fencing_token is None:
+                return run
+            spans = tuple(
+                span
+                for span in self._spans.get(run.trace_id, [])
+                if span.run_id in {"", run.run_id}
+            )
+            if hasattr(self.persistence, "complete_run"):
+                if self.persistence.complete_run(identity, run, fencing_token, spans, None):
+                    return run
+                return self.persistence.get_run(identity, run.run_id)
+            if status is RuntimeStatus.UNKNOWN and hasattr(self.persistence, "mark_unknown"):
                 self.persistence.mark_unknown(identity, run.run_id, fencing_token)
+                return self.persistence.get_run(identity, run.run_id)
+            if hasattr(self.persistence, "finish_run"):
+                self.persistence.finish_run(identity, run, fencing_token)
+            return run
+
+        try:
+            runtime = self._runtime_for_run(session, run)
+            runtime_request = self._build_runtime_request(session, run, prompt, resolved_agent)
+        except DomainError as error:
+            # Provider、能力、资源快照和 RuntimeRequest 均在模型 Turn 出站前校验。
+            return finish_runtime_error(RuntimeStatus.FAILED, error.code)
+
+        try:
+            result = runtime.run(runtime_request)
+        except DomainError as error:
+            if error.code in {
+                "ENGINE_CONFIGURATION_REQUIRED",
+                "ENGINE_CAPABILITY_UNSUPPORTED",
+                "ENGINE_MODEL_INCOMPATIBLE",
+                "ENGINE_PROVIDER_UNAVAILABLE",
+            }:
+                # Adapter 以稳定类别明确报告的配置错误属于出站前拒绝。
+                return finish_runtime_error(RuntimeStatus.FAILED, error.code)
+            finish_runtime_error(RuntimeStatus.UNKNOWN, "RUNTIME_RESULT_UNKNOWN")
+            raise
+        except Exception:
+            finish_runtime_error(RuntimeStatus.UNKNOWN, "RUNTIME_RESULT_UNKNOWN")
             raise
         session.runtime_session_ref = result.runtime_session_ref
         run.status = result.status
@@ -901,7 +1291,7 @@ class ControlPlaneService:
             result_asset = self.object_store.complete_upload(upload.upload_id, result_bytes)
             run.result_ref = result_asset.object_ref
         run.runtime_reference = RuntimeReference(
-            engine_name=str(getattr(self.runtime, "engine_name", "fake")),
+            engine_name=str(getattr(runtime, "engine_name", session.engine_name or "runtime")),
             runtime_session_ref=result.runtime_session_ref,
             runtime_result_ref=result.runtime_result_ref,
         )
@@ -915,7 +1305,7 @@ class ControlPlaneService:
         )
         for event in result.events:
             self._event_to_span(session.trace_id, run, event)
-        engine_name = str(getattr(self.runtime, "engine_name", "runtime"))
+        engine_name = str(getattr(runtime, "engine_name", session.engine_name or "runtime"))
         model_snapshot = run.snapshot.model_route_snapshot
         model_attributes: dict[str, object] = {
             "engine": engine_name,
@@ -932,6 +1322,8 @@ class ControlPlaneService:
                     "connection_id": model_snapshot.connection_id,
                 }
             )
+        elif snapshot.model_alias is not None:
+            model_attributes["model_alias"] = snapshot.model_alias
         elif engine_name == "fake":
             model_attributes["model_alias"] = "fake-model"
         self._append_span(
@@ -1187,9 +1579,15 @@ class ControlPlaneService:
                 )
         self._runs[self._scope(identity, run.run_id)] = run
         self._sessions[self._scope(identity, session.session_id)] = session
+        try:
+            runtime = self._runtime_for_run(session, run)
+        except DomainError as error:
+            return finish_before_runtime(RuntimeStatus.FAILED, error.code)
         if session.runtime_session_ref is None:
             try:
-                session.runtime_session_ref = self.runtime.create_session()
+                session.runtime_session_ref = runtime.create_session(
+                    self._build_runtime_request(session, run, prompt, resolved_agent)
+                )
                 if hasattr(self.persistence, "save_session_runtime_refs"):
                     self.persistence.save_session_runtime_refs(
                         identity,
@@ -1209,8 +1607,8 @@ class ControlPlaneService:
             else run
         )
         if current.status is RuntimeStatus.CANCELLING:
-            capabilities = getattr(self.runtime, "capabilities", None)
-            cancel = getattr(self.runtime, "cancel", None)
+            capabilities = getattr(runtime, "capabilities", None)
+            cancel = getattr(runtime, "cancel", None)
             try:
                 cancelled = bool(
                     getattr(capabilities, "cancellation", False)
@@ -1274,7 +1672,18 @@ class ControlPlaneService:
             employee_id=employee_id,
             employee_version=preview_version,
         )
-        resolved_agent = self.agent_resolver.resolve(identity, deployment)
+        # 版本预览不是正式 Session；用临时只读策略承载当前 Runtime，不写入任何默认或租户 Profile。
+        preview_profile = ExecutionProfile(
+            profile_id="draft-preview",
+            tenant_id=identity.tenant_id,
+            engine_name=str(getattr(self.runtime, "engine_name", "fake")),
+        ).publish()
+        resolved_agent = self.agent_resolver.resolve(
+            identity,
+            deployment,
+            runtime_profile=preview_profile,
+            runtime_model_route_id=None,
+        )
         return self.runtime.run(
             RuntimeRequest(
                 run_id=generate_database_id(),

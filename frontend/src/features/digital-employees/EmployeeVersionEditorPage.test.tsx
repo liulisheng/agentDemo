@@ -16,14 +16,6 @@ const version = {
   tool_ids: ['tool-1'],
   skill_version_refs: [{ skill_id: 'skill-1', version: 2 }],
   tool_version_refs: [{ tool_id: 'tool-1', version: 4 }],
-  execution_profile_id: 'profile-fake',
-  execution_profile_version: 1,
-  model_route_id: 'route-1',
-  workspace_profile_id: 'workspace-1',
-  workspace_profile_version: 2,
-  sandbox_profile_id: null,
-  sandbox_profile_version: null,
-  approval_policy: 'required-for-write',
   status: 'DRAFT',
 }
 
@@ -50,21 +42,6 @@ beforeEach(() => {
       id: 'tool-1', tenant_id: 'tenant-a', name: '读取工单', description: '只读', version: 4,
       status: 'PUBLISHED', protocol: 'builtin', requires_recipient_credentials: false,
       credentials_configured: true, input_schema: { type: 'object' },
-    }],
-  }
-  responses['GET /api/v1/execution-profiles'] = {
-    items: [{
-      id: 'profile-fake', tenant_id: 'tenant-a', version: 1, engine_name: 'fake', model_alias: 'fake-model',
-      tool_policy: [], context_policy: 'default', model_route_id: 'route-1',
-      workspace_profile_id: 'workspace-1', workspace_profile_version: 2,
-      sandbox_profile_id: null, sandbox_profile_version: null, approval_policy: 'none', status: 'PUBLISHED',
-    }],
-  }
-  responses['GET /api/v1/model-routes/selectable'] = {
-    items: [{
-      route_id: 'route-1', tenant_id: 'tenant-a', alias: '客服模型', status: 'ACTIVE',
-      authorization_source: 'platform',
-      profile: { model_name: 'model-x', catalog_model_id: 'model-x', provider: 'fake', endpoint: 'fake://model' },
     }],
   }
   responses['PUT /api/v1/digital-employees/employee-1/versions/3'] = {
@@ -109,7 +86,7 @@ test('version editor shows exact refs, saves draft bindings and previews the fak
   renderEditor()
 
   expect(await screen.findByLabelText('系统指令')).toBeInTheDocument()
-  expect(screen.getByText('可用 · 读取工单')).toBeInTheDocument()
+  expect(screen.getByText('员工与 Skill 均允许 · 读取工单')).toBeInTheDocument()
   const systemPrompt = screen.getByLabelText('系统指令')
   await user.clear(systemPrompt)
   await user.type(systemPrompt, '更新后的指令')
@@ -124,7 +101,11 @@ test('version editor shows exact refs, saves draft bindings and previews the fak
     const body = JSON.parse(String(updateCall?.[1]?.body))
     expect(body.skill_version_refs).toEqual([{ resource_id: 'skill-1', version: 2 }])
     expect(body.tool_version_refs).toEqual([{ resource_id: 'tool-1', version: 4 }])
-    expect(body.execution_profile_id).toBe('profile-fake')
+    expect(body).toEqual({
+      system_prompt: '更新后的指令',
+      skill_version_refs: [{ resource_id: 'skill-1', version: 2 }],
+      tool_version_refs: [{ resource_id: 'tool-1', version: 4 }],
+    })
   })
 
   await user.click(screen.getByRole('button', { name: '测试版本' }))
@@ -142,19 +123,17 @@ test('version editor explains the system prompt scope beside its field', async (
   expect(promptGuidance.closest('.ant-form-item')).toBe(systemPrompt.closest('.ant-form-item'))
 })
 
-test('employee model picker requests authorized routes and displays alias with model ID', async () => {
-  const user = userEvent.setup()
+test('employee version editor leaves engine and model to the recipient deployment', async () => {
   renderEditor()
 
   expect(await screen.findByLabelText('系统指令')).toBeInTheDocument()
-  await waitFor(() => {
-    expect(vi.mocked(fetch).mock.calls.some(([input]) => (
-      String(input) === '/api/v1/model-routes/selectable'
-    ))).toBe(true)
-  })
-  await user.click(screen.getByLabelText('ModelRoute'))
-  expect((await screen.findAllByText(/客服模型/)).length).toBeGreaterThan(0)
-  expect(screen.getAllByText(/model-x/).length).toBeGreaterThan(0)
+  expect(screen.queryByText('运行配置')).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('ExecutionProfile')).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('ModelRoute')).not.toBeInTheDocument()
+  expect(screen.getByText(/员工版本只保存系统指令和 Skill\/Tool 精确绑定/)).toBeInTheDocument()
+  expect(vi.mocked(fetch).mock.calls.some(([input]) => (
+    String(input) === '/api/v1/execution-profiles' || String(input) === '/api/v1/model-routes/selectable'
+  ))).toBe(false)
 })
 
 test('version editor warns before an in-app navigation with unsaved changes', async () => {

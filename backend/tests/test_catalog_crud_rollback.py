@@ -2,6 +2,7 @@ from agent_platform.adapters.identity.fake import FakeIdentityProvider
 from agent_platform.application.catalog_service import CatalogService, InMemoryCatalogRepository
 from agent_platform.domain.catalog import SkillType
 from agent_platform.domain.common import DomainError
+from tests._runtime_config_helpers import configure_in_memory_deployment
 
 
 def test_catalog_lists_resources_and_rolls_back_deployment() -> None:
@@ -51,6 +52,7 @@ def test_rollback_does_not_change_existing_run_snapshot() -> None:
     service.create_employee_version(identity, employee.employee_id, "v1", [skill.skill_id], [])
     service.publish_employee_version(identity, employee.employee_id, 1)
     deployment = service.deploy(identity, employee.employee_id, 1)
+    deployment = configure_in_memory_deployment(service, identity, deployment)
     cp = ControlPlaneService(service, FakeRuntimeAdapter())
     session = cp.create_session(identity, deployment.deployment_id)
     run = cp.create_run(identity, session.session_id, "before", "snap-1")

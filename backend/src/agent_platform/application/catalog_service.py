@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from threading import RLock
 from uuid import uuid4
 
+from agent_platform.application.engine_providers import validate_profile_worker_policy
 from agent_platform.domain.catalog import (
     AuditEventPage,
     AuditEventRecord,
@@ -28,6 +29,7 @@ from agent_platform.domain.catalog import (
     ToolVersion,
 )
 from agent_platform.domain.common import DomainError, generate_database_id
+from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import (
     ModelCatalogItem,
@@ -46,6 +48,11 @@ from agent_platform.domain.resource_center import (
     HubResourceVersion,
     TenantImportStatus,
     TenantResourceImport,
+)
+from agent_platform.domain.runtime_defaults import (
+    EngineProfileDefaultBinding,
+    ModelRouteDefaultBinding,
+    RuntimeDefaultScope,
 )
 from agent_platform.ports.catalog_repository import CatalogRepository, DeploymentRepository
 from agent_platform.ports.resource_center import ResourceCenterRepository
@@ -69,16 +76,26 @@ class InMemoryCatalogRepository:
         self.profiles: dict[tuple[str, str, str], ExecutionProfile] = {}
         self.profile_versions: dict[tuple[str, str, str, int], ExecutionProfile] = {}
         self.model_routes: dict[tuple[str, str, str], object] = {}
+        self.engine_profile_defaults: dict[
+            tuple[str, str, str, str], EngineProfileDefaultBinding
+        ] = {}
+        self.model_route_defaults: dict[
+            tuple[str, str, str, str], ModelRouteDefaultBinding
+        ] = {}
         self.model_connections: dict[tuple[str, str, str], ModelConnection] = {}
         self.model_catalog_items: dict[tuple[str, str, str, str], ModelCatalogItem] = {}
         self.model_test_records: dict[tuple[str, str, str], ModelTestRecord] = {}
         self.workspace_profiles: dict[tuple[str, str, str], object] = {}
         self.sandbox_profiles: dict[tuple[str, str, str], object] = {}
         self.deployments: dict[tuple[str, str, str], Deployment] = {}
+        self.deployment_runtime_configs: dict[
+            tuple[str, str, str, int], DeploymentRuntimeConfig
+        ] = {}
         self.audit_events: list[AuditEventRecord] = []
         # 员工、版本与部署共用写锁，保证版本下线与部署写入的先后顺序。
         self._employee_version_lock = RLock()
         self._model_test_lock = RLock()
+        self._model_route_lock = RLock()
 
     def _get(self, values: Mapping, key: tuple, resource: str):
         try:
@@ -254,7 +271,7 @@ class InMemoryCatalogRepository:
     def fork_employee_version(
         self, identity: IdentityContext, employee_id: str, source_version: int
     ) -> DigitalEmployeeVersion:
-        """在锁内分配版本号并复制历史员工配置。"""
+        """在锁内分配版本号并复制员工内容，运行配置留给新 Deployment。"""
 
         with self._employee_version_lock:
             employee = self.get_employee(identity, employee_id)
@@ -267,7 +284,19 @@ class InMemoryCatalogRepository:
                 (value.version for value in self.list_employee_versions(identity, employee_id)),
                 default=0,
             ) + 1
-            forked = replace(source, version=next_version, status=LifecycleStatus.DRAFT)
+            forked = replace(
+                source,
+                version=next_version,
+                status=LifecycleStatus.DRAFT,
+                execution_profile_id=None,
+                execution_profile_version=None,
+                model_route_id=None,
+                workspace_profile_id=None,
+                workspace_profile_version=None,
+                sandbox_profile_id=None,
+                sandbox_profile_version=None,
+                approval_policy=None,
+            )
             self.save_employee_version(identity, forked)
             return forked
 
@@ -401,6 +430,116 @@ class InMemoryCatalogRepository:
 
     def save(self, identity: IdentityContext, value: ModelRoute) -> None:
         self.save_model_route(identity, value)
+
+    def update_model_route_if_version(
+        self,
+        identity: IdentityContext,
+        expected_route_version: int,
+        value: ModelRoute,
+    ) -> ModelRoute:
+        """用单一写锁比较 ModelRoute 版本，模拟数据库的行锁更新。"""
+
+        if value.tenant_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "模型路由不属于当前租户")
+        with self._model_route_lock:
+            current = self.get_model_route(identity, value.route_id)
+            if current.status == "REVOKED":
+                raise DomainError("INVALID_STATE", "已删除的模型路由不能编辑")
+            if current.route_version != expected_route_version:
+                raise DomainError(
+                    "MODEL_ROUTE_VERSION_CONFLICT",
+                    "模型路由已被其他管理员更新，请刷新后重试",
+                    {"current_route_version": current.route_version},
+                )
+            if value.route_version != expected_route_version + 1:
+                raise DomainError("INVALID_ARGUMENT", "路由版本必须递增一版")
+            self.save_model_route(identity, value)
+            return self.get_model_route(identity, value.route_id)
+
+    def revoke_model_route_if_unreferenced(
+        self,
+        identity: IdentityContext,
+        route_id: str,
+        expected_route_version: int,
+    ) -> ModelRoute:
+        """在同一写锁内检查当前可运行引用后逻辑撤销路由。"""
+
+        with self._model_route_lock:
+            current = self.get_model_route(identity, route_id)
+            if current.status == "REVOKED":
+                return current
+            if current.route_version != expected_route_version:
+                raise DomainError(
+                    "MODEL_ROUTE_VERSION_CONFLICT",
+                    "模型路由已被其他管理员更新，请刷新后重试",
+                    {"current_route_version": current.route_version},
+                )
+            references = self._model_route_runtime_references(identity, route_id)
+            if references:
+                raise DomainError(
+                    "MODEL_ROUTE_IN_USE",
+                    "该模型路由仍被默认运行环境或活动 Deployment 使用，请先解绑",
+                    {"references": references},
+                )
+            revoked = replace(
+                current,
+                status="REVOKED",
+                route_version=current.route_version + 1,
+            )
+            self.save_model_route(identity, revoked)
+            return self.get_model_route(identity, route_id)
+
+    def _model_route_runtime_references(
+        self, identity: IdentityContext, route_id: str
+    ) -> list[dict[str, str | int]]:
+        """只检查当前能影响新 Session 的引用，历史 RunSnapshot 不在阻止范围。"""
+
+        prefix = (identity.platform_id, identity.tenant_id)
+        references: list[dict[str, str | int]] = []
+        for key, binding in self.model_route_defaults.items():
+            if key[:2] == prefix and binding.route_id == route_id and binding.status == "ACTIVE":
+                references.append({"kind": "model_route_default", "scope": binding.scope_type.value})
+        for key, binding in self.engine_profile_defaults.items():
+            if key[:2] != prefix or binding.status != "ACTIVE":
+                continue
+            profile = self.profile_versions.get(
+                (*_key(identity, binding.profile_id), binding.profile_version)
+            )
+            if profile is not None and profile.model_route_id == route_id:
+                references.append({"kind": "engine_profile_default", "scope": binding.scope_type.value})
+        for key, deployment in self.deployments.items():
+            if key[:2] != prefix or deployment.status is not LifecycleStatus.ACTIVE:
+                continue
+            if deployment.employee_version.model_route_id == route_id:
+                references.append({"kind": "deployment", "id": deployment.deployment_id})
+                continue
+            config = (
+                self.deployment_runtime_configs.get(
+                    (*_key(identity, deployment.deployment_id), deployment.runtime_config_version)
+                )
+                if deployment.runtime_config_version is not None
+                else None
+            )
+            if config is not None and config.model_route_id == route_id:
+                references.append({"kind": "deployment", "id": deployment.deployment_id})
+                continue
+            profile_id = (
+                config.execution_profile_id
+                if config is not None and config.execution_profile_id is not None
+                else deployment.employee_version.execution_profile_id
+            )
+            profile_version = (
+                config.execution_profile_version
+                if config is not None and config.execution_profile_version is not None
+                else deployment.employee_version.execution_profile_version
+            )
+            if profile_id is not None and profile_version is not None:
+                profile = self.profile_versions.get(
+                    (*_key(identity, profile_id), profile_version)
+                )
+                if profile is not None and profile.model_route_id == route_id:
+                    references.append({"kind": "deployment", "id": deployment.deployment_id})
+        return references
 
     def get_model_route(self, identity: IdentityContext, route_id: str) -> ModelRoute:
         return self._get(self.model_routes, _key(identity, route_id), "model_route")
@@ -609,12 +748,105 @@ class InMemoryCatalogRepository:
             self.deployments[key] = saved
             return saved
 
+    def get_deployment_runtime_config(
+        self, identity: IdentityContext, deployment_id: str
+    ) -> DeploymentRuntimeConfig | None:
+        deployment = self.get_deployment(identity, deployment_id)
+        if deployment.runtime_config_version is None:
+            return None
+        key = (
+            identity.platform_id,
+            identity.tenant_id,
+            deployment_id,
+            deployment.runtime_config_version,
+        )
+        try:
+            return self.deployment_runtime_configs[key]
+        except KeyError as error:
+            raise DomainError(
+                "INVALID_STATE", "Deployment 当前配置修订不存在", {"deployment_id": deployment_id}
+            ) from error
+
+    def save_deployment_runtime_config(
+        self,
+        identity: IdentityContext,
+        deployment_id: str,
+        expected_config_version: int | None,
+        value: DeploymentRuntimeConfig,
+    ) -> DeploymentRuntimeConfig:
+        """在员工版本锁内校验期望修订、保存快照并激活待配置 Deployment。"""
+
+        key = _key(identity, deployment_id)
+        with self._model_route_lock, self._employee_version_lock:
+            if value.model_route_id is not None:
+                route = self.get_model_route(identity, value.model_route_id)
+                if route.status != "ACTIVE":
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "Deployment 运行配置只能引用启用的模型路由")
+            deployment = self.get_deployment(identity, deployment_id)
+            current_version = deployment.runtime_config_version
+            expected = None if expected_config_version in {None, 0} else expected_config_version
+            if current_version != expected:
+                raise DomainError(
+                    "RUNTIME_CONFIG_REVISION_CONFLICT",
+                    "Deployment 运行配置已被其他管理员更新",
+                    {"current_config_version": current_version},
+                )
+            next_version = (current_version or 0) + 1
+            if (
+                value.platform_id != identity.platform_id
+                or value.tenant_id != identity.tenant_id
+                or value.deployment_id != deployment_id
+                or value.config_version != next_version
+            ):
+                raise DomainError("INVALID_ARGUMENT", "运行配置修订与当前 Deployment 不匹配")
+            config_key = (*key, next_version)
+            self.deployment_runtime_configs[config_key] = value
+            status = (
+                LifecycleStatus.ACTIVE
+                if deployment.status is LifecycleStatus.PENDING_CONFIGURATION
+                else deployment.status
+            )
+            self.deployments[key] = replace(
+                deployment,
+                runtime_config_version=next_version,
+                status=status,
+            )
+            self._record_runtime_config_event(identity, value, current_version)
+            return value
+
+    def _record_runtime_config_event(
+        self,
+        identity: IdentityContext,
+        value: DeploymentRuntimeConfig,
+        previous_version: int | None,
+    ) -> None:
+        self.audit_events.append(
+            AuditEventRecord(
+                event_id=generate_database_id(),
+                platform_id=identity.platform_id,
+                tenant_id=identity.tenant_id,
+                actor_type="USER",
+                actor_user_id=identity.user_id,
+                event_type="DEPLOYMENT_RUNTIME_CONFIG_UPDATED",
+                resource_type="deployment_runtime_config",
+                resource_id=value.deployment_id,
+                payload={
+                    "config_mode": value.config_mode.value,
+                    "previous_config_version": previous_version,
+                    "config_version": value.config_version,
+                    "execution_profile_id": value.execution_profile_id,
+                    "model_route_id": value.model_route_id,
+                },
+                created_at=datetime.now(UTC),
+            )
+        )
+
     def transition_deployment(
         self, identity: IdentityContext, deployment_id: str, target_status: LifecycleStatus
     ) -> Deployment:
         """使用最新绑定执行启停，并在同一临界区写入审计。"""
 
-        with self._employee_version_lock:
+        with self._model_route_lock, self._employee_version_lock:
             current = self.get_deployment(identity, deployment_id)
             if target_status is LifecycleStatus.DISABLED:
                 updated = current.disable()
@@ -623,6 +855,7 @@ class InMemoryCatalogRepository:
                 employee = self.get_employee(identity, current.employee_id)
                 if employee.status is LifecycleStatus.ARCHIVED:
                     raise DomainError("INVALID_STATE", "已归档员工不能重新上线部署")
+                self._validate_deployment_model_routes(identity, current)
                 updated = current.enable()
                 event_type = "DEPLOYMENT_ENABLED"
             else:
@@ -635,6 +868,49 @@ class InMemoryCatalogRepository:
             )
             self.deployments[_key(identity, deployment_id)] = updated
             return updated
+
+    def _validate_deployment_model_routes(
+        self, identity: IdentityContext, deployment: Deployment
+    ) -> None:
+        """重新上线前拒绝仍固定已停用/撤销路由的运行配置。"""
+
+        config = (
+            self.deployment_runtime_configs.get(
+                (*_key(identity, deployment.deployment_id), deployment.runtime_config_version)
+            )
+            if deployment.runtime_config_version is not None
+            else None
+        )
+        route_ids: set[str] = set()
+        if config is not None and config.model_route_id is not None:
+            route_ids.add(config.model_route_id)
+        elif deployment.employee_version.model_route_id is not None:
+            route_ids.add(deployment.employee_version.model_route_id)
+        else:
+            profile_id = (
+                config.execution_profile_id
+                if config is not None and config.execution_profile_id is not None
+                else deployment.employee_version.execution_profile_id
+            )
+            profile_version = (
+                config.execution_profile_version
+                if config is not None and config.execution_profile_version is not None
+                else deployment.employee_version.execution_profile_version
+            )
+            if profile_id is not None and profile_version is not None:
+                profile = self.profile_versions.get(
+                    (*_key(identity, profile_id), profile_version)
+                )
+                if profile is not None and profile.model_route_id is not None:
+                    route_ids.add(profile.model_route_id)
+        for route_id in route_ids:
+            route = self.get_model_route(identity, route_id)
+            if route.status != "ACTIVE":
+                raise DomainError(
+                    "DEPENDENCY_VALIDATION_ERROR",
+                    "Deployment 固定的 ModelRoute 已停用或删除；请先更新运行配置",
+                    {"deployment_id": deployment.deployment_id, "model_route_id": route_id},
+                )
 
     def _record_deployment_event(
         self, identity: IdentityContext, value: Deployment, event_type: str, changes: dict[str, object]
@@ -684,6 +960,184 @@ class InMemoryCatalogRepository:
         prefix = (identity.platform_id, identity.tenant_id)
         return tuple(value for (platform, tenant, _), value in self.profiles.items() if (platform, tenant) == prefix)
 
+    def list_profile_versions(
+        self, identity: IdentityContext, profile_id: str
+    ) -> tuple[ExecutionProfile, ...]:
+        prefix = (*_key(identity, profile_id),)
+        versions = tuple(
+            value
+            for key, value in sorted(self.profile_versions.items(), key=lambda item: item[0][3])
+            if key[:3] == prefix
+        )
+        if not versions:
+            raise DomainError("RESOURCE_NOT_FOUND", "资源不存在", {"resource": "execution_profile"})
+        return versions
+
+    @staticmethod
+    def _runtime_default_key(
+        identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> tuple[str, str, str, str]:
+        return identity.platform_id, identity.tenant_id, scope_type, scope_id
+
+    def get_engine_profile_default(
+        self, identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> EngineProfileDefaultBinding | None:
+        key = self._runtime_default_key(identity, scope_type, scope_id)
+        return self.engine_profile_defaults.get(key)
+
+    def set_engine_profile_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        profile_id: str | None,
+        profile_version: int | None,
+    ) -> EngineProfileDefaultBinding | None:
+        """用共享路由锁避免并发绑定历史路由默认和逻辑删除。"""
+
+        with self._model_route_lock:
+            return self._set_engine_profile_default_locked(
+                identity, scope_type, scope_id, profile_id, profile_version
+            )
+
+    def _set_engine_profile_default_locked(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        profile_id: str | None,
+        profile_version: int | None,
+    ) -> EngineProfileDefaultBinding | None:
+        key = self._runtime_default_key(identity, scope_type, scope_id)
+        previous = self.engine_profile_defaults.get(key)
+        if profile_id is None:
+            if profile_version is not None:
+                raise DomainError("INVALID_ARGUMENT", "清除 Profile 默认时不能提供版本号")
+            self.engine_profile_defaults.pop(key, None)
+            current = None
+        else:
+            if profile_version is None:
+                raise DomainError("INVALID_ARGUMENT", "Profile 默认需要精确版本号")
+            profile = self.get_profile_version(identity, profile_id, profile_version)
+            if profile.status is not LifecycleStatus.PUBLISHED:
+                raise DomainError("DEPENDENCY_VALIDATION_ERROR", "默认引擎必须引用已发布 Profile")
+            if profile.model_route_id is not None:
+                route = self.get_model_route(identity, profile.model_route_id)
+                if route.status != "ACTIVE":
+                    raise DomainError("DEPENDENCY_VALIDATION_ERROR", "Profile 的历史 ModelRoute 已停用")
+            binding = EngineProfileDefaultBinding(
+                binding_id=previous.binding_id if previous else generate_database_id(),
+                platform_id=identity.platform_id,
+                tenant_id=identity.tenant_id,
+                scope_type=RuntimeDefaultScope(scope_type),
+                scope_id=scope_id,
+                profile_id=profile_id,
+                profile_version=profile_version,
+            )
+            self.engine_profile_defaults[key] = binding
+            current = binding
+        self._record_runtime_default_event(
+            identity,
+            event_type="ENGINE_PROFILE_DEFAULT_UPDATED",
+            resource_type="execution_profile_binding",
+            scope_type=scope_type,
+            scope_id=scope_id,
+            previous_value=(
+                {"profile_id": previous.profile_id, "profile_version": previous.profile_version}
+                if previous
+                else None
+            ),
+            current_value=(
+                {"profile_id": current.profile_id, "profile_version": current.profile_version}
+                if current
+                else None
+            ),
+        )
+        return current
+
+    def get_model_route_default(
+        self, identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> ModelRouteDefaultBinding | None:
+        key = self._runtime_default_key(identity, scope_type, scope_id)
+        return self.model_route_defaults.get(key)
+
+    def set_model_route_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        route_id: str | None,
+    ) -> ModelRouteDefaultBinding | None:
+        """用共享路由锁串行化默认绑定与 REVOKED 删除。"""
+
+        with self._model_route_lock:
+            return self._set_model_route_default_locked(
+                identity, scope_type, scope_id, route_id
+            )
+
+    def _set_model_route_default_locked(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        route_id: str | None,
+    ) -> ModelRouteDefaultBinding | None:
+        key = self._runtime_default_key(identity, scope_type, scope_id)
+        previous = self.model_route_defaults.get(key)
+        if route_id is None:
+            self.model_route_defaults.pop(key, None)
+            current = None
+        else:
+            route = self.get_model_route(identity, route_id)
+            if route.status != "ACTIVE":
+                raise DomainError("DEPENDENCY_VALIDATION_ERROR", "默认模型路由必须处于启用状态")
+            binding = ModelRouteDefaultBinding(
+                binding_id=previous.binding_id if previous else generate_database_id(),
+                platform_id=identity.platform_id,
+                tenant_id=identity.tenant_id,
+                scope_type=RuntimeDefaultScope(scope_type),
+                scope_id=scope_id,
+                route_id=route_id,
+            )
+            self.model_route_defaults[key] = binding
+            current = binding
+        self._record_runtime_default_event(
+            identity,
+            event_type="MODEL_ROUTE_DEFAULT_UPDATED",
+            resource_type="model_route_binding",
+            scope_type=scope_type,
+            scope_id=scope_id,
+            previous_value={"route_id": previous.route_id} if previous else None,
+            current_value={"route_id": current.route_id} if current else None,
+        )
+        return current
+
+    def _record_runtime_default_event(
+        self,
+        identity: IdentityContext,
+        *,
+        event_type: str,
+        resource_type: str,
+        scope_type: str,
+        scope_id: str,
+        previous_value: Mapping[str, object] | None,
+        current_value: Mapping[str, object] | None,
+    ) -> None:
+        self.audit_events.append(
+            AuditEventRecord(
+                event_id=generate_database_id(),
+                platform_id=identity.platform_id,
+                tenant_id=identity.tenant_id,
+                actor_type="USER",
+                actor_user_id=identity.user_id,
+                event_type=event_type,
+                resource_type=resource_type,
+                resource_id=f"{scope_type}:{scope_id}",
+                payload={"scope_type": scope_type, "scope_id": scope_id, "previous": previous_value, "current": current_value},
+                created_at=datetime.now(UTC),
+            )
+        )
+
 
 class CatalogService:
     """执行目录写入、依赖交集和已发布版本部署。"""
@@ -698,6 +1152,7 @@ class CatalogService:
         self.repository = repository
         self._id_factory = id_factory or (lambda prefix: f"{prefix}-{uuid4().hex[:10]}")
         self.resource_center_repository = resource_center_repository
+        self._profile_version_lock = RLock()
 
     def _new_id(self, prefix: str) -> str:
         return self._id_factory(prefix)
@@ -724,21 +1179,6 @@ class CatalogService:
         if not isinstance(decoded, dict) or any(decoded.get(key) != value for key, value in expected.items()):
             raise DomainError("INVALID_ARGUMENT", "分页游标与当前筛选条件不匹配")
         return decoded
-
-    def _ensure_profile(self, identity: IdentityContext) -> ExecutionProfile:
-        try:
-            return self.repository.get_profile(identity, "profile-fake")
-        except DomainError as error:
-            if error.code != "RESOURCE_NOT_FOUND":
-                raise
-        profile = ExecutionProfile(
-            profile_id="profile-fake",
-            tenant_id=identity.tenant_id,
-            engine_name="fake",
-            model_alias="fake-model",
-        ).publish()
-        self.repository.save_profile(identity, profile)
-        return profile
 
     def create_tool(
         self,
@@ -1018,7 +1458,7 @@ class CatalogService:
         self,
         identity: IdentityContext,
         engine_name: str,
-        model_alias: str,
+        model_alias: str | None = None,
         *,
         model_route_id: str | None = None,
         workspace_profile_id: str | None = None,
@@ -1027,6 +1467,12 @@ class CatalogService:
         sandbox_profile_version: int | None = None,
         approval_policy: str = "none",
     ) -> ExecutionProfile:
+        self._require_employee_admin(identity)
+        if workspace_profile_id is not None or sandbox_profile_id is not None or approval_policy != "none":
+            raise DomainError(
+                "ENGINE_CAPABILITY_UNSUPPORTED",
+                "当前 Worker 尚未应用 Profile 的 Workspace/Sandbox/附加审批策略",
+            )
         dependencies = []
         if model_route_id is not None:
             dependencies.append((model_route_id, self.repository.get_model_route, "model_route", None))
@@ -1059,12 +1505,138 @@ class CatalogService:
             sandbox_profile_id=sandbox_profile_id,
             sandbox_profile_version=sandbox_profile_version,
             approval_policy=approval_policy,
-        ).publish()
+        )
+        validate_profile_worker_policy(profile)
+        profile = profile.publish()
         self.repository.save_profile(identity, profile)
         return profile
 
     def list_profiles(self, identity: IdentityContext) -> tuple[ExecutionProfile, ...]:
         return self.repository.list_profiles(identity)
+
+    def fork_profile_version(
+        self,
+        identity: IdentityContext,
+        profile_id: str,
+        source_version: int,
+    ) -> ExecutionProfile:
+        """从已发布 Profile 创建同 ID 的下一草稿，并解除历史模型绑定。"""
+
+        self._require_employee_admin(identity)
+        with self._profile_version_lock:
+            source = self.repository.get_profile_version(identity, profile_id, source_version)
+            if source.status is not LifecycleStatus.PUBLISHED:
+                raise DomainError("INVALID_STATE", "只能从已发布的 ExecutionProfile 创建新版本")
+            latest = self.repository.get_profile(identity, profile_id)
+            if latest.status is LifecycleStatus.DRAFT:
+                raise DomainError(
+                    "PROFILE_DRAFT_EXISTS",
+                    "该 ExecutionProfile 已有未发布草稿，请先完成或放弃当前草稿",
+                    {"profile_id": profile_id, "version": latest.version},
+                )
+            draft = replace(
+                source,
+                version=latest.version + 1,
+                status=LifecycleStatus.DRAFT,
+                model_alias=None,
+                model_route_id=None,
+            )
+            self.repository.save_profile(identity, draft)
+            return draft
+
+    def update_profile_draft(
+        self,
+        identity: IdentityContext,
+        profile_id: str,
+        version: int,
+        *,
+        engine_name: str,
+        workspace_profile_id: str | None,
+        workspace_profile_version: int | None,
+        sandbox_profile_id: str | None,
+        sandbox_profile_version: int | None,
+        approval_policy: str,
+    ) -> ExecutionProfile:
+        """只允许更新指定 DRAFT；配置字段完整替换且不接受模型绑定。"""
+
+        self._require_employee_admin(identity)
+        with self._profile_version_lock:
+            current = self.repository.get_profile_version(identity, profile_id, version)
+            if current.status is not LifecycleStatus.DRAFT:
+                raise DomainError("IMMUTABLE_VERSION", "已发布 ExecutionProfile 不可修改")
+            if (
+                workspace_profile_id is not None
+                or sandbox_profile_id is not None
+                or approval_policy != "none"
+            ):
+                raise DomainError(
+                    "ENGINE_CAPABILITY_UNSUPPORTED",
+                    "当前 Worker 尚未应用 Profile 的 Workspace/Sandbox/附加审批策略",
+                )
+            for reference, getter, kind, selected_version in (
+                (
+                    workspace_profile_id,
+                    self.repository.get_workspace_profile,
+                    "workspace_profile",
+                    workspace_profile_version,
+                ),
+                (
+                    sandbox_profile_id,
+                    self.repository.get_sandbox_profile,
+                    "sandbox_profile",
+                    sandbox_profile_version,
+                ),
+            ):
+                if reference is None:
+                    if selected_version is not None:
+                        raise DomainError("INVALID_ARGUMENT", f"清除 {kind} 时不能保留版本号")
+                    continue
+                try:
+                    getter(identity, reference, version=selected_version or 1)
+                except DomainError as error:
+                    if error.code != "RESOURCE_NOT_FOUND":
+                        raise
+                    raise DomainError(
+                        "DEPENDENCY_VALIDATION_ERROR",
+                        "ExecutionProfile 引用的运行环境不存在或不属于当前租户",
+                        {"kind": kind, "id": reference},
+                    ) from error
+            updated = replace(
+                current,
+                engine_name=engine_name,
+                model_alias=None,
+                model_route_id=None,
+                workspace_profile_id=workspace_profile_id,
+                workspace_profile_version=workspace_profile_version,
+                sandbox_profile_id=sandbox_profile_id,
+                sandbox_profile_version=sandbox_profile_version,
+                approval_policy=approval_policy,
+            )
+            validate_profile_worker_policy(updated)
+            self.repository.save_profile(identity, updated)
+            return updated
+
+    def publish_profile_version(
+        self, identity: IdentityContext, profile_id: str, version: int
+    ) -> ExecutionProfile:
+        """发布草稿版本；历史版本和既有默认绑定保持原样。"""
+
+        self._require_employee_admin(identity)
+        with self._profile_version_lock:
+            current = self.repository.get_profile_version(identity, profile_id, version)
+            if current.status is not LifecycleStatus.DRAFT:
+                raise DomainError("IMMUTABLE_VERSION", "已发布 ExecutionProfile 不可再次发布或修改")
+            validate_profile_worker_policy(current)
+            published = current.publish()
+            self.repository.save_profile(identity, published)
+            return published
+
+    def list_profile_versions(
+        self, identity: IdentityContext, profile_id: str
+    ) -> tuple[ExecutionProfile, ...]:
+        """返回当前租户某个 Profile 的完整版本历史，供默认选择器精确选版本。"""
+
+        return self.repository.list_profile_versions(identity, profile_id)
 
     def create_employee(
         self, identity: IdentityContext, name: str, role_name: str, description: str
@@ -1074,7 +1646,6 @@ class CatalogService:
             self._new_id("employee"), identity.tenant_id, name, role_name, description
         )
         self.repository.save_employee(identity, value)
-        self._ensure_profile(identity)
         return value
 
     def create_employee_version(
@@ -1084,11 +1655,11 @@ class CatalogService:
         system_prompt: str,
         skill_version_ids: Iterable[str],
         tool_version_ids: Iterable[str],
-        execution_profile_id: str = "profile-fake",
+        execution_profile_id: str | None = None,
         model_route_id: str | None = None,
         workspace_profile_id: str | None = None,
         sandbox_profile_id: str | None = None,
-        approval_policy: str = "none",
+        approval_policy: str | None = None,
         workspace_profile_version: int | None = None,
         sandbox_profile_version: int | None = None,
     ) -> DigitalEmployeeVersion:
@@ -1098,11 +1669,16 @@ class CatalogService:
             raise DomainError("INVALID_STATE", "已归档员工不能创建新版本")
         versions = self.repository.list_employee_versions(identity, employee.employee_id)
         next_version = max((version.version for version in versions), default=0) + 1
-        self._ensure_profile(identity)
-        try:
-            profile_version = self.repository.get_profile(identity, execution_profile_id).version
-        except DomainError:
-            profile_version = 1
+        # 兼容旧内部调用签名，但新 EmployeeVersion 不再接收或固化运行资源。
+        _ = (
+            execution_profile_id,
+            model_route_id,
+            workspace_profile_id,
+            sandbox_profile_id,
+            approval_policy,
+            workspace_profile_version,
+            sandbox_profile_version,
+        )
         skill_ids = tuple(skill_version_ids)
         tool_ids = tuple(tool_version_ids)
         value = DigitalEmployeeVersion(
@@ -1112,14 +1688,6 @@ class CatalogService:
             system_prompt=system_prompt,
             skill_version_ids=skill_ids,
             tool_version_ids=tool_ids,
-            execution_profile_id=execution_profile_id,
-            model_route_id=model_route_id,
-            workspace_profile_id=workspace_profile_id,
-            workspace_profile_version=workspace_profile_version,
-            sandbox_profile_id=sandbox_profile_id,
-            sandbox_profile_version=sandbox_profile_version,
-            approval_policy=approval_policy,
-            execution_profile_version=profile_version,
             skill_version_refs=tuple(
                 (skill_id, self._latest_version(self.repository.get_skill, identity, skill_id, default=1))
                 for skill_id in skill_ids
@@ -1141,14 +1709,14 @@ class CatalogService:
         system_prompt: str,
         skill_version_refs: Iterable[tuple[str, int]],
         tool_version_refs: Iterable[tuple[str, int]],
-        execution_profile_id: str,
-        execution_profile_version: int,
+        execution_profile_id: str | None = None,
+        execution_profile_version: int | None = None,
         model_route_id: str | None = None,
         workspace_profile_id: str | None = None,
         workspace_profile_version: int | None = None,
         sandbox_profile_id: str | None = None,
         sandbox_profile_version: int | None = None,
-        approval_policy: str = "none",
+        approval_policy: str | None = None,
     ) -> DigitalEmployeeVersion:
         """原子替换指定 DRAFT 版本的内容和精确依赖绑定。"""
 
@@ -1171,14 +1739,15 @@ class CatalogService:
             tool_version_ids=tuple(resource_id for resource_id, _ in tool_refs),
             skill_version_refs=skill_refs,
             tool_version_refs=tool_refs,
-            execution_profile_id=execution_profile_id,
-            execution_profile_version=execution_profile_version,
-            model_route_id=model_route_id,
-            workspace_profile_id=workspace_profile_id,
-            workspace_profile_version=workspace_profile_version,
-            sandbox_profile_id=sandbox_profile_id,
-            sandbox_profile_version=sandbox_profile_version,
-            approval_policy=approval_policy,
+            # 员工草稿编辑只改变员工内容；旧运行字段在新版本中清空。
+            execution_profile_id=None,
+            execution_profile_version=None,
+            model_route_id=None,
+            workspace_profile_id=None,
+            workspace_profile_version=None,
+            sandbox_profile_id=None,
+            sandbox_profile_version=None,
+            approval_policy=None,
         )
         self.repository.save_employee_version(identity, updated)
         return updated
@@ -1186,7 +1755,7 @@ class CatalogService:
     def fork_employee_version(
         self, identity: IdentityContext, employee_id: str, source_version: int
     ) -> DigitalEmployeeVersion:
-        """复制已发布或已下线员工版本的完整配置到新的 DRAFT。"""
+        """复制已发布或已下线员工内容到新的 DRAFT，不继承旧运行引用。"""
 
         employee = self.repository.get_employee(identity, employee_id)
         self._require_employee_admin(identity)
@@ -1414,92 +1983,6 @@ class CatalogService:
                             "reason": "SECRET_REF_MISSING",
                         }
                     )
-        try:
-            profile = self.repository.get_profile_version(
-                identity, current.execution_profile_id, current.execution_profile_version
-            )
-        except DomainError:
-            missing.append({"kind": "execution_profile", "id": current.execution_profile_id})
-        else:
-            if profile.status is not LifecycleStatus.PUBLISHED:
-                missing.append({"kind": "execution_profile", "id": current.execution_profile_id})
-        for field_name, version_field, getter, kind in (
-            ("model_route_id", None, self.repository.get_model_route, "model_route"),
-            ("workspace_profile_id", "workspace_profile_version", self.repository.get_workspace_profile, "workspace_profile"),
-            ("sandbox_profile_id", "sandbox_profile_version", self.repository.get_sandbox_profile, "sandbox_profile"),
-        ):
-            ref = getattr(current, field_name)
-            if ref is not None:
-                try:
-                    if version_field is None:
-                        dependency = getter(identity, ref)
-                    else:
-                        dependency = getter(identity, ref, version=getattr(current, version_field) or 1)
-                except DomainError as error:
-                    if error.code != "RESOURCE_NOT_FOUND":
-                        raise
-                    missing.append({"kind": kind, "id": ref})
-                    continue
-                if kind == "model_route":
-                    if dependency.status != "ACTIVE":
-                        missing.append(
-                            {"kind": kind, "id": ref, "reason": "ROUTE_DISABLED"}
-                        )
-                        continue
-                    connection_id = dependency.profile.connection_id
-                    catalog_model_id = dependency.profile.catalog_model_id
-                    if connection_id is None or catalog_model_id is None:
-                        missing.append(
-                            {"kind": kind, "id": ref, "reason": "MODEL_CONNECTION_MISSING"}
-                        )
-                        continue
-                    try:
-                        model_connection = self.repository.get_model_connection(
-                            identity, connection_id
-                        )
-                    except DomainError as error:
-                        if error.code != "RESOURCE_NOT_FOUND":
-                            raise
-                        missing.append(
-                            {
-                                "kind": "model_connection",
-                                "id": connection_id,
-                                "reason": "CONNECTION_MISSING",
-                            }
-                        )
-                        continue
-                    if model_connection.status.value != "ACTIVE":
-                        missing.append(
-                            {
-                                "kind": "model_connection",
-                                "id": connection_id,
-                                "reason": "CONNECTION_DISABLED",
-                            }
-                        )
-                        continue
-                    try:
-                        catalog_item = self.repository.get_model_catalog_item(
-                            identity, connection_id, catalog_model_id
-                        )
-                    except DomainError as error:
-                        if error.code != "RESOURCE_NOT_FOUND":
-                            raise
-                        missing.append(
-                            {
-                                "kind": "model_catalog_item",
-                                "id": catalog_model_id,
-                                "reason": "MODEL_MISSING",
-                            }
-                        )
-                        continue
-                    if catalog_item.status.value != "ACTIVE":
-                        missing.append(
-                            {
-                                "kind": "model_catalog_item",
-                                "id": catalog_model_id,
-                                "reason": "MODEL_DISABLED",
-                            }
-                        )
         if missing:
             raise DomainError(
                 "DEPENDENCY_VALIDATION_ERROR",
@@ -1524,6 +2007,7 @@ class CatalogService:
             tenant_id=identity.tenant_id,
             employee_id=employee_id,
             employee_version=employee_version,
+            status=LifecycleStatus.PENDING_CONFIGURATION,
         )
         return self.repository.save_deployment(identity, deployment)
 

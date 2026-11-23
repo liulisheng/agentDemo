@@ -24,6 +24,7 @@ class LifecycleStatus(StrEnum):
     ACTIVE = "ACTIVE"
     DISABLED = "DISABLED"
     ARCHIVED = "ARCHIVED"
+    PENDING_CONFIGURATION = "PENDING_CONFIGURATION"
 
 
 class SkillType(StrEnum):
@@ -355,7 +356,7 @@ class ExecutionProfile:
     profile_id: str
     tenant_id: str
     engine_name: str
-    model_alias: str
+    model_alias: str | None = None
     tool_policy: tuple[str, ...] = ()
     context_policy: str = "default"
     version: int = 1
@@ -368,8 +369,10 @@ class ExecutionProfile:
     approval_policy: str = "none"
 
     def __post_init__(self) -> None:
-        for field_name in ("profile_id", "tenant_id", "engine_name", "model_alias"):
+        for field_name in ("profile_id", "tenant_id", "engine_name"):
             _text(getattr(self, field_name), field_name)
+        if self.model_alias is not None:
+            _text(self.model_alias, "model_alias")
         for field_name in ("model_route_id", "workspace_profile_id", "sandbox_profile_id"):
             value = getattr(self, field_name)
             if value is not None:
@@ -398,7 +401,7 @@ class ExecutionProfile:
 
 @dataclass(frozen=True, slots=True)
 class DigitalEmployeeVersion:
-    """固化员工指令、Skill/Tool 绑定和 ExecutionProfile 的不可变快照。"""
+    """固化员工指令与精确 Skill/Tool 绑定；运行字段只为历史数据兼容读取。"""
 
     employee_id: str
     tenant_id: str
@@ -406,26 +409,32 @@ class DigitalEmployeeVersion:
     system_prompt: str
     skill_version_ids: tuple[str, ...]
     tool_version_ids: tuple[str, ...]
-    execution_profile_id: str
+    execution_profile_id: str | None = None
     status: LifecycleStatus = LifecycleStatus.DRAFT
     model_route_id: str | None = None
     workspace_profile_id: str | None = None
     workspace_profile_version: int | None = None
     sandbox_profile_id: str | None = None
     sandbox_profile_version: int | None = None
-    approval_policy: str = "none"
-    execution_profile_version: int = 1
+    approval_policy: str | None = None
+    execution_profile_version: int | None = None
     skill_version_refs: tuple[tuple[str, int], ...] = ()
     tool_version_refs: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
-        for field_name in ("employee_id", "tenant_id", "system_prompt", "execution_profile_id"):
+        for field_name in ("employee_id", "tenant_id", "system_prompt"):
             _text(getattr(self, field_name), field_name)
         if self.version < 1:
             raise ValueError("version must be positive")
         if not isinstance(self.skill_version_ids, tuple) or not isinstance(self.tool_version_ids, tuple):
             raise TypeError("version references must be tuples")
-        if self.execution_profile_version < 1:
+        if self.execution_profile_id is not None:
+            _text(self.execution_profile_id, "execution_profile_id")
+            if self.execution_profile_version is None:
+                object.__setattr__(self, "execution_profile_version", 1)
+        elif self.execution_profile_version is not None:
+            raise ValueError("execution_profile_version requires execution_profile_id")
+        if self.execution_profile_version is not None and self.execution_profile_version < 1:
             raise ValueError("execution_profile_version must be positive")
         if not self.skill_version_refs:
             object.__setattr__(
@@ -503,6 +512,7 @@ class Deployment:
     employee_id: str
     employee_version: DigitalEmployeeVersion
     status: LifecycleStatus = LifecycleStatus.ACTIVE
+    runtime_config_version: int | None = None
 
     def __post_init__(self) -> None:
         _text(self.deployment_id, "deployment_id")
@@ -515,6 +525,8 @@ class Deployment:
             raise ValueError("deployment scope does not match employee version")
         if self.employee_version.employee_id != self.employee_id:
             raise ValueError("deployment employee does not match version")
+        if self.runtime_config_version is not None and self.runtime_config_version < 1:
+            raise ValueError("runtime_config_version must be positive")
 
     def disable(self) -> Deployment:
         """下线运行入口，保留固定的员工版本供历史记录引用。"""
@@ -528,6 +540,8 @@ class Deployment:
 
         if self.status is not LifecycleStatus.DISABLED:
             raise DomainError("INVALID_STATE", "只有已下线的部署才能重新上线")
+        if self.runtime_config_version is None:
+            raise DomainError("RUNTIME_CONFIGURATION_REQUIRED", "部署尚未配置接收方运行环境")
         if self.employee_version.status is not LifecycleStatus.PUBLISHED:
             raise DomainError("INVALID_STATE", "固定的员工版本必须已发布才能重新上线")
         return replace(self, status=LifecycleStatus.ACTIVE)
