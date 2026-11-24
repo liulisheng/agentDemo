@@ -146,3 +146,55 @@
 #### Scenario: Unsupported Deployment environment override is not ignored
 - **WHEN** Deployment 修订含有与精确 ExecutionProfile 不一致的 Workspace/Sandbox 覆盖，或含有未接入工具审批流程的附加审批策略
 - **THEN** 新 Session 在 EngineProvider 出站前返回 `ENGINE_CAPABILITY_UNSUPPORTED`，不生成一个看似成功但没有应用该策略的 Run
+
+### Requirement: Runtime accepts a canonical answer strategy
+系统 SHALL 使用统一的回答策略描述思考模式、推理强度、推理预算、答复详细程度、输出上限、工具步骤上限和单轮超时，不要求 UI 直接填写供应商私有字段。
+
+#### Scenario: Deep thinking is requested for a compatible engine
+- **WHEN** Session 的 EngineProvider 和 ModelRoute 都声明支持深度思考，且 RunSnapshot 请求 `reasoning_mode=DEEP`
+- **THEN** RuntimeAdapter 将统一策略映射为该引擎的私有请求，并保留平台 Run 与引擎请求的关联
+
+#### Scenario: Engine does not support a requested strategy
+- **WHEN** Run 请求的思考模式、推理强度或推理预算超出 EngineProvider/ModelRoute 能力
+- **THEN** 平台在 Runtime 出站前返回明确能力错误，不静默降级、不切换模型、不调用 Fake Runtime
+
+### Requirement: Engine adapters preserve common lifecycle and normalize phases
+系统 SHALL 让 DeepSeek Harness、Codex App Server 和 Fake Runtime 通过同一 RuntimeRequest/RuntimeResult 生命周期交互，并将思考、工具、答复和错误阶段转换为统一事件。
+
+#### Scenario: Adapter maps provider-specific input
+- **WHEN** Worker 传入包含 EmployeeContext、ModelRoute、ToolDefinition、MCP 和回答策略的 RuntimeRequest
+- **THEN** 对应 Adapter 生成供应商私有请求；平台不把供应商私有字段反向暴露给其他引擎
+
+#### Scenario: Runtime reports thinking and tool phases
+- **WHEN** Runtime 返回思考、工具调用、工具结果或最终答复事件
+- **THEN** 平台生成关联 `session_id`、`run_id`、`trace_id` 的统一 RuntimeEvent，并可供工作台按顺序展示
+
+#### Scenario: Runtime does not expose raw reasoning
+- **WHEN** 引擎返回内部推理或隐藏上下文
+- **THEN** 平台只保存阶段、状态、耗时和可用用量摘要，不保存或展示原始思考链
+
+### Requirement: OpenAI-compatible real model execution is explicitly selected
+系统 SHALL 提供一个不经过 Fake Runtime 的真实 OpenAI-compatible ModelRoute 验收路径；Worker 通过受控 SecretRef 向配置的 Endpoint 发送受限请求，并返回标准 RuntimeResult。
+
+#### Scenario: Real model request succeeds
+- **WHEN** Worker 使用已授权 ModelRoute、可解析 SecretRef 和有效 RuntimeOptions 发送短请求
+- **THEN** Run 返回真实模型答复、模型 ID、脱敏 provider request reference、Usage 和标准阶段事件，并标记 execution mode 为 NATIVE
+
+#### Scenario: Real model credential is unavailable
+- **WHEN** Worker 无法解析 ModelRoute 的 SecretRef
+- **THEN** Run 以 `MODEL_SECRET_UNAVAILABLE` 或稳定凭据错误结束，不切换 Fake、不发送未授权请求
+
+#### Scenario: Real model endpoint times out
+- **WHEN**真实 Endpoint 在请求截止时间内没有确定响应
+- **THEN** Run 进入现有 FAILED/UNKNOWN 语义，不自动重放可能已到达供应商的请求
+
+### Requirement: Provider-specific strategy mapping remains capability gated
+系统 SHALL 将平台 RuntimeOptions 通过 Adapter 映射为 OpenAI-compatible、DeepSeek Harness、Codex App Server 或 Fake 的私有输入；未经协议验证的字段必须在出站前被拒绝或标记未验证。
+
+#### Scenario: OpenAI-compatible strategy is mapped
+- **WHEN**真实 ModelRoute 支持平台要求的推理和输出字段
+- **THEN** Adapter 只发送允许的供应商参数，并保留平台策略与请求的关联
+
+#### Scenario: Unsupported budget is requested
+- **WHEN** Adapter 未声明推理预算能力但面板提交了预算
+- **THEN** 平台返回 `ENGINE_CAPABILITY_UNSUPPORTED`，不调用真实模型

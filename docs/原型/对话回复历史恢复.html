@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>对话回复历史恢复（静态演示）</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1d2b35;background:#f3f6f4}body{margin:0;padding:24px}main{max-width:900px;margin:auto;background:#fff;border:1px solid #d9e2dd;border-radius:16px;padding:24px;box-shadow:0 12px 40px #163b2b12}h1{margin:0 0 4px;font-size:24px}.sub{color:#5c6c66;margin:0 0 20px}.context{display:flex;gap:12px;flex-wrap:wrap;background:#edf7f0;border-radius:10px;padding:12px;margin-bottom:20px}.context strong{display:block}.timeline{display:grid;gap:12px}.item{border-left:4px solid #89b89a;padding:10px 14px;background:#fafcfb;border-radius:0 10px 10px 0}.item.user{border-color:#6a9bd8}.item.assistant{border-color:#3b9d75}.item.pending{border-color:#d2a33e}.meta{font-size:12px;color:#66766f;margin-bottom:4px}.error{background:#fff1f0;border:1px solid #ffccc7;padding:12px;border-radius:8px;margin:12px 0}.empty{padding:24px;text-align:center;color:#65756d;border:1px dashed #b9c9c0;border-radius:10px}.actions{display:flex;gap:8px;margin:18px 0;flex-wrap:wrap}button{border:1px solid #2f7659;background:#2f7659;color:#fff;padding:8px 14px;border-radius:8px;cursor:pointer}button.secondary{background:#fff;color:#2f7659}button:focus-visible{outline:3px solid #ffd166;outline-offset:2px}@media(max-width:560px){body{padding:10px}main{padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>对话回复历史恢复</h1>
+  <p class="sub">静态演示，不连接真实服务或凭据。</p>
+  <section class="context" aria-label="租户与会话上下文"><div><span>租户</span><strong>租户 A · 管理员</strong></div><div><span>员工</span><strong>海豚调度数仓开发</strong></div><div><span>Session</span><strong>xzma2w5xq5fj5emvyjrozo362u</strong></div></section>
+  <div class="actions"><button id="load">加载历史</button><button id="second" class="secondary">模拟第二轮问答</button><button id="deny" class="secondary">模拟无权访问</button></div>
+  <div id="state" role="status" aria-live="polite"></div>
+  <section id="timeline" class="timeline" aria-label="对话时间线"></section>
+  <p><small>验收结果：第二轮加载后，第一轮助手答复仍保留在时间线。</small></p>
+</main>
+<script>
+  const timeline=document.querySelector('#timeline'), state=document.querySelector('#state');
+  const rows=[['user','第一轮 · 你','列出当前项目'],['assistant','第一轮 · 数仓员工','已找到 AgentDemo Acceptance 项目。'],['user','第二轮 · 你','继续生成工作流预览'],['assistant','第二轮 · 数仓员工','已生成 ODS → DWD 离线预览，等待确认。']];
+  function render(items){timeline.innerHTML=items.map(([kind,label,text])=>`<article class="item ${kind}"><div class="meta">${label}</div><div>${text}</div></article>`).join('')}
+  document.querySelector('#load').onclick=()=>{state.textContent='正在读取消息…';setTimeout(()=>{state.textContent='已恢复 4 条消息';render(rows)},150)};
+  document.querySelector('#second').onclick=()=>{state.textContent='第二轮已完成；历史答复未被替换';render(rows)};
+  document.querySelector('#deny').onclick=()=>{state.innerHTML='<div class="error" role="alert">当前身份无权读取该 Conversation。</div>';timeline.innerHTML=''};
+  render([]); timeline.innerHTML='<div class="empty">点击“加载历史”查看主流程</div>';
+</script>
+</body>
+</html>

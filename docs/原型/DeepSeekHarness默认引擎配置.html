@@ -76,6 +76,10 @@
     .priority-note strong { color: #183330; font-weight: 650; }
     .effective-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; color: #647672; font-size: 10px; }
     .effective-strip .title { color: #183330; font-weight: 700; }
+    .answer-strategy-card { margin-top: 12px; padding: 12px; border: 1px solid #cfe2dc; border-radius: 8px; background: #f7fbf9; }
+    .answer-strategy-card .card-head { min-height: auto; padding: 0 0 8px; border-bottom: 0; }
+    .answer-strategy-card h3 { margin: 0; font-size: 11px; }
+    .answer-strategy-card .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .tag { display: inline-flex; align-items: center; padding: 3px 7px; border: 1px solid #d4e0dc; border-radius: 5px; color: #53676a; background: #f8fbfa; font-size: 9px; white-space: nowrap; }
     .tag.good { border-color: #b8e3bd; color: var(--good); background: #f3fff3; }
     .tag.warn { border-color: #ead6a5; color: var(--amber); background: #fff9e9; }
@@ -217,6 +221,7 @@
                 </form>
                 <div class="priority-note"><span>优先级</span><strong>Deployment 覆盖 → 个人默认 → 租户默认 → 平台/系统</strong></div>
                 <div class="effective-strip" aria-live="polite"><span class="title">当前身份解析</span><span>引擎：<b id="effective-engine">未设置</b> <span class="tag" id="effective-engine-source">无来源</span></span><span>模型：<b id="effective-model">未设置</b> <span class="tag" id="effective-model-source">无来源</span></span></div>
+                <section class="answer-strategy-card" aria-labelledby="answer-strategy-title"><div class="card-head"><h3 id="answer-strategy-title">回答策略默认值</h3><span class="secondary-text">已接入平台 API · 真实 Provider 未验证</span></div><div class="fields"><div class="field"><label for="thinking-mode-default">思考模式</label><select id="thinking-mode-default"><option>自动思考</option><option>深度思考</option><option>关闭思考</option></select></div><div class="field"><label for="thinking-effort-default">推理强度</label><select id="thinking-effort-default"><option>自动</option><option>低</option><option>中</option><option>高</option></select></div><div class="field"><label for="response-verbosity-default">答复详细程度</label><select id="response-verbosity-default"><option>标准</option><option>简洁</option><option>详细</option></select></div><div class="field"><label for="reasoning-budget-default">推理预算</label><select id="reasoning-budget-default"><option>自动</option><option>8K token</option><option>16K token</option></select></div></div><p class="inline-note">工作台只显示“思考中 / 调用工具 / 生成答复”等阶段，不保存或展示原始思考链。保存后仅影响新 Session。</p></section>
                 <div class="alert error" id="compatibility-warning" hidden><span class="alert-mark">!</span><div><strong>当前引擎和模型路由协议不兼容</strong>系统不会自动替换模型；新建 Session 前需要调整其中一项。</div></div>
                 <p class="inline-note" id="scope-note">仅影响租户 A · 管理员新建的 Session。</p>
                 <p class="inline-note" id="member-note" hidden>租户默认只读；个人默认可自行调整，管理员设置的租户默认仍会作为回退值。</p>

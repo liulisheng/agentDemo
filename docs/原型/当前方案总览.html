@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Agent Platform 当前方案需求、流程、原型和验收状态总览">
+  <title>Agent Platform · 当前方案总览</title>
+  <style>
+    :root{color-scheme:light;--ink:#152b32;--muted:#64767c;--line:#dbe6e7;--bg:#f4f8f8;--panel:#fff;--brand:#0a6a70;--brand-soft:#e5f5f3;--ok:#23764b;--ok-soft:#e7f6ec;--warn:#9a6415;--warn-soft:#fff3d7;--bad:#a33d3d;--bad-soft:#fff0f0;--shadow:0 16px 42px #0c414710;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#eef8f7 0,#f4f8f8 380px);color:var(--ink);font-size:16px;line-height:1.55}a{color:var(--brand)}button{font:inherit}main{max-width:1180px;margin:0 auto;padding:28px 20px 54px}.hero{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;align-items:end;margin-bottom:22px}.eyebrow{letter-spacing:.12em;text-transform:uppercase;font-size:.78rem;color:var(--brand);font-weight:750}h1{font-size:clamp(2rem,4vw,3.4rem);line-height:1.06;margin:.35rem 0 .8rem;letter-spacing:-.04em}h2{font-size:1.35rem;line-height:1.2;margin:0 0 10px}h3{font-size:1rem;margin:0 0 6px}.hero p{max-width:760px;color:var(--muted);margin:0}.context{background:#0c5158;color:#efffff;border-radius:18px;padding:18px;box-shadow:var(--shadow)}.context small{display:block;color:#b9e5e2}.context strong{display:block;font-size:1.05rem;margin-top:4px}.summary{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:20px 0}.stat,.panel,.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}.stat{padding:16px}.stat b{font-size:1.5rem;display:block}.stat span{font-size:.88rem;color:var(--muted)}.tabs{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0}.tabs button{border:1px solid #b9cecf;background:#fff;color:var(--ink);border-radius:999px;padding:8px 14px;cursor:pointer}.tabs button[aria-selected=true]{background:var(--brand);border-color:var(--brand);color:#fff}.panel{padding:20px;margin-bottom:18px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:start;margin-bottom:14px}.section-head p{color:var(--muted);margin:0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.card{padding:17px;box-shadow:none}.card p{color:var(--muted);margin:4px 0 12px}.badge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-size:.78rem;font-weight:700;margin-left:5px}.good{color:var(--ok);background:var(--ok-soft)}.warn{color:var(--warn);background:var(--warn-soft)}.bad{color:var(--bad);background:var(--bad-soft)}.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.flow-step{background:var(--brand-soft);border:1px solid #b9dfdc;border-radius:10px;padding:10px 12px;min-width:145px}.flow-arrow{color:var(--muted);font-weight:750}.matrix{width:100%;border-collapse:collapse}.matrix th,.matrix td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid var(--line)}.matrix th{font-size:.83rem;color:var(--muted);font-weight:700}.matrix td:first-child{font-weight:700}.prototype-list{display:grid;gap:10px}.prototype{display:flex;justify-content:space-between;gap:14px;padding:12px;border:1px solid var(--line);border-radius:10px;background:#fbfdfd}.prototype small{display:block;color:var(--muted)}.prototype a{font-weight:700;white-space:nowrap}.hidden{display:none}.note{border-left:4px solid var(--brand);background:#f0fbfa;padding:12px 14px;border-radius:8px;color:#2b4e52}.footer{color:var(--muted);font-size:.88rem;margin-top:20px}.state-buttons{display:flex;flex-wrap:wrap;gap:8px}.state-buttons button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 11px;cursor:pointer}.state{padding:12px;border-radius:9px;margin-top:12px}.state.loading{background:#eef5ff;color:#315a8d}.state.empty{background:#f5f7f7;color:#5d6d72}.state.error{background:var(--bad-soft);color:var(--bad)}.state.ready{background:var(--ok-soft);color:var(--ok)}:focus-visible{outline:3px solid #f1bc42;outline-offset:3px}@media(max-width:760px){.hero{grid-template-columns:1fr}.summary{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.prototype{display:block}.prototype a{display:inline-block;margin-top:8px}.panel{padding:16px}main{padding:18px 12px 40px}}@media(max-width:430px){.summary{grid-template-columns:1fr 1fr}.summary .stat{padding:12px}.flow-step{min-width:100%;}.flow-arrow{display:none}.matrix{font-size:.9rem}}
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <div>
+      <div class="eyebrow">Agent Platform / 当前实现基线</div>
+      <h1>当前方案总览</h1>
+      <p>把现有原型、已实现能力、服务端流程、权限边界和后续需求放在同一张可评审的地图上。静态演示，不连接真实服务或凭据。</p>
+    </div>
+    <aside class="context" aria-label="当前演示上下文"><small>租户上下文</small><strong>租户 A · 管理员</strong><small>当前员工</small><strong>海豚调度数仓开发</strong><small>工作台</small><strong>/enterprise/workbench</strong></aside>
+  </section>
+
+  <section class="summary" aria-label="实现状态摘要">
+    <div class="stat"><b>已实现</b><span>目录、模型、工作台、Worker</span></div>
+    <div class="stat"><b>已验证</b><span>本地 MySQL、Docker、审批闭环</span></div>
+    <div class="stat"><b>本期已接入</b><span>思考模式、RuntimeOptions、策略默认绑定</span></div>
+    <div class="stat"><b>边界</b><span>生产身份、真实云模型、知识库</span></div>
+  </section>
+
+  <nav class="tabs" role="tablist" aria-label="总览分区">
+    <button type="button" role="tab" aria-selected="true" data-tab="requirements">当前需求</button>
+    <button type="button" role="tab" aria-selected="false" data-tab="prototypes">原型地图</button>
+    <button type="button" role="tab" aria-selected="false" data-tab="flows">流程设计</button>
+    <button type="button" role="tab" aria-selected="false" data-tab="acceptance">验收状态</button>
+  </nav>
+
+  <section class="panel tab-panel" id="requirements" role="tabpanel">
+    <div class="section-head"><div><h2>当前产品需求</h2><p>需求按当前代码和 OpenSpec 设计归纳，状态以实现边界为准。</p></div><span class="badge good">当前基线</span></div>
+    <div class="grid">
+      <article class="card"><h3>员工与能力版本 <span class="badge good">已实现</span></h3><p>EmployeeVersion 固定指令、Skill 和 Tool 精确版本；已发布版本不可原地编辑。</p></article>
+      <article class="card"><h3>模型与运行环境 <span class="badge good">已实现</span></h3><p>连接、模型目录、ModelRoute、ExecutionProfile、默认值和 Deployment 覆盖分离管理。</p></article>
+      <article class="card"><h3>Conversation 工作台 <span class="badge good">已实现</span></h3><p>三栏工作台恢复消息、助手回答、工具活动、Run 快照和 Approval；目标方案将所有事件时间显示到秒。</p></article>
+      <article class="card"><h3>异步执行闭环 <span class="badge good">已实现</span></h3><p>Conversation turn 入队、Run Worker、Harness、MCP Stdio、Trace、Usage 和 fencing。</p></article>
+      <article class="card"><h3>思考模式 <span class="badge good">已实现</span></h3><p>类型化 RuntimeOptions 已进入 Session/Run 快照和 Runtime Adapter；工作台只展示阶段，不展示原始思考链。</p></article>
+      <article class="card"><h3>高级环境策略 <span class="badge warn">待接入</span></h3><p>Workspace、Sandbox、网络策略和附加审批字段已有兼容结构，Worker 尚未完整消费。</p></article>
+    </div>
+    <div class="note" style="margin-top:14px">推荐后续阶段：补齐工作台内本轮策略快捷切换、上下文压缩、成本预算和模型 fallback；真实 Provider 的字段语义与长时恢复继续单独验证。</div>
+  </section>
+
+  <section class="panel tab-panel hidden" id="prototypes" role="tabpanel">
+    <div class="section-head"><div><h2>原型地图</h2><p>以下链接指向同目录下的静态 HTML 原型，演示数据不会调用真实 API。</p></div></div>
+    <div class="prototype-list">
+      <div class="prototype"><div><strong>运行策略独立面板</strong><small>双栏策略配置、能力提示、来源差异、保存并新建对话</small></div><a href="运行策略独立面板.html">打开原型</a></div>
+      <div class="prototype"><div><strong>员工工作台</strong><small>Conversation、Run 时间线、审批预览、OFFLINE 工作流</small></div><a href="海豚调度员工工作台.html">打开原型</a></div>
+      <div class="prototype"><div><strong>Deployment 运行配置</strong><small>继承默认、员工覆盖、EngineProfile/ModelRoute 兼容提示</small></div><a href="员工Deployment运行配置.html">打开原型</a></div>
+      <div class="prototype"><div><strong>默认引擎与模型</strong><small>ExecutionProfile 版本、默认运行环境、加载/空/错误状态</small></div><a href="DeepSeekHarness默认引擎配置.html">打开原型</a></div>
+      <div class="prototype"><div><strong>模型管理</strong><small>连接、模型目录、ModelRoute、测试和授权</small></div><a href="模型管理.html">打开原型</a></div>
+      <div class="prototype"><div><strong>回复历史恢复</strong><small>两轮问答历史、加载、空状态、无权状态</small></div><a href="对话回复历史恢复.html">打开原型</a></div>
+    </div>
+  </section>
+
+  <section class="panel tab-panel hidden" id="flows" role="tabpanel">
+    <div class="section-head"><div><h2>核心流程设计</h2><p>所有流程都以租户授权和不可变快照为边界。</p></div></div>
+    <h3>配置到 Session</h3>
+    <div class="flow" aria-label="配置到 Session 流程"><span class="flow-step">管理员保存 Deployment 修订</span><span class="flow-arrow">→</span><span class="flow-step">解析用户/租户默认</span><span class="flow-arrow">→</span><span class="flow-step">创建 Session 固定来源</span><span class="flow-arrow">→</span><span class="flow-step">新 Run 使用固定快照</span></div>
+    <h3 style="margin-top:18px">任务到答复</h3>
+    <div class="flow" aria-label="任务到答复流程"><span class="flow-step">提交 Conversation turn</span><span class="flow-arrow">→</span><span class="flow-step">USER Message + QUEUED Run</span><span class="flow-arrow">→</span><span class="flow-step">Worker + Harness + MCP</span><span class="flow-arrow">→</span><span class="flow-step">Trace/Usage/ASSISTANT Message</span></div>
+    <h3 style="margin-top:18px">写操作审批</h3>
+    <div class="flow" aria-label="审批流程"><span class="flow-step">PREVIEW 预览</span><span class="flow-arrow">→</span><span class="flow-step">提交者确认摘要</span><span class="flow-arrow">→</span><span class="flow-step">Approval Worker 一次执行</span><span class="flow-arrow">→</span><span class="flow-step">成功 / 失败 / UNKNOWN</span></div>
+    <div class="note" style="margin-top:16px">UNKNOWN 不自动重试；Session Home 需要隔离并进行人工只读对账。内部 Trace 默认折叠，用户只看到可理解的阶段和最终结果。</div>
+  </section>
+
+  <section class="panel tab-panel hidden" id="acceptance" role="tabpanel">
+    <div class="section-head"><div><h2>验收与差距</h2><p>静态切换用于说明当前已验证、未验证和异常状态。</p></div></div>
+    <table class="matrix"><thead><tr><th>领域</th><th>当前状态</th><th>验收重点</th></tr></thead><tbody>
+      <tr><td>目录与版本</td><td><span class="badge good">已实现</span></td><td>发布后不可变、租户授权、精确 Skill/Tool 引用</td></tr>
+      <tr><td>模型与运行配置</td><td><span class="badge good">已实现</span></td><td>默认解析、Deployment 修订、Session 快照和协议兼容</td></tr>
+      <tr><td>工作台与历史</td><td><span class="badge good">已实现</span></td><td>两轮回答同时恢复、内部事件折叠、成员只读、事件时间到秒</td></tr>
+      <tr><td>Harness/MCP/审批</td><td><span class="badge good">本地已验证</span></td><td>只读查询、预览、提交者审批、OFFLINE 创建、UNKNOWN</td></tr>
+      <tr><td>思考模式</td><td><span class="badge good">本地已验证</span></td><td>能力矩阵、预算快照、阶段状态、不展示原始思考链；真实 Provider 未验证</td></tr>
+      <tr><td>生产环境</td><td><span class="badge warn">未验证</span></td><td>真实身份、Secret Manager、云模型、长时恢复和生产 MCP</td></tr>
+    </tbody></table>
+    <div class="state-buttons" style="margin-top:16px" role="group" aria-label="状态演示"><button type="button" data-state="loading">加载中</button><button type="button" data-state="empty">空目录</button><button type="button" data-state="error">读取失败</button><button type="button" data-state="ready">恢复结果</button></div>
+    <div id="state" class="state ready" role="status" aria-live="polite">当前方案文档和原型入口已准备好。</div>
+  </section>
+
+  <p class="footer">静态演示 · 不连接真实服务、不提交真实操作、不包含凭据。完整 Markdown 需求和设计见同目录上级的《当前方案需求与设计总览》。</p>
+</main>
+<script>
+  const tabs=[...document.querySelectorAll('[data-tab]')];
+  const panels=[...document.querySelectorAll('.tab-panel')];
+  tabs.forEach(button=>button.addEventListener('click',()=>{
+    const id=button.dataset.tab;
+    tabs.forEach(item=>item.setAttribute('aria-selected',String(item===button)));
+    panels.forEach(panel=>panel.classList.toggle('hidden',panel.id!==id));
+  }));
+  const state=document.getElementById('state');
+  document.querySelectorAll('[data-state]').forEach(button=>button.addEventListener('click',()=>{
+    const kind=button.dataset.state;
+    const messages={loading:'正在读取配置目录…',empty:'当前租户还没有可用配置。',error:'读取失败；已有配置未被修改。',ready:'配置目录已恢复，当前方案可继续评审。'};
+    state.className='state '+kind;
+    state.textContent=messages[kind];
+  }));
+</script>
+</body>
+</html>

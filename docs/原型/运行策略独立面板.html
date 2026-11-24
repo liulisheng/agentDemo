@@ -1,0 +1,1110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="沿用当前管理台视觉令牌的运行策略独立面板静态原型">
+  <title>运行策略独立面板 · Agent Platform</title>
+  <style>
+    :root { color-scheme:light; --ink:#25363c; --muted:#77858a; --line:#d7e0e2; --canvas:#f3f6f6; --paper:#fff; --pine:#21645f; --pine-soft:#e8f2f0; --blue:#1673d1; --good:#348345; --amber:#af7417; --bad:#a23d36; font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:var(--canvas); }
+    button,select,input,textarea { font:inherit; color:inherit; }
+    button:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible,a:focus-visible { outline:3px solid #78b4a4; outline-offset:2px; }
+    .app { display:grid; min-height:100vh; grid-template-columns:230px minmax(0,1fr); }
+    .sidebar { display:flex; flex-direction:column; gap:22px; padding:16px 9px; border-right:1px solid var(--line); background:#fff; }
+    .brand { display:flex; align-items:center; gap:10px; padding:5px 7px; font-size:14px; font-weight:800; }
+    .brand-mark { display:grid; width:30px; height:30px; place-items:center; border-radius:8px; color:white; background:var(--pine); font-weight:800; }
+    .nav-label { padding:0 8px; color:#76858a; font-size:10px; font-weight:750; }
+    .side-nav { display:grid; gap:4px; }
+    .side-nav button { min-height:37px; padding:8px 11px; border:0; border-radius:7px; color:#46575d; background:transparent; text-align:left; cursor:pointer; font-size:11px; font-weight:650; }
+    .side-nav button:hover { background:#f4f7f6; }
+    .side-nav button[aria-current="page"] { color:var(--pine); background:#e7f1ef; }
+    .main-column { min-width:0; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; min-height:68px; padding:10px 26px; border-bottom:1px solid var(--line); background:white; }
+    .tenant-context { display:grid; gap:3px; }
+    .tenant-context span,.identity label { color:var(--muted); font-size:10px; }
+    .tenant-context strong { font-size:13px; }
+    .identity { display:flex; align-items:center; gap:8px; }
+    .identity select { min-height:32px; padding:5px 9px; border:1px solid var(--line); border-radius:7px; background:white; font-size:10px; }
+    main { padding:12px 26px 32px; }
+    .tenant-kicker { margin:0 0 19px; color:#53676a; font-size:11px; font-weight:650; }
+    .page-head { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:25px; }
+    .page-head h1 { margin:0 0 5px; font-size:25px; font-weight:700; letter-spacing:-.025em; }
+    .page-head p { margin:0; color:#5f6f74; font-size:12px; }
+    .page-head .kicker { display:block; margin-bottom:8px; color:var(--pine); font-size:10px; font-weight:700; }
+    .primary { min-height:38px; padding:8px 14px; border:1px solid var(--pine); border-radius:7px; color:white; background:var(--pine); cursor:pointer; font-size:11px; font-weight:750; }
+    .primary:hover { background:#194f4a; }
+    .primary:disabled { cursor:not-allowed; opacity:.5; }
+    .secondary { min-height:33px; padding:6px 11px; border:1px solid var(--line); border-radius:7px; color:#3b4d51; background:#fff; cursor:pointer; font-size:10px; font-weight:700; }
+    .link-button { border:0; color:var(--blue); background:transparent; cursor:pointer; font-size:11px; font-weight:700; }
+    .tabs { display:flex; gap:26px; margin-bottom:16px; border-bottom:1px solid var(--line); }
+    .tab { min-height:39px; padding:8px 2px 9px; border:0; border-bottom:2px solid transparent; color:#68797d; background:transparent; cursor:pointer; font-size:11px; }
+    .tab[aria-selected="true"] { border-bottom-color:var(--pine); color:var(--pine); font-weight:750; }
+    .card { min-width:0; border:1px solid #d5dfe1; border-radius:10px; background:white; }
+    .card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:52px; padding:11px 17px; border-bottom:1px solid #e0e7e8; }
+    .card-head h2 { margin:0; font-size:13px; font-weight:750; }
+    .card-head .secondary-text { color:#a0aaad; font-size:10px; }
+    .connections-grid { display:grid; grid-template-columns:minmax(280px,350px) minmax(0,1fr); gap:14px; align-items:start; }
+    .connection-list { grid-row:1 / span 2; }
+    .connection-list-body { padding:10px; }
+    .connection-item { display:grid; gap:5px; width:100%; padding:11px; border:1px solid #c5ddd7; border-left:3px solid var(--pine); border-radius:8px; color:var(--ink); background:var(--pine-soft); text-align:left; cursor:pointer; }
+    .connection-name { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:11px; font-weight:750; }
+    .connection-url { color:#687a7a; font:9px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .badge { display:inline-flex; width:max-content; align-items:center; padding:3px 7px; border:1px solid #b8e3bd; border-radius:5px; color:var(--good); background:#f3fff3; font-size:9px; font-weight:650; }
+    .connection-detail { padding-bottom:13px; }
+    .connection-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px 18px; padding:17px 19px 10px; color:#65757a; font-size:10px; }
+    .connection-meta strong { color:#34484d; font-weight:650; }
+    .connection-note { margin:0 19px; padding-bottom:11px; border-bottom:1px solid #e4eaeb; color:#5c7072; font-size:10px; line-height:1.6; }
+    .connection-actions { display:flex; gap:8px; padding:11px 19px 0; }
+    .catalog { grid-column:2; }
+    .catalog-body { padding:12px 18px 14px; }
+    .table-wrap { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; font-size:10px; text-align:left; }
+    th { padding:9px 8px; color:#596d74; background:#f5f8f8; font-weight:750; white-space:nowrap; }
+    td { padding:9px 8px; border-bottom:1px solid #e5ebec; color:#50646a; }
+    td strong { display:block; color:#263b40; font-size:10px; }
+    td code { display:block; margin-top:3px; color:#6c7c80; font-size:9px; }
+    .pill { display:inline-block; padding:3px 7px; border:1px solid #b8dfbd; border-radius:5px; color:var(--good); background:#f5fff5; font-size:9px; white-space:nowrap; }
+    .pill.blue { border-color:#b9d9fa; color:#1674d2; background:#f3f9ff; }
+    .routes-card { overflow:hidden; }
+    .route-table { padding:14px 18px 18px; }
+    .route-subtitle { color:#9aa6a9; font-size:10px; }
+    .actions { display:flex; align-items:center; gap:10px; white-space:nowrap; }
+    .routes-table-actions { display:flex; align-items:center; flex-wrap:wrap; gap:7px; min-width:180px; }
+    .route-revoked { border-color:#ecc4c0; color:var(--bad); background:#fff7f6; }
+    .route-form-error { min-height:18px; color:var(--bad); }
+    #route-dialog { width:min(440px,calc(100vw - 26px)); }
+    #route-dialog .dialog-body { gap:11px; }
+    .demo-footer { margin-top:12px; color:#84918c; font-size:9px; line-height:1.5; }
+    .empty-note,.loading-note,.error-note { margin:12px 18px; padding:12px 14px; border-radius:7px; font-size:10px; line-height:1.5; }
+    .empty-note { color:#65746c; background:#f5f8f6; }
+    .loading-note { color:#77682e; background:#fffbed; }
+    .error-note { color:#903f35; background:#fff5f3; }
+    .defaults-layout { display:grid; grid-template-columns:minmax(340px,1.05fr) minmax(300px,.95fr); gap:14px; align-items:start; }
+    .defaults-form,.profile-catalog { padding:16px 18px; }
+    .defaults-form h2,.profile-catalog h2 { margin:0; font-size:13px; }
+    .defaults-intro { margin:6px 0 14px; color:var(--muted); font-size:10px; line-height:1.5; }
+    .field { display:grid; gap:4px; }
+    .field label { color:#4f6368; font-size:10px; font-weight:700; }
+    .field select { width:100%; min-height:36px; padding:6px 9px; border:1px solid var(--line); border-radius:7px; background:#fff; font-size:10px; }
+    .default-fields { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .priority-note { margin-top:12px; padding:9px 10px; border-left:3px solid #d7a14a; border-radius:4px; color:#6f5928; background:#fff8e9; font-size:9px; line-height:1.5; }
+    .defaults-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:13px; }
+    .profile-list { display:grid; gap:7px; margin-top:12px; }
+    .profile-item { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:4px 8px; padding:9px 10px; border:1px solid #e0e8e4; border-radius:7px; background:#fbfdfc; }
+    .profile-item strong { font-size:10px; }
+    .profile-item span { color:var(--muted); font-size:9px; }
+    .profile-item.unavailable { color:#86918b; background:#f5f7f5; }
+    .profile-item .copy-profile { grid-column:2; grid-row:1 / span 2; }
+    .profile-builder { margin-top:13px; padding-top:10px; border-top:1px solid var(--line); }
+    .profile-builder summary { color:var(--pine); cursor:pointer; font-size:10px; font-weight:750; }
+    .builder-fields { display:grid; grid-template-columns:1fr 1fr; gap:9px; padding-top:10px; }
+    .builder-actions { display:flex; justify-content:flex-end; margin-top:10px; }
+    .model-status { min-height:16px; margin-top:10px; color:var(--good); font-size:10px; }
+    .model-status.error { color:var(--bad); }
+    .prototype-states { margin-top:10px; padding-top:8px; border-top:1px solid #e4eaeb; }
+    .prototype-states summary { color:#77858a; cursor:pointer; font-size:9px; }
+    .workbench-heading { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:14px; }
+    .workbench-heading h1 { margin:3px 0; font-size:24px; }
+    .workbench-heading p { margin:0; color:var(--muted); font-size:11px; }
+    .employee-row { display:flex; align-items:end; gap:8px; }
+    .employee-row .field { min-width:210px; }
+    .workbench-grid { display:grid; min-height:570px; grid-template-columns:minmax(220px,260px) minmax(360px,1fr) minmax(255px,295px); gap:11px; }
+    .workbench-panel { min-width:0; border:1px solid var(--line); border-radius:9px; background:white; }
+    .workbench-left { padding:13px 11px; }
+    .workbench-left h2,.workbench-right h2 { margin:0; font-size:12px; }
+    .conversation-demo { display:grid; gap:6px; margin-top:12px; }
+    .conversation-demo button { padding:9px; border:1px solid transparent; border-radius:7px; background:transparent; text-align:left; font-size:10px; }
+    .conversation-demo button.active { border-color:#c5ddd7; background:var(--pine-soft); }
+    .timeline-demo { display:grid; align-content:start; gap:9px; padding:13px; }
+    .run-demo { padding:10px; border-radius:7px; background:#f5f8f7; font-size:10px; line-height:1.5; }
+    .run-demo .run-meta { display:block; margin-bottom:3px; color:#77858a; font-size:9px; }
+    .workbench-right { padding:13px; }
+    .compact-config { display:grid; gap:5px; margin:12px 0; padding:9px; border:1px solid #e1eae5; border-radius:7px; background:#fbfdfb; font-size:9px; }
+    .compact-config span { color:var(--muted); }
+    .global-shortcut { margin-top:9px; color:var(--blue); font-size:10px; }
+    .feedback { display:none; margin-top:10px; padding:9px 10px; border-radius:6px; font-size:10px; line-height:1.4; }
+    .feedback.visible { display:block; color:#276342; background:#f1faf3; }
+    .feedback.error { color:var(--bad); background:#fff4f2; }
+    dialog { width:min(470px,calc(100vw - 26px)); max-height:86vh; padding:0; border:1px solid var(--line); border-radius:11px; color:var(--ink); box-shadow:0 20px 70px rgb(20 42 32 / 24%); }
+    dialog::backdrop { background:rgb(19 35 30 / 38%); }
+    .dialog-head { padding:15px 17px; border-bottom:1px solid var(--line); }
+    .dialog-head h2 { margin:0 0 4px; font-size:14px; }
+    .dialog-head p { margin:0; color:var(--muted); font-size:10px; line-height:1.5; }
+    .dialog-body { display:grid; gap:10px; overflow:auto; padding:14px 17px 16px; }
+    .dialog-context { display:flex; flex-wrap:wrap; gap:6px; color:#53666a; font-size:9px; }
+    .dialog-context span { padding:4px 6px; border-radius:4px; background:#f1f6f3; }
+    .mode-switch { display:flex; gap:5px; padding:3px; border:1px solid var(--line); border-radius:7px; background:#f6f8f7; }
+    .mode-switch button { flex:1; min-height:30px; border:0; border-radius:5px; color:var(--muted); background:transparent; cursor:pointer; font-size:10px; }
+    .mode-switch button[aria-pressed="true"] { color:var(--pine); background:#fff; box-shadow:0 0 0 1px #c8ddd3; }
+    .inherit-summary { display:grid; gap:4px; padding:9px 10px; border-left:3px solid var(--pine); color:#36594c; background:#f1f7f3; font-size:10px; }
+    .inherit-summary span,.inherit-summary p { margin:0; color:var(--muted); font-size:9px; }
+    .override-fields { display:grid; grid-template-columns:1fr 1fr; gap:9px; }
+    .callout { padding:8px 9px; border-left:3px solid #d7a14a; border-radius:4px; color:#6f5928; background:#fff8e9; font-size:9px; line-height:1.5; }
+    .strategy-card { display:grid; gap:9px; padding:10px; border:1px solid #cfe2dc; border-radius:7px; background:#f7fbf9; }
+    .strategy-card h3 { margin:0; font-size:11px; }
+    .strategy-card .strategy-note { margin:0; color:#62767a; font-size:9px; line-height:1.5; }
+    .strategy-badge { width:max-content; padding:3px 6px; border:1px solid #e4c681; border-radius:4px; color:#7e5a1e; background:#fff7e5; font-size:8px; font-weight:700; }
+    .phase-demo { border-left:3px solid #b17a1b; color:#71551e; background:#fff8e6; }
+    .dialog-footer { display:flex; justify-content:flex-end; gap:7px; }
+    .status-controls { margin-top:8px; }
+    .status-controls summary { color:#77858a; cursor:pointer; font-size:9px; }
+    .status-buttons { display:flex; gap:5px; padding-top:7px; }
+    .status-buttons button { padding:4px 6px; border:1px solid var(--line); border-radius:5px; background:white; cursor:pointer; font-size:9px; }
+    @media(max-width:1100px) { .connections-grid{grid-template-columns:minmax(230px,300px) minmax(0,1fr)} .connection-list{grid-row:1/span 2}.catalog{grid-column:2}.defaults-layout{grid-template-columns:1fr} }
+    @media(max-width:760px) { .app{grid-template-columns:1fr}.sidebar{gap:8px;padding:8px;border-right:0;border-bottom:1px solid var(--line)}.brand{padding:3px}.side-nav{display:flex;overflow:auto}.side-nav button{white-space:nowrap}.topbar{padding:9px 13px}.main{min-width:0}main{padding:12px}.page-head{align-items:flex-start;flex-direction:column}.connections-grid{grid-template-columns:1fr}.connection-list{grid-row:auto}.catalog{grid-column:auto}.connection-meta{grid-template-columns:1fr 1fr}.defaults-layout{grid-template-columns:1fr}.default-fields,.builder-fields{grid-template-columns:1fr}.workbench-grid{grid-template-columns:1fr}.workbench-heading{align-items:flex-start;flex-direction:column}.employee-row{width:100%}.employee-row .field{flex:1}.override-fields{grid-template-columns:1fr} }
+    @media(prefers-reduced-motion:no-preference) { button{transition:background-color .12s ease,border-color .12s ease} }
+  
+    /* 独立策略面板沿用员工 Deployment 原型的颜色、圆角、按钮和弹框层级。 */
+    #config-dialog { width:min(760px,calc(100vw - 26px)); }
+    #config-dialog .dialog-body { gap:14px; }
+    .strategy-layout { display:grid; grid-template-columns:minmax(0,1.08fr) minmax(230px,.92fr); gap:14px; align-items:start; }
+    .strategy-editor { display:grid; gap:10px; min-width:0; }
+    .strategy-editor .strategy-card { margin-top:1px; }
+    .strategy-preview { display:grid; gap:10px; min-width:0; padding:10px; border:1px solid #d8e5df; border-radius:7px; background:#fbfdfb; }
+    .strategy-preview h3 { margin:0; color:#36594c; font-size:11px; }
+    .strategy-preview .compact-config { display:grid; gap:5px; margin:0; padding:9px; border-color:#e1eae5; background:#fff; }
+    .strategy-preview .compact-config strong { color:#314944; font-size:10px; }
+    .strategy-preview .compact-config span { color:#77858a; font-size:9px; }
+    .strategy-preview-block { display:grid; gap:7px; padding-top:9px; border-top:1px solid #e1eae5; }
+    .strategy-preview-block:first-child { padding-top:0; border-top:0; }
+    .strategy-preview-row { display:flex; justify-content:space-between; gap:10px; color:#74858a; font-size:9px; }
+    .strategy-preview-row strong { color:#2e4745; font-size:9px; text-align:right; }
+    .strategy-diff { display:grid; gap:5px; padding:8px 9px; border-left:3px solid var(--pine); border-radius:4px; background:#f1f7f3; color:#36594c; font-size:9px; line-height:1.5; }
+    .strategy-diff span { color:#6c7d7f; }
+    .strategy-real-note { padding:8px 9px; border:1px solid #e4c681; border-radius:4px; color:#6f5928; background:#fff8e9; font-size:9px; line-height:1.5; }
+    .strategy-real-note strong { color:#59451d; }
+    .strategy-panel-success { display:none; padding:8px 9px; border-radius:5px; color:#276342; background:#f1faf3; font-size:9px; line-height:1.5; }
+    .strategy-panel-success.visible { display:block; }
+    .strategy-state-message { display:none; padding:8px 9px; border-radius:5px; font-size:9px; line-height:1.5; }
+    .strategy-state-message.visible { display:block; }
+    .strategy-state-message.loading { color:#77682e; background:#fffbed; }
+    .strategy-state-message.error { color:#903f35; background:#fff5f3; }
+    @media(max-width:760px) { #config-dialog { width:min(560px,calc(100vw - 26px)); } .strategy-layout { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">A</span><span>Agent Platform</span></div>
+      <div class="nav-label">管理控制台</div>
+      <nav class="side-nav" aria-label="管理导航">
+        <button type="button" data-page="employees">数字员工</button>
+        <button type="button" data-page="workbench">运行工作台</button>
+        <button type="button" data-page="resources">资源中心</button>
+        <button type="button" data-page="models" aria-current="page">模型管理</button>
+        <button type="button" data-page="deployments">部署记录</button>
+      </nav>
+    </aside>
+    <div class="main-column">
+      <header class="topbar">
+        <div class="tenant-context"><span>当前租户</span><strong>租户 A</strong></div>
+        <label class="identity"><span>登录身份</span><select id="role" aria-label="登录身份"><option value="admin">租户 A · 管理员</option><option value="member">租户 A · 成员</option></select></label>
+      </header>
+      <main>
+        <section id="models-page">
+          <p class="tenant-kicker">平台配置</p>
+          <header class="page-head"><div><h1>模型管理</h1><p>管理租户模型连接、目录、路由与可用性测试。</p></div><button type="button" class="primary" id="add-connection">添加连接</button></header>
+          <div class="tabs" role="tablist" aria-label="模型管理页签">
+            <button type="button" class="tab" role="tab" data-model-tab="connections" aria-selected="true">连接与模型</button>
+            <button type="button" class="tab" role="tab" data-model-tab="routes" aria-selected="false">模型路由</button>
+            <button type="button" class="tab" role="tab" data-model-tab="defaults" aria-selected="false">默认运行环境</button>
+          </div>
+
+          <section id="connections-panel">
+            <div class="connections-grid">
+              <aside class="card connection-list">
+                <div class="card-head"><h2>模型连接</h2><button class="link-button" type="button" id="add-connection-link">添加连接</button></div>
+                <div class="connection-list-body"><button class="connection-item" type="button"><span class="connection-name">本地模型 63072 <span class="badge">启用</span></span><span class="connection-url">http://host.docker.internal:63072/v1</span><span class="connection-url">v1</span></button></div>
+              </aside>
+              <section class="card connection-detail">
+                <div class="card-head"><h2>本地模型 63072 <span class="badge">启用</span></h2><button class="secondary" type="button">编辑连接</button></div>
+                <div class="connection-meta"><span>协议：<strong>openai-chat-completions</strong></span><span>目录方式：<strong>远端发现</strong></span><span>凭据引用：<strong>demo-model-secret</strong></span></div>
+                <p class="connection-note">Docker Worker 请使用 <code>host.docker.internal</code> 访问宿主机；容器内的 <code>localhost</code> 指向容器自身。</p>
+                <div class="connection-actions"><button class="secondary" type="button" data-result="connection">测试连接</button><button class="secondary" type="button" data-result="sync">同步模型目录</button></div>
+                <div class="model-status" id="connection-status" role="status" aria-live="polite"></div>
+              </section>
+              <section class="card catalog">
+                <div class="card-head"><h2>模型目录 <span class="secondary-text">12 个模型</span></h2></div>
+                <div class="catalog-body"><div class="table-wrap"><table><thead><tr><th>模型 ID</th><th>来源</th><th>上下文</th><th>状态</th><th>操作</th></tr></thead><tbody>
+                  <tr><td><strong>codex-auto-review</strong><code>codex-auto-review</code></td><td><span class="pill blue">远端发现</span></td><td>—</td><td><span class="pill">可用</span></td><td><button class="link-button" data-create-route="openai" data-route-model="codex-auto-review" type="button">创建路由</button></td></tr>
+                  <tr><td><strong>gpt-5.6-luna</strong><code>gpt-5.6-luna</code></td><td><span class="pill blue">远端发现</span></td><td>—</td><td><span class="pill">可用</span></td><td><button class="link-button" data-create-route="openai" data-route-model="gpt-5.6-luna" type="button">创建路由</button></td></tr>
+                  <tr><td><strong>gpt-5.6-sol</strong><code>gpt-5.6-sol</code></td><td><span class="pill blue">远端发现</span></td><td>—</td><td><span class="pill">可用</span></td><td><button class="link-button" data-create-route="openai" data-route-model="gpt-5.6-sol" type="button">创建路由</button></td></tr>
+                </tbody></table></div><p class="model-copy" style="margin:9px 0 0">其余 9 个目录项使用相同表格结构。全局默认和 EngineProfile 从此处可用的 ModelRoute 中选择。</p></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="routes-panel" hidden>
+            <section class="card routes-card"><div class="card-head"><div><h2>ModelRoute</h2><span class="route-subtitle">租户授权的模型路由；在默认运行环境或 Deployment 中独立选择。</span></div><button class="primary" id="create-route" type="button">创建路由</button></div>
+              <div class="route-table"><div class="table-wrap"><table><thead><tr><th>路由别名</th><th>连接</th><th>授权来源</th><th>版本</th><th>状态</th><th>操作</th></tr></thead><tbody id="model-routes-body"></tbody></table></div><div class="model-status" id="route-status" role="status" aria-live="polite"></div></div>
+            </section>
+          </section>
+
+          <section id="defaults-panel" hidden>
+            <div class="defaults-layout">
+              <form class="card defaults-form" id="defaults-form">
+                <div class="card-head"><h2>默认运行环境</h2><span class="secondary-text">仅影响继承默认的 Session</span></div>
+            <div style="padding:14px 17px">
+                  <p class="model-copy">ExecutionProfile 只选择执行引擎与运行策略；ModelRoute 单独选择。换引擎不会替你更换模型，Session 创建前会校验两者是否兼容。</p>
+                  <div class="default-fields">
+                    <div class="field"><label for="default-scope">默认作用域</label><select id="default-scope"><option value="user">个人默认（当前用户）</option><option value="tenant">租户默认（成员回退值）</option></select></div>
+                    <div class="field"><label for="default-profile">默认执行引擎（ExecutionProfile）</label><select id="default-profile"><option value="">不设置（继承下一作用域）</option><option value="codex_profile@2">Codex CLI · Profile v2</option><option value="deepseek_profile@1">DeepSeek Harness · Profile v1</option><option value="claude_profile@1" disabled>Claude Code · adapter 尚未启用</option></select></div>
+                    <div class="field"><label for="default-route">默认模型（ModelRoute）</label><select id="default-route"><option value="">不设置（继承下一作用域）</option><option value="local-gpt">本地模型测试 · gpt-6.1-sol</option><option value="openai-gpt">北岸 OpenAI · GPT-5.4</option><option value="openai-gpt-mini">北岸 OpenAI Mini · GPT-5.4 Mini</option><option value="deepseek-v3">北岸 DeepSeek · V3</option></select></div>
+                  </div>
+                  <div class="priority-note">引擎和模型分别解析：Deployment 对应字段覆盖 → 个人默认 → 租户默认 → 平台/系统默认。两项分别保存；不兼容时提示错误，不会自动换模型。</div>
+                  <div class="model-status" id="defaults-feedback" role="status" aria-live="polite"></div>
+                  <div class="defaults-actions"><button type="button" class="secondary" id="save-default-profile">保存引擎默认</button><button type="button" class="primary" id="save-default-route">保存模型默认</button></div>
+                  <details class="prototype-states"><summary>静态状态预览</summary><div class="status-buttons"><button type="button" data-default-state="loading">加载中</button><button type="button" data-default-state="empty">空目录</button><button type="button" data-default-state="error">保存失败</button><button type="button" data-default-state="saved">保存成功</button></div></details>
+                </div>
+              </form>
+              <section class="card profile-catalog"><div class="card-head"><h2>ExecutionProfile 方案</h2><button class="link-button" type="button" id="open-builder">新建方案</button></div>
+                <div style="padding:0 14px 12px"><div class="profile-list" id="profile-list">
+                <div class="profile-item"><strong>Codex CLI · v2</strong><span>Profile ID：codex_profile · 模型独立选择 · 受控默认沙箱</span><button class="link-button copy-profile" type="button" data-copy-profile="codex_profile">创建新版本</button></div>
+                <div class="profile-item"><strong>DeepSeek Harness · v1</strong><span>Profile ID：deepseek_profile · 模型和运行环境策略独立维护</span><button class="link-button copy-profile" type="button" data-copy-profile="deepseek_profile">创建新版本</button></div>
+                  <div class="profile-item unavailable"><strong>Claude Code</strong><span>未启用：adapter 尚未通过能力、隔离和凭据验证</span></div>
+                </div><details class="profile-builder" id="profile-builder"><summary>新建或调整方案版本</summary>
+                  <p class="model-copy" id="profile-builder-help">已发布 Profile 不原地改写。“创建新版本”会在同一 Profile ID 下生成 DRAFT vN+1；模型路由不属于 Profile，可独立调整。</p>
+                  <form id="profile-builder-form" class="builder-fields">
+                    <div class="field"><label for="new-engine">EngineProvider</label><select id="new-engine"><option value="codex_cli">Codex CLI</option><option value="deepseek_harness">DeepSeek Harness</option><option value="claude_code" disabled>Claude Code（未启用）</option></select></div>
+                    <p class="model-copy">本期只编辑引擎。Workspace、Sandbox 和附加审批策略需等 Worker 执行接线后开放；已有版本含这些字段时，需先清除再发布。</p>
+                    <div class="builder-actions"><button type="submit" class="secondary" id="create-profile">创建并发布</button><button type="button" class="primary" id="publish-profile">发布版本</button></div>
+                  </form>
+                </details></div>
+              </section>
+            </div>
+          </section>
+          <p class="demo-footer">静态原型 · 租户、ModelRoute 和凭据引用均为演示数据；所有按钮只演示交互，不连接真实服务。</p>
+        </section>
+
+        <section id="workbench-page" hidden>
+          <header class="workbench-heading"><div><span class="page-head kicker">员工执行 / 工作台</span><h1>对话工作区</h1><p>任务、工具活动与审批预览在这里连续保存。</p></div><div class="employee-row"><div class="field"><label for="employee">当前员工</label><select id="employee"><option value="a">A · 订单分析员工</option><option value="b">B · 数据探索助手</option><option value="c">C · 代码协作员工（Claude Code 待启用）</option></select></div><button class="secondary" id="open-config" type="button"><span id="workbench-profile-state">Deployment 覆盖 · 配置 v2</span></button></div></header>
+          <div class="workbench-grid">
+            <nav class="workbench-panel workbench-left" aria-label="对话列表"><h2>最近工作</h2><div class="conversation-demo"><button class="active" type="button">数仓工单周报<br>已完成 · 10:42</button><button type="button">本周数据源巡检<br>已完成 · 昨天</button><button type="button">订单明细校验<br>等待确认 · 11/20</button></div></nav>
+            <section class="workbench-panel"><div class="card-head"><h2>当前任务 · 数仓工单周报</h2><span class="pill" id="workbench-run-status">已完成</span></div><div class="timeline-demo" id="workbench-timeline"><div class="run-demo"><small class="run-meta">你 · 2026-11-23 10:23:41</small>按负责人汇总最近一周未关闭的工单。</div><div class="run-demo phase-demo" id="thinking-phase" hidden><small class="run-meta">运行阶段 · 2026-11-23 10:23:42</small>思考中 · 正在整理任务约束（不展示原始思考链）。</div><div class="run-demo"><small class="run-meta">员工 · 2026-11-23 10:23:58</small>已完成汇总，共 18 条未关闭工单。</div></div><form class="defaults-form" id="task-form" style="padding:12px"><div class="field"><label for="task">提交任务</label><textarea id="task" rows="3" placeholder="描述你要完成的工作…"></textarea></div><div class="defaults-actions"><span class="route-subtitle">写操作先预览并审批</span><button class="primary" type="submit">提交任务</button></div></form></section>
+            <aside class="workbench-panel workbench-right"><h2>本次 Run 快照</h2><div class="compact-config"><span>执行引擎</span><strong id="session-engine">Codex CLI</strong><span>模型</span><strong id="session-model">北岸 OpenAI · GPT-5.4</strong><span id="session-source">来源 · 引擎：Deployment 覆盖 / 模型：个人默认</span><span>回答策略</span><strong id="snapshot-thinking">自动思考 · 标准答复</strong><span>员工/工具权限</span><strong id="snapshot-employee">A · 订单分析 · Skills/Tools 固定</strong></div><button class="link-button global-shortcut" type="button" id="open-defaults-from-workbench">管理全局默认值</button></aside>
+          </div>
+          <p class="demo-footer">静态原型 · 会话、员工和运行结果均为演示数据，不连接真实服务。</p>
+        </section>
+      </main>
+    </div>
+  </div>
+  <dialog id="config-dialog" aria-labelledby="dialog-title">
+    <form id="config-form">
+      <div class="dialog-head"><h2 id="dialog-title">A · 订单分析员工运行配置</h2><p>引擎、模型与回答策略分开选择；右侧预览本次保存后新 Session 的实际快照。</p></div>
+      <div class="dialog-body">
+        <div class="dialog-context"><span>租户 A</span><span>Deployment · Active</span><span>配置 v2 → 保存后 v3</span></div>
+        <div class="strategy-layout">
+          <section class="strategy-editor" aria-label="回答策略设置">
+            <div class="mode-switch"><button type="button" id="mode-inherit" aria-pressed="false">全部继承默认</button><button type="button" id="mode-override" aria-pressed="true">设置员工覆盖</button></div>
+            <div class="inherit-summary" id="inherit-summary" hidden><strong id="effective-profile">用户默认 · Codex CLI</strong><span id="effective-engine-source">引擎来源：个人默认</span><p id="effective-route">模型来源：个人默认 · 北岸 OpenAI · GPT-5.4</p><span>优先级：Deployment 字段 → 个人 → 租户 → 平台/系统</span></div>
+            <div class="strategy-card" id="override-fields">
+              <div class="card-head" style="min-height:auto;padding:0;border:0"><h3>运行资源</h3><span class="strategy-badge">独立选择</span></div>
+              <div class="override-fields"><div class="field"><label for="deployment-profile">执行引擎（ExecutionProfile）</label><select id="deployment-profile"><option value="">继承默认引擎</option><option value="codex_profile@2">Codex CLI · Profile v2</option><option value="deepseek_profile@1">DeepSeek Harness · Profile v1</option><option value="claude_profile@1" disabled>Claude Code · 未启用</option></select></div><div class="field"><label for="deployment-route">模型（ModelRoute）</label><select id="deployment-route"><option value="">继承默认模型</option><option value="local-gpt">本地模型测试 · gpt-6.1-sol</option><option value="openai-gpt">北岸 OpenAI · GPT-5.4</option><option value="openai-gpt-mini">北岸 OpenAI Mini · GPT-5.4 Mini</option><option value="deepseek-v3">北岸 DeepSeek · V3</option></select></div></div>
+            </div>
+            <section class="strategy-card" aria-labelledby="strategy-title"><div class="card-head" style="min-height:auto;padding:0;border:0"><h3 id="strategy-title">回答策略</h3><span class="strategy-badge">已接入平台 API</span></div><div class="override-fields"><div class="field"><label for="thinking-mode">思考模式</label><select id="thinking-mode"><option value="inherit">继承默认策略</option><option value="auto">自动思考</option><option value="deep">深度思考</option><option value="off">关闭思考</option></select></div><div class="field"><label for="thinking-effort">推理强度</label><select id="thinking-effort"><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div><div class="field"><label for="response-verbosity">答复详细程度</label><select id="response-verbosity"><option value="standard">标准</option><option value="concise">简洁</option><option value="detailed">详细</option></select></div><div class="field"><label for="reasoning-budget">推理预算</label><select id="reasoning-budget"><option value="auto">自动</option><option value="8192">8K token</option><option value="16384">16K token</option></select></div></div><p class="strategy-note" id="thinking-capability">工作台只显示思考阶段、工具活动和最终答复，不保存或展示原始思考链。</p></section>
+            <div class="callout"><strong>只影响新 Session。</strong> 当前对话继续使用已有 Session/Run 快照；不兼容时保存或创建 Session 会被拒绝，不会自动切换模型。</div>
+            <div class="strategy-state-message loading" id="strategy-loading">正在读取当前策略和引擎能力…</div><div class="strategy-state-message error" id="strategy-error">读取失败，当前未提交的选择已保留；请重试。</div>
+          </section>
+          <aside class="strategy-preview" aria-label="运行策略预览">
+            <div class="strategy-preview-block"><h3>当前生效策略</h3><div class="compact-config"><span>思考模式</span><strong id="preview-mode">自动思考</strong><span>推理强度</span><strong id="preview-effort">自动</strong><span>答复详细程度</span><strong id="preview-verbosity">标准</strong><span>推理预算</span><strong id="preview-budget">自动</strong></div></div>
+            <div class="strategy-preview-block"><h3>来源与快照</h3><div class="strategy-preview-row"><span>策略来源</span><strong id="preview-source">Deployment 覆盖</strong></div><div class="strategy-preview-row"><span>配置修订</span><strong>保存后 v3</strong></div><div class="strategy-preview-row"><span>Session</span><strong>新建后固定</strong></div></div>
+            <div class="strategy-preview-block"><h3>本次修改</h3><div class="strategy-diff" id="preview-diff"><span>未选择覆盖时，字段继续继承默认策略。</span><strong>当前：自动思考 · 标准答复</strong></div></div>
+            <div class="strategy-preview-block"><h3>真实模型执行</h3><div class="strategy-real-note"><strong>OpenAI-compatible ModelRoute</strong><br>Worker 使用已授权 SecretRef 发出请求；API/Web 不读取密钥。请求、阶段、Usage 和秒级时间会回到工作台。</div></div>
+            <div class="strategy-panel-success" id="strategy-success">策略已保存。新 Session 将使用当前面板右侧的固定快照。</div>
+          </aside>
+        </div>
+        <div class="dialog-footer"><button type="button" class="secondary" id="close-config">取消</button><button type="button" class="secondary" id="save-and-new">保存并新建对话</button><button type="submit" class="primary">保存策略</button></div>
+        <details class="status-controls"><summary>静态状态预览</summary><div class="status-buttons"><button type="button" data-panel-state="loading">加载中</button><button type="button" data-panel-state="error">读取失败</button><button type="button" data-panel-state="saved">保存成功</button></div></details>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="route-dialog" aria-labelledby="route-dialog-title">
+    <form id="route-form"><div class="dialog-head"><h2 id="route-dialog-title">创建模型路由</h2><p>ModelRoute 使用当前租户的连接和目录模型；变更产生新版本，旧运行快照不变。</p></div><div class="dialog-body">
+      <div class="field"><label for="route-alias">路由别名</label><input id="route-alias" maxlength="128" required></div>
+      <div class="field"><label for="route-connection">模型连接</label><select id="route-connection" required><option value="local">本地模型 63072</option><option value="openai">北岸 OpenAI 连接</option><option value="deepseek">北岸 DeepSeek 连接</option></select></div>
+      <div class="field"><label for="route-model">模型目录</label><select id="route-model" required></select></div>
+      <div class="field"><label for="route-temperature">Temperature（可选）</label><input id="route-temperature" type="number" min="0" max="2" step="0.1"></div>
+      <p class="apply-note">删除会把路由标记为 REVOKED 并保留历史。仍被默认值或活动 Deployment 引用时，需先解绑。</p>
+      <div class="model-status" id="route-dialog-status" role="status" aria-live="polite"></div>
+      <div class="dialog-actions"><button class="secondary" id="cancel-route" type="button">取消</button><button class="primary" type="submit" id="save-route">创建路由</button></div>
+    </div></form>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <script>
+    const toast = document.getElementById('toast')
+    const role = document.getElementById('role')
+    const modelsPage = document.getElementById('models-page')
+    const workbenchPage = document.getElementById('workbench-page')
+    const configDialog = document.getElementById('config-dialog')
+    const routeDialog = document.getElementById('route-dialog')
+    const routeCatalogs = {
+      local: [{ id: 'gpt-6.1-sol', name: 'gpt-6.1-sol' }, { id: 'gpt-6.1-luna', name: 'gpt-6.1-luna' }],
+      openai: [{ id: 'codex-auto-review', name: 'codex-auto-review' }, { id: 'gpt-5.6-luna', name: 'gpt-5.6-luna' }, { id: 'gpt-5.6-sol', name: 'gpt-5.6-sol' }, { id: 'gpt-5.4', name: 'gpt-5.4' }, { id: 'gpt-5.4-mini', name: 'gpt-5.4-mini' }],
+      deepseek: [{ id: 'deepseek-v3', name: 'deepseek-v3' }],
+    }
+    const connectionNames = { local: '本地模型 63072', openai: '北岸 OpenAI 连接', deepseek: '北岸 DeepSeek 连接' }
+    const routeModels = [
+      { id: 'local-gpt', alias: '本地模型测试', connection: 'local', model: 'gpt-6.1-sol', source: '平台授权', version: 1, status: 'ACTIVE', temperature: 0.1 },
+      { id: 'openai-gpt', alias: '北岸 OpenAI', connection: 'openai', model: 'gpt-5.4', source: '租户授权', version: 2, status: 'ACTIVE', temperature: 0.2 },
+      { id: 'openai-gpt-mini', alias: '北岸 OpenAI Mini', connection: 'openai', model: 'gpt-5.4-mini', source: '租户授权', version: 1, status: 'ACTIVE', temperature: 0.2 },
+      { id: 'deepseek-v3', alias: '北岸 DeepSeek', connection: 'deepseek', model: 'deepseek-v3', source: '租户授权', version: 1, status: 'ACTIVE', temperature: 0.1 },
+    ]
+    let editingRouteId = null
+    const profiles = {
+      codex_profile: { latestPublished: 2, versions: { 2: { engine: 'codex_cli', sandbox: '', workspace: '', status: 'PUBLISHED' } } },
+      deepseek_profile: { latestPublished: 1, versions: { 1: { engine: 'deepseek_harness', sandbox: '', workspace: '', status: 'PUBLISHED' } } },
+    }
+    const engineNames = { codex_cli: 'Codex CLI', deepseek_harness: 'DeepSeek Harness', claude_code: 'Claude Code' }
+    const routeNames = { 'local-gpt': '本地模型测试 · gpt-6.1-sol', 'openai-gpt': '北岸 OpenAI · GPT-5.4', 'openai-gpt-mini': '北岸 OpenAI Mini · GPT-5.4 Mini', 'deepseek-v3': '北岸 DeepSeek · V3', 'claude-sonnet': 'Claude Sonnet' }
+    const routeEngines = { 'local-gpt': ['codex_cli'], 'openai-gpt': ['codex_cli'], 'openai-gpt-mini': ['codex_cli'], 'deepseek-v3': ['deepseek_harness'] }
+    const employeeRuntime = {
+      a: { name: 'A · 订单分析员工', profileRef: 'codex_profile@2', routeId: null, thinkingMode: 'auto', thinkingEffort: 'auto', responseVerbosity: 'standard', version: 2 },
+      b: { name: 'B · 数据探索助手', profileRef: 'deepseek_profile@1', routeId: 'deepseek-v3', thinkingMode: 'deep', thinkingEffort: 'high', responseVerbosity: 'standard', version: 1 },
+      c: { name: 'C · 代码协作员工（Claude Code 待启用）', profileRef: null, routeId: null, thinkingMode: 'inherit', thinkingEffort: 'auto', responseVerbosity: 'standard', version: 1 },
+    }
+    let userDefault = 'codex_profile@2'
+    let tenantDefault = 'deepseek_profile@1'
+    let userRouteDefault = 'openai-gpt'
+    let tenantRouteDefault = 'deepseek-v3'
+    let selectedEmployee = 'a'
+    let selectedMode = 'OVERRIDE'
+    let currentSessionVersion = 2
+    let profileDraftTarget = null
+    let activeSessionSnapshot = null
+    const thinkingNames = { inherit: '继承默认', auto: '自动思考', deep: '深度思考', off: '关闭思考' }
+    const effortNames = { auto: '自动', low: '低', medium: '中', high: '高' }
+    const verbosityNames = { concise: '简洁', standard: '标准', detailed: '详细' }
+
+    function showToast(text) {
+      toast.textContent = text
+      toast.hidden = false
+      window.setTimeout(() => { toast.hidden = true }, 3200)
+    }
+    function showPage(page) {
+      const showModels = page === 'models'
+      modelsPage.hidden = !showModels
+      workbenchPage.hidden = showModels
+      document.querySelectorAll('.side-nav button').forEach((button) => {
+        if (!['models', 'workbench'].includes(button.dataset.page)) return
+        button.setAttribute('aria-current', button.dataset.page === page ? 'page' : 'false')
+      })
+      if (showModels) showModelTab('connections')
+    }
+    function showModelTab(tab) {
+      document.querySelectorAll('.tab').forEach((button) => button.setAttribute('aria-selected', String(button.dataset.modelTab === tab)))
+      document.getElementById('connections-panel').hidden = tab !== 'connections'
+      document.getElementById('routes-panel').hidden = tab !== 'routes'
+      document.getElementById('defaults-panel').hidden = tab !== 'defaults'
+    }
+    function profileReference(profileId, version) { return `${profileId}@${version}` }
+    function parseProfileReference(reference) {
+      if (!reference) return null
+      const splitAt = reference.lastIndexOf('@')
+      return { profileId: reference.slice(0, splitAt), version: Number(reference.slice(splitAt + 1)) }
+    }
+    function getProfile(reference) {
+      const parsed = parseProfileReference(reference)
+      return parsed ? profiles[parsed.profileId]?.versions[parsed.version] ?? null : null
+    }
+    function getProfileLabel(reference) {
+      const profile = getProfile(reference)
+      const parsed = parseProfileReference(reference)
+      return profile ? `${engineNames[profile.engine]} · Profile v${parsed.version}` : '未设置'
+    }
+    function scopeName(source) {
+      return ({ DEPLOYMENT_OVERRIDE: 'Deployment 覆盖', USER_DEFAULT: '个人默认', TENANT_DEFAULT: '租户默认', SYSTEM_DEFAULT: '平台/系统默认' })[source] ?? source
+    }
+    function resolveDefault() {
+      const profileRef = userDefault || tenantDefault || 'codex_profile@2'
+      const profileSource = userDefault ? 'USER_DEFAULT' : tenantDefault ? 'TENANT_DEFAULT' : 'SYSTEM_DEFAULT'
+      const routeBinding = userRouteDefault || tenantRouteDefault || null
+      const routeSource = userRouteDefault ? 'USER_DEFAULT' : tenantRouteDefault ? 'TENANT_DEFAULT' : null
+      const profile = getProfile(profileRef)
+      const effectiveRoute = routeBinding || 'openai-gpt'
+      return { ...profile, profileRef, profileSource, engineSource: profileSource, route: effectiveRoute, routeSource: routeSource || 'SYSTEM_DEFAULT' }
+    }
+    function resolveEmployee(item = employeeRuntime[selectedEmployee]) {
+      const defaults = resolveDefault()
+      const profileRef = item.profileRef || defaults.profileRef
+      const profile = getProfile(profileRef)
+      const route = item.routeId || defaults.route
+      return {
+        ...profile,
+        profileRef,
+        route,
+        engineSource: item.profileRef ? 'DEPLOYMENT_OVERRIDE' : defaults.engineSource,
+        routeSource: item.routeId ? 'DEPLOYMENT_OVERRIDE' : defaults.routeSource,
+      }
+    }
+    function routeIsCompatible(engine, route) { return (routeEngines[route] ?? []).includes(engine) }
+    function setModelStatus(id, text, isError = false) {
+      const element = document.getElementById(id)
+      element.textContent = text
+      element.classList.toggle('error', isError)
+    }
+    function syncRouteOptions() {
+      for (const selectId of ['default-route', 'deployment-route']) {
+        const select = document.getElementById(selectId)
+        const previous = select.value
+        for (const option of [...select.options]) if (option.dataset.routeOption === 'true') option.remove()
+        routeModels.filter((route) => route.status === 'ACTIVE').forEach((route) => {
+          const option = document.createElement('option')
+          option.value = route.id
+          option.textContent = `${route.alias} · ${route.model}`
+          option.dataset.routeOption = 'true'
+          select.append(option)
+        })
+        select.value = routeModels.some((route) => route.id === previous && route.status === 'ACTIVE') ? previous : ''
+      }
+    }
+    function makeRouteButton(label, onClick) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'link-button'
+      button.textContent = label
+      button.addEventListener('click', onClick)
+      return button
+    }
+    function renderModelRoutes() {
+      const body = document.getElementById('model-routes-body')
+      body.replaceChildren()
+      routeModels.forEach((route) => {
+        const row = document.createElement('tr')
+        const aliasCell = document.createElement('td')
+        const alias = document.createElement('strong')
+        alias.textContent = route.alias
+        const model = document.createElement('code')
+        model.textContent = route.model
+        aliasCell.append(alias, model)
+        row.append(aliasCell)
+        const connectionCell = document.createElement('td')
+        connectionCell.textContent = connectionNames[route.connection]
+        row.append(connectionCell)
+        const authorizationCell = document.createElement('td')
+        const authorization = document.createElement('span')
+        authorization.className = 'pill blue'
+        authorization.textContent = route.source
+        authorizationCell.append(authorization)
+        row.append(authorizationCell)
+        const versionCell = document.createElement('td')
+        versionCell.textContent = `v${route.version}`
+        row.append(versionCell)
+        const statusCell = document.createElement('td')
+        const status = document.createElement('span')
+        status.className = `pill${route.status === 'REVOKED' ? ' route-revoked' : ''}`
+        status.textContent = route.status === 'ACTIVE' ? '启用中' : route.status === 'DISABLED' ? '已停用' : '已删除'
+        statusCell.append(status)
+        row.append(statusCell)
+        const actions = document.createElement('td')
+        actions.className = 'routes-table-actions'
+        if (route.status !== 'REVOKED' && role.value === 'admin') actions.append(makeRouteButton('编辑', () => openRouteDialog(route.id)))
+        if (route.status === 'ACTIVE') actions.append(makeRouteButton('测试模型', () => setModelStatus('route-status', `${route.alias} 测试完成：成功，延迟 420ms（模拟结果）`)))
+        if (route.status !== 'REVOKED' && role.value === 'admin') {
+          actions.append(makeRouteButton(route.status === 'ACTIVE' ? '停用' : '启用', () => toggleRoute(route.id)))
+          actions.append(makeRouteButton('删除', () => revokeRoute(route.id)))
+        }
+        if (route.status === 'REVOKED' || role.value !== 'admin') {
+          const note = document.createElement('span')
+          note.className = 'route-subtitle'
+          note.textContent = route.status === 'REVOKED' ? '历史保留' : '只读'
+          actions.append(note)
+        }
+        row.append(actions)
+        body.append(row)
+      })
+      syncRouteOptions()
+    }
+    function refreshRouteModelOptions(selectedModel = '') {
+      const connection = document.getElementById('route-connection').value
+      const select = document.getElementById('route-model')
+      const previous = selectedModel || select.value
+      select.replaceChildren()
+      const empty = document.createElement('option')
+      empty.value = ''
+      empty.textContent = routeCatalogs[connection].length ? '选择一个可用模型' : '目录为空'
+      select.append(empty)
+      routeCatalogs[connection].forEach((item) => {
+        const option = document.createElement('option')
+        option.value = item.id
+        option.textContent = item.name
+        select.append(option)
+      })
+      select.value = routeCatalogs[connection].some((item) => item.id === previous) ? previous : ''
+    }
+    function openRouteDialog(routeId = null, connectionId = null, modelId = null) {
+      if (role.value !== 'admin') return
+      editingRouteId = routeId
+      const route = routeId ? routeModels.find((item) => item.id === routeId) : null
+      document.getElementById('route-dialog-title').textContent = route ? '编辑模型路由' : '创建模型路由'
+      document.getElementById('save-route').textContent = route ? '保存路由' : '创建路由'
+      document.getElementById('route-alias').value = route?.alias ?? modelId ?? ''
+      document.getElementById('route-connection').value = route?.connection ?? connectionId ?? 'local'
+      refreshRouteModelOptions(route?.model ?? modelId ?? '')
+      document.getElementById('route-temperature').value = route?.temperature ?? ''
+      setModelStatus('route-dialog-status', '')
+      routeDialog.showModal()
+      document.getElementById('route-alias').focus()
+    }
+    function toggleRoute(routeId) {
+      const route = routeModels.find((item) => item.id === routeId)
+      if (!route || route.status === 'REVOKED') return
+      route.status = route.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
+      route.version += 1
+      renderModelRoutes()
+      setModelStatus('route-status', `${route.alias} 已${route.status === 'ACTIVE' ? '启用' : '停用'} · v${route.version}。旧运行快照保持不变。`)
+    }
+    function revokeRoute(routeId) {
+      const route = routeModels.find((item) => item.id === routeId)
+      if (!route || route.status === 'REVOKED') return
+      const references = []
+      if (userRouteDefault === routeId) references.push('个人模型默认')
+      if (tenantRouteDefault === routeId) references.push('租户模型默认')
+      Object.values(employeeRuntime).forEach((employee) => { if (employee.routeId === routeId) references.push(employee.name) })
+      if (references.length) {
+        setModelStatus('route-status', `MODEL_ROUTE_IN_USE：${references.join('、')}仍使用此路由，请先解绑。`, true)
+        return
+      }
+      if (!window.confirm(`逻辑删除“${route.alias}”？历史运行快照将保留。`)) return
+      route.status = 'REVOKED'
+      route.version += 1
+      renderModelRoutes()
+      setModelStatus('route-status', `${route.alias} 已标记为 REVOKED；历史快照保留，无法恢复。`)
+    }
+    function saveModelRoute(event) {
+      event.preventDefault()
+      if (role.value !== 'admin') return
+      const alias = document.getElementById('route-alias').value.trim()
+      const connection = document.getElementById('route-connection').value
+      const model = document.getElementById('route-model').value
+      const temperatureText = document.getElementById('route-temperature').value
+      if (!alias || !model) {
+        setModelStatus('route-dialog-status', '请填写别名并选择可用模型。', true)
+        return
+      }
+      if (routeModels.some((route) => route.alias === alias && route.id !== editingRouteId)) {
+        setModelStatus('route-dialog-status', '当前租户已存在相同别名，请更换后再保存。', true)
+        return
+      }
+      if (editingRouteId) {
+        const route = routeModels.find((item) => item.id === editingRouteId)
+        if (!route || route.status === 'REVOKED') return
+        Object.assign(route, { alias, connection, model, temperature: temperatureText === '' ? null : Number(temperatureText), version: route.version + 1 })
+        routeNames[route.id] = `${alias} · ${model}`
+        routeEngines[route.id] = connection === 'deepseek' ? ['deepseek_harness'] : ['codex_cli']
+        setModelStatus('route-dialog-status', `${alias} 已保存为 v${route.version}；现有 Session/Run 快照不变。`)
+      } else {
+        const id = `tenant-route-${Date.now()}`
+        routeModels.push({ id, alias, connection, model, source: '租户授权', version: 1, status: 'ACTIVE', temperature: temperatureText === '' ? null : Number(temperatureText) })
+        routeNames[id] = `${alias} · ${model}`
+        routeEngines[id] = connection === 'deepseek' ? ['deepseek_harness'] : ['codex_cli']
+        setModelStatus('route-dialog-status', `${alias} 已创建 · v1，可在默认运行环境或 Deployment 中选择。`)
+      }
+      renderModelRoutes()
+      routeDialog.close()
+      showToast('ModelRoute 已保存（静态演示）。')
+    }
+    function syncRouteOptions() {
+      const routeIds = new Set(routeModels.filter((route) => route.status === 'ACTIVE').map((route) => route.id))
+      for (const selectId of ['default-route', 'deployment-route']) {
+        const select = document.getElementById(selectId)
+        const oldValue = select.value
+        for (const option of [...select.options]) if (option.dataset.dynamicRoute === 'true') option.remove()
+        routeModels.filter((route) => route.status === 'ACTIVE').forEach((route) => {
+          const option = document.createElement('option')
+          option.value = route.id
+          option.textContent = `${route.alias} · ${route.model}`
+          option.dataset.dynamicRoute = 'true'
+          select.append(option)
+        })
+        select.value = routeIds.has(oldValue) ? oldValue : ''
+      }
+    }
+    function renderModelRoutes() {
+      const body = document.getElementById('model-routes-body')
+      body.replaceChildren()
+      routeModels.forEach((route) => {
+        const row = document.createElement('tr')
+        const aliasCell = document.createElement('td')
+        const alias = document.createElement('strong')
+        alias.textContent = route.alias
+        const model = document.createElement('code')
+        model.textContent = route.model
+        aliasCell.append(alias, model)
+        row.append(aliasCell)
+        const connectionCell = document.createElement('td')
+        connectionCell.textContent = connectionNames[route.connection]
+        row.append(connectionCell)
+        const sourceCell = document.createElement('td')
+        const source = document.createElement('span')
+        source.className = 'pill blue'
+        source.textContent = route.source
+        sourceCell.append(source)
+        row.append(sourceCell)
+        const versionCell = document.createElement('td')
+        versionCell.textContent = `v${route.version}`
+        row.append(versionCell)
+        const statusCell = document.createElement('td')
+        const status = document.createElement('span')
+        status.className = `pill${route.status === 'REVOKED' ? ' route-revoked' : ''}`
+        status.textContent = route.status === 'ACTIVE' ? '启用中' : route.status === 'DISABLED' ? '已停用' : '已删除'
+        statusCell.append(status)
+        row.append(statusCell)
+        const actionsCell = document.createElement('td')
+        actionsCell.className = 'routes-table-actions'
+        if (route.status !== 'REVOKED' && role.value === 'admin') {
+          actionsCell.append(routeAction('编辑', () => openRouteDialog(route.id)))
+        }
+        if (route.status === 'ACTIVE') actionsCell.append(routeAction('测试模型', () => setModelStatus('route-status', `${route.alias} 测试完成：成功，延迟 420ms（模拟结果）`)))
+        if (route.status !== 'REVOKED' && role.value === 'admin') {
+          actionsCell.append(routeAction(route.status === 'ACTIVE' ? '停用' : '启用', () => toggleRoute(route.id)))
+          actionsCell.append(routeAction('删除', () => revokeRoute(route.id)))
+        }
+        if (route.status === 'REVOKED' || role.value !== 'admin') {
+          const note = document.createElement('span')
+          note.className = 'route-subtitle'
+          note.textContent = route.status === 'REVOKED' ? '历史保留' : '只读'
+          actionsCell.append(note)
+        }
+        row.append(actionsCell)
+        body.append(row)
+      })
+      syncRouteOptions()
+    }
+    function routeAction(label, action) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'link-button'
+      button.textContent = label
+      button.addEventListener('click', action)
+      return button
+    }
+    function refreshRouteModelOptions(selected = '') {
+      const connectionId = document.getElementById('route-connection').value
+      const modelSelect = document.getElementById('route-model')
+      const oldValue = selected || modelSelect.value
+      modelSelect.replaceChildren()
+      const placeholder = document.createElement('option')
+      placeholder.value = ''
+      placeholder.textContent = routeCatalogs[connectionId].length ? '选择一个可用模型' : '目录为空'
+      modelSelect.append(placeholder)
+      routeCatalogs[connectionId].forEach((item) => {
+        const option = document.createElement('option')
+        option.value = item.id
+        option.textContent = item.name
+        modelSelect.append(option)
+      })
+      modelSelect.value = routeCatalogs[connectionId].some((item) => item.id === oldValue) ? oldValue : ''
+    }
+    function openRouteDialog(routeId = null, connectionId = null, modelId = null) {
+      if (role.value !== 'admin') return
+      editingRouteId = routeId
+      const route = routeId ? routeModels.find((item) => item.id === routeId) : null
+      document.getElementById('route-dialog-title').textContent = route ? '编辑模型路由' : '创建模型路由'
+      document.getElementById('save-route').textContent = route ? '保存路由' : '创建路由'
+      document.getElementById('route-alias').value = route?.alias ?? modelId ?? ''
+      document.getElementById('route-connection').value = route?.connection ?? connectionId ?? 'local'
+      refreshRouteModelOptions(route?.model ?? modelId ?? '')
+      document.getElementById('route-temperature').value = route?.temperature ?? ''
+      setModelStatus('route-dialog-status', '')
+      routeDialog.showModal()
+      document.getElementById('route-alias').focus()
+    }
+    function toggleRoute(routeId) {
+      const route = routeModels.find((item) => item.id === routeId)
+      if (!route || route.status === 'REVOKED') return
+      route.status = route.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
+      route.version += 1
+      renderModelRoutes()
+      showToast(`路由已${route.status === 'ACTIVE' ? '启用' : '停用'} · v${route.version}。已存在的 Session/Run 快照不变。`)
+    }
+    function revokeRoute(routeId) {
+      const route = routeModels.find((item) => item.id === routeId)
+      if (!route || route.status === 'REVOKED') return
+      const references = []
+      if (userRouteDefault === routeId) references.push('个人模型默认')
+      if (tenantRouteDefault === routeId) references.push('租户模型默认')
+      Object.values(employeeRuntime).forEach((employee) => {
+        if (employee.routeId === routeId) references.push(employee.name)
+      })
+      if (references.length) {
+        setModelStatus('route-status', `MODEL_ROUTE_IN_USE：${references.join('、')}仍使用此路由，请先解绑。`, true)
+        return
+      }
+      if (!window.confirm(`逻辑删除“${route.alias}”？历史运行快照会保留。`)) return
+      route.status = 'REVOKED'
+      route.version += 1
+      renderModelRoutes()
+      setModelStatus('route-status', `${route.alias} 已标记为 REVOKED；历史快照保留，不能恢复。`)
+    }
+    function saveModelRoute(event) {
+      event.preventDefault()
+      if (role.value !== 'admin') return
+      const alias = document.getElementById('route-alias').value.trim()
+      const connection = document.getElementById('route-connection').value
+      const model = document.getElementById('route-model').value
+      const temperatureText = document.getElementById('route-temperature').value
+      if (!alias || !model) {
+        setModelStatus('route-dialog-status', '请填写路由别名并选择可用模型。', true)
+        return
+      }
+      if (routeModels.some((route) => route.alias === alias && route.id !== editingRouteId)) {
+        setModelStatus('route-dialog-status', '当前租户已存在相同别名，请换一个路由别名。', true)
+        return
+      }
+      if (editingRouteId) {
+        const route = routeModels.find((item) => item.id === editingRouteId)
+        if (!route || route.status === 'REVOKED') return
+        Object.assign(route, { alias, connection, model, temperature: temperatureText === '' ? null : Number(temperatureText), version: route.version + 1 })
+        routeNames[route.id] = `${alias} · ${model}`
+        routeEngines[route.id] = connection === 'deepseek' ? ['deepseek_harness'] : ['codex_cli']
+        setModelStatus('route-dialog-status', `${alias} 已保存为 v${route.version}。已有运行快照不变。`)
+      } else {
+        const id = `tenant-route-${Date.now()}`
+        const newRoute = { id, alias, connection, model, source: '租户授权', version: 1, status: 'ACTIVE', temperature: temperatureText === '' ? null : Number(temperatureText) }
+        routeModels.push(newRoute)
+        routeNames[id] = `${alias} · ${model}`
+        routeEngines[id] = connection === 'deepseek' ? ['deepseek_harness'] : ['codex_cli']
+        setModelStatus('route-dialog-status', `${alias} 已创建 · v1。可在默认运行环境或 Deployment 中独立选择。`)
+      }
+      renderModelRoutes()
+      routeDialog.close()
+      showToast('ModelRoute 配置已保存（静态演示）。')
+    }
+    function refreshDefaultFields() {
+      const scope = document.getElementById('default-scope').value
+      document.getElementById('default-profile').value = scope === 'user' ? userDefault || '' : tenantDefault || ''
+      document.getElementById('default-route').value = scope === 'user' ? userRouteDefault || '' : tenantRouteDefault || ''
+    }
+    function updateDefaultScopeRole() {
+      const tenantOption = document.querySelector('#default-scope option[value="tenant"]')
+      const isMember = role.value === 'member'
+      tenantOption.disabled = isMember
+      if (isMember && document.getElementById('default-scope').value === 'tenant') document.getElementById('default-scope').value = 'user'
+      document.getElementById('create-profile').disabled = isMember
+      document.getElementById('publish-profile').disabled = isMember
+      document.getElementById('new-engine').disabled = isMember
+      document.getElementById('save-default-profile').disabled = isMember && document.getElementById('default-scope').value === 'tenant'
+      document.getElementById('save-default-route').disabled = isMember && document.getElementById('default-scope').value === 'tenant'
+      refreshDefaultFields()
+    }
+    function addPublishedProfileOptions() {
+      for (const selectId of ['default-profile', 'deployment-profile']) {
+        const select = document.getElementById(selectId)
+        const oldValue = select.value
+        for (const option of [...select.options]) if (option.value && !option.disabled) option.remove()
+        Object.entries(profiles).forEach(([profileId, family]) => {
+          Object.entries(family.versions).forEach(([version, profile]) => {
+            if (profile.status !== 'PUBLISHED') return
+            if (profile.sandbox || profile.workspace || (profile.approval_policy && profile.approval_policy !== 'none')) return
+            const option = document.createElement('option')
+            option.value = profileReference(profileId, version)
+            option.textContent = `${engineNames[profile.engine]} · Profile v${version}`
+            select.append(option)
+          })
+        })
+        select.value = oldValue
+      }
+    }
+    function renderProfileCatalog() {
+      const catalog = document.getElementById('profile-list')
+      catalog.querySelectorAll('[data-profile-family]').forEach((row) => row.remove())
+      Object.entries(profiles).forEach(([profileId, family]) => {
+        const publishedVersion = family.latestPublished
+        const published = publishedVersion ? family.versions[publishedVersion] : null
+        const drafts = Object.entries(family.versions).filter(([, version]) => version.status === 'DRAFT')
+        const history = Object.entries(family.versions).filter(([version, value]) => Number(version) !== Number(publishedVersion) && value.status === 'PUBLISHED').map(([version]) => version)
+        const row = document.createElement('div')
+        row.className = 'profile-item'
+        row.dataset.profileFamily = profileId
+        const title = document.createElement('strong')
+        const summary = document.createElement('span')
+        const action = document.createElement('button')
+        action.type = 'button'
+        action.className = 'link-button copy-profile'
+        if (published) {
+          title.textContent = `${engineNames[published.engine]} · v${publishedVersion}`
+          summary.textContent = `Profile ID：${profileId} · 模型独立选择 · ${published.sandbox ? 'Sandbox 已指定' : '受控默认沙箱'}${history.length ? ` · 历史版本 v${history.join('、')}` : ''}${drafts.length ? ` · 草稿 v${drafts.map(([version]) => version).join('、')}` : ''}`
+          action.textContent = drafts.length ? '编辑草稿' : '创建新版本'
+          action.dataset.copyProfile = profileId
+          action.dataset.copyVersion = String(drafts.length ? drafts[0][0] : publishedVersion)
+          action.dataset.editDraft = String(drafts.length > 0)
+        } else {
+          const [draftVersion, draft] = drafts[0] ?? []
+          title.textContent = `${engineNames[draft?.engine] ?? '新方案'} · DRAFT v${draftVersion ?? 1}`
+          summary.textContent = `Profile ID：${profileId} · 未发布，不会被默认值或 Deployment 使用`
+          action.textContent = '编辑草稿'
+          action.dataset.copyProfile = profileId
+          action.dataset.copyVersion = String(draftVersion ?? 1)
+          action.dataset.editDraft = 'true'
+        }
+        row.append(title, summary, action)
+        catalog.prepend(row)
+      })
+    }
+    function startProfileDraft(profileId = null, sourceVersion = null, editExisting = false) {
+      if (profileId && editExisting) {
+        const draft = profiles[profileId].versions[sourceVersion]
+        profileDraftTarget = { profileId, version: Number(sourceVersion), isNew: false }
+        document.getElementById('create-profile').textContent = '保存草稿'
+        document.getElementById('new-engine').value = draft.engine
+        document.getElementById('profile-builder-help').textContent = `编辑 Profile ID ${profileId} 的 DRAFT v${sourceVersion}。引擎可改；历史 Workspace/Sandbox/审批字段会被清除，发布后现有默认值和 Deployment 仍保持旧版本。`
+      } else if (profileId) {
+        const family = profiles[profileId]
+        const source = family.versions[sourceVersion]
+        const nextVersion = Math.max(...Object.keys(family.versions).map(Number)) + 1
+        family.versions[nextVersion] = { ...source, sandbox: '', workspace: '', approval_policy: 'none', status: 'DRAFT' }
+        profileDraftTarget = { profileId, version: nextVersion, isNew: false }
+        document.getElementById('create-profile').textContent = '保存草稿'
+        document.getElementById('new-engine').value = source.engine
+        document.getElementById('profile-builder-help').textContent = `从 v${sourceVersion} 建立同一 Profile ID（${profileId}）下的 DRAFT v${nextVersion}；历史 Workspace/Sandbox/审批字段不会复制。此版本不会自动切换默认绑定。`
+      } else {
+        profileDraftTarget = null
+        document.getElementById('create-profile').textContent = '创建并发布'
+        document.getElementById('new-engine').value = 'codex_cli'
+        document.getElementById('profile-builder-help').textContent = '创建后立即发布为 v1，随后可从该版本创建同一 Profile ID 的下一草稿。模型路由在另一处单独选择。'
+      }
+      document.getElementById('publish-profile').disabled = !profileDraftTarget || role.value !== 'admin'
+      document.querySelector('.profile-builder').open = true
+      renderProfileCatalog()
+      document.getElementById('new-engine').focus()
+    }
+    function saveProfileDraft() {
+      const engine = document.getElementById('new-engine').value
+      if (engine === 'claude_code') { setModelStatus('defaults-feedback', '该 EngineProvider 尚未通过验证。', true); return null }
+      if (!profileDraftTarget) {
+        let suffix = 1
+        let profileId = `custom_${engine}_${suffix}`
+        while (profiles[profileId]) profileId = `custom_${engine}_${++suffix}`
+        profiles[profileId] = { latestPublished: 1, versions: { 1: { engine, sandbox: '', workspace: '', status: 'PUBLISHED' } } }
+        document.getElementById('profile-builder-help').textContent = `已创建并发布 ${profileId} · v1。模型仍在 ModelRoute 中独立选择。`
+        document.getElementById('publish-profile').disabled = true
+        addPublishedProfileOptions()
+        renderProfileCatalog()
+        return { profileId, version: 1, published: true }
+      } else {
+        const target = profiles[profileDraftTarget.profileId].versions[profileDraftTarget.version]
+        Object.assign(target, { engine, sandbox: '', workspace: '', status: 'DRAFT' })
+      }
+      document.getElementById('profile-builder-help').textContent = `草稿已保存：${profileDraftTarget.profileId} · DRAFT v${profileDraftTarget.version}。编辑和保存不会改变现有默认或 Deployment。`
+      document.getElementById('publish-profile').disabled = false
+      renderProfileCatalog()
+      return profileDraftTarget
+    }
+    function publishProfileDraft() {
+      if (role.value !== 'admin') return
+      const target = saveProfileDraft()
+      if (!target) return
+      const family = profiles[target.profileId]
+      family.versions[target.version].status = 'PUBLISHED'
+      family.latestPublished = Math.max(family.latestPublished ?? 0, target.version)
+      addPublishedProfileOptions()
+      renderProfileCatalog()
+      document.getElementById('profile-builder-help').textContent = `已发布 ${target.profileId} · v${target.version}。默认值和 Deployment 仍指向原版本，需显式切换。`
+      setModelStatus('defaults-feedback', `ExecutionProfile ${target.profileId} · v${target.version} 已发布；引擎默认绑定未自动切换。`)
+      document.getElementById('profile-builder').open = false
+      profileDraftTarget = null
+    }
+    function resolveSourceText(source) { return scopeName(source) }
+    function updateEffectiveSummary() {
+      const resolved = resolveEmployee()
+      document.getElementById('effective-profile').textContent = `${getProfileLabel(resolved.profileRef)} · ${engineNames[resolved.engine]}`
+      document.getElementById('effective-engine-source').textContent = `引擎来源：${resolveSourceText(resolved.engineSource)}`
+      document.getElementById('effective-route').textContent = `模型来源：${resolveSourceText(resolved.routeSource)} · ${routeNames[resolved.route]}`
+    }
+    function refreshEmployeeSummary() {
+      const item = employeeRuntime[selectedEmployee]
+      currentSessionVersion = item.version
+      document.getElementById('employee').value = selectedEmployee
+      document.getElementById('snapshot-employee').textContent = item.name
+      activeSessionSnapshot = resolveEmployee(item)
+      document.getElementById('session-engine').textContent = engineNames[activeSessionSnapshot.engine]
+      document.getElementById('session-model').textContent = routeNames[activeSessionSnapshot.route]
+      document.getElementById('session-source').textContent = `来源 · 引擎：${scopeName(activeSessionSnapshot.engineSource)} / 模型：${scopeName(activeSessionSnapshot.routeSource)}`
+      const thinkingMode = item.thinkingMode || 'auto'
+      document.getElementById('snapshot-thinking').textContent = `${thinkingNames[thinkingMode] || thinkingNames.auto} · ${verbosityNames[item.responseVerbosity || 'standard']}答复`
+      document.getElementById('workbench-profile-state').textContent = `${item.profileRef || item.routeId ? 'Deployment 部分覆盖' : '继承默认'} · 配置 v${item.version}`
+    }
+    function openConfig() {
+      const item = employeeRuntime[selectedEmployee]
+      selectedMode = item.profileRef || item.routeId ? 'OVERRIDE' : 'INHERIT'
+      document.getElementById('dialog-title').textContent = `${item.name} · 运行配置`
+      document.getElementById('mode-inherit').setAttribute('aria-pressed', String(selectedMode === 'INHERIT'))
+      document.getElementById('mode-override').setAttribute('aria-pressed', String(selectedMode === 'OVERRIDE'))
+      document.getElementById('inherit-summary').hidden = selectedMode !== 'INHERIT'
+      document.getElementById('override-fields').hidden = selectedMode !== 'OVERRIDE'
+      document.getElementById('deployment-profile').value = item.profileRef ?? ''
+      document.getElementById('deployment-route').value = item.routeId ?? ''
+      document.getElementById('thinking-mode').value = item.thinkingMode || 'inherit'
+      document.getElementById('thinking-effort').value = item.thinkingEffort || 'auto'
+      document.getElementById('response-verbosity').value = item.responseVerbosity || 'standard'
+      updateEffectiveSummary()
+      configDialog.showModal()
+    }
+    function setMode(mode) {
+      selectedMode = mode
+      if (mode === 'INHERIT') document.getElementById('thinking-mode').value = 'inherit'
+      document.getElementById('mode-inherit').setAttribute('aria-pressed', String(mode === 'INHERIT'))
+      document.getElementById('mode-override').setAttribute('aria-pressed', String(mode === 'OVERRIDE'))
+      document.getElementById('inherit-summary').hidden = mode !== 'INHERIT'
+      document.getElementById('override-fields').hidden = mode !== 'OVERRIDE'
+      updateEffectiveSummary()
+    }
+    function getCurrentScopeBinding(scope, type) {
+      if (scope === 'user') return type === 'profile' ? userDefault : userRouteDefault
+      return type === 'profile' ? tenantDefault : tenantRouteDefault
+    }
+    function saveScopeBinding(type) {
+      const scope = document.getElementById('default-scope').value
+      if (scope === 'tenant' && role.value !== 'admin') return
+      const value = document.getElementById(type === 'profile' ? 'default-profile' : 'default-route').value || null
+      if (scope === 'user' && type === 'profile') userDefault = value
+      else if (scope === 'tenant' && type === 'profile') tenantDefault = value
+      else if (scope === 'user') userRouteDefault = value
+      else tenantRouteDefault = value
+      const label = scope === 'user' ? '个人' : '租户'
+      const dimension = type === 'profile' ? '引擎' : '模型'
+      const note = type === 'profile' ? '模型默认未更改。' : '引擎默认未更改。'
+      const effective = resolveDefault()
+      const compatibilityNote = routeIsCompatible(effective.engine, effective.route) ? '' : ' 当前用户解析出的引擎不支持此模型；默认已独立保存，新 Session 会在启动前提示不兼容，不会自动换模型。'
+      setModelStatus('defaults-feedback', `${label}${dimension}默认已保存；${note}新 Session 独立解析两项。${compatibilityNote}`, Boolean(compatibilityNote))
+      updateEffectiveSummary()
+    }
+    function showPageToDefaults() { showPage('models'); showModelTab('defaults') }
+
+    document.querySelectorAll('.side-nav button').forEach((button) => button.addEventListener('click', () => {
+      if (button.dataset.page === 'models' || button.dataset.page === 'workbench') showPage(button.dataset.page)
+      else showToast(`${button.textContent}页面在此静态原型中不展开。`)
+    }))
+    document.querySelectorAll('.tab').forEach((button) => button.addEventListener('click', () => showModelTab(button.dataset.modelTab)))
+    document.getElementById('add-connection').addEventListener('click', () => { showModelTab('connections'); showToast('这里沿用现有的添加模型连接流程。') })
+    document.getElementById('add-connection-link').addEventListener('click', () => showToast('打开现有的模型连接表单（静态演示）。'))
+    document.getElementById('create-route').addEventListener('click', () => openRouteDialog())
+    document.getElementById('route-connection').addEventListener('change', () => refreshRouteModelOptions())
+    document.getElementById('route-form').addEventListener('submit', saveModelRoute)
+    document.getElementById('cancel-route').addEventListener('click', () => routeDialog.close())
+    document.querySelectorAll('[data-create-route]').forEach((button) => button.addEventListener('click', () => {
+      showModelTab('routes')
+      openRouteDialog(null, button.dataset.createRoute, button.dataset.routeModel)
+    }))
+    document.getElementById('role').addEventListener('change', renderModelRoutes)
+    document.querySelectorAll('[data-result="connection"]').forEach((button) => button.addEventListener('click', () => setModelStatus('connection-status', '连接测试成功（模拟结果）')))
+    document.querySelectorAll('[data-result="sync"]').forEach((button) => button.addEventListener('click', () => setModelStatus('connection-status', '目录同步成功：12 个模型（模拟结果）')))
+    document.querySelectorAll('[data-result="model"]').forEach((button) => button.addEventListener('click', () => setModelStatus('route-status', '模型测试完成：成功，延迟 420ms（模拟结果）')))
+    document.getElementById('default-scope').addEventListener('change', updateDefaultScopeRole)
+    role.addEventListener('change', updateDefaultScopeRole)
+    document.getElementById('save-default-profile').addEventListener('click', () => saveScopeBinding('profile'))
+    document.getElementById('save-default-route').addEventListener('click', () => saveScopeBinding('route'))
+    document.getElementById('open-builder').addEventListener('click', () => startProfileDraft())
+    document.getElementById('profile-list').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-copy-profile]')
+      if (!button) return
+      if (role.value !== 'admin') { showToast('只有租户管理员可以创建或编辑 ExecutionProfile 草稿。'); return }
+      startProfileDraft(button.dataset.copyProfile, button.dataset.copyVersion, button.dataset.editDraft === 'true')
+    })
+    document.getElementById('profile-builder-form').addEventListener('submit', (event) => {
+      event.preventDefault()
+      if (role.value !== 'admin') return
+      const target = saveProfileDraft()
+      if (target?.published) setModelStatus('defaults-feedback', `新 Profile 已发布：${target.profileId} · v${target.version}。模型仍独立选择。`)
+      else if (target) setModelStatus('defaults-feedback', `草稿已保存：${target.profileId} · DRAFT v${target.version}。发布前不会影响任何员工。`)
+    })
+    document.getElementById('publish-profile').addEventListener('click', publishProfileDraft)
+    document.querySelectorAll('[data-default-state]').forEach((button) => button.addEventListener('click', () => {
+      const state = button.dataset.defaultState
+      const messages = { loading: '正在读取已授权的 ExecutionProfile 和 ModelRoute…', empty: '没有可用引擎或模型；请先添加连接/授权资源。', error: '保存失败：所选引擎或 ModelRoute 已停用。', saved: '默认值已保存（模拟结果）。' }
+      setModelStatus('defaults-feedback', messages[state], state === 'error' || state === 'empty')
+    }))
+    document.getElementById('open-config').addEventListener('click', openConfig)
+    document.getElementById('close-config').addEventListener('click', () => configDialog.close())
+    document.getElementById('mode-inherit').addEventListener('click', () => setMode('INHERIT'))
+    document.getElementById('mode-override').addEventListener('click', () => setMode('OVERRIDE'))
+    document.getElementById('config-form').addEventListener('submit', (event) => {
+      event.preventDefault()
+      if (role.value !== 'admin') return
+      const item = employeeRuntime[selectedEmployee]
+      item.profileRef = selectedMode === 'OVERRIDE' ? document.getElementById('deployment-profile').value || null : null
+      item.routeId = selectedMode === 'OVERRIDE' ? document.getElementById('deployment-route').value || null : null
+      item.thinkingMode = selectedMode === 'OVERRIDE' ? document.getElementById('thinking-mode').value : 'inherit'
+      item.thinkingEffort = document.getElementById('thinking-effort').value
+      item.responseVerbosity = document.getElementById('response-verbosity').value
+      item.version += 1
+      document.getElementById('workbench-profile-state').textContent = `${item.profileRef || item.routeId ? 'Deployment 部分覆盖' : '继承默认'} · 配置 v${item.version}`
+      const proposed = resolveEmployee(item)
+      const compatibility = routeIsCompatible(proposed.engine, proposed.route)
+      configDialog.close()
+      const compatibilityNote = compatibility ? '' : ' 当前引擎与模型不兼容；新 Session 会拒绝启动，不会自动切换模型。'
+      refreshEmployeeSummary()
+      document.getElementById('strategy-success').classList.add('visible')
+      updateStrategyPreview()
+      showToast(`Deployment 配置已保存。现有 Session 保留旧快照；新 Session 使用新配置。${compatibilityNote}`)
+    })
+    document.getElementById('employee').addEventListener('change', (event) => {
+      selectedEmployee = event.target.value
+      refreshEmployeeSummary()
+    })
+    document.getElementById('open-defaults-from-workbench').addEventListener('click', showPageToDefaults)
+    document.getElementById('task-form').addEventListener('submit', (event) => {
+      event.preventDefault()
+      const text = document.getElementById('task').value.trim()
+      if (!text) return
+      if (!routeIsCompatible(activeSessionSnapshot.engine, activeSessionSnapshot.route)) {
+        document.getElementById('workbench-run-status').textContent = '配置错误 · 未启动'
+        showToast('当前 Session 的引擎不支持所选模型。请新建对话并选择兼容的 ModelRoute；系统未替换模型。')
+        return
+      }
+      const eventRow = document.createElement('div')
+      eventRow.className = 'run-demo'
+      const eventMeta = document.createElement('small')
+      eventMeta.className = 'run-meta'
+      eventMeta.textContent = '你 · 2026-11-23 10:24:07'
+      eventRow.append(eventMeta, `你：${text}`)
+      document.querySelector('.timeline-demo').append(eventRow)
+      document.getElementById('workbench-run-status').textContent = `已排队 · Session v${currentSessionVersion}`
+      document.getElementById('task').value = ''
+      const phase = document.getElementById('thinking-phase')
+      phase.hidden = false
+      phase.textContent = `思考中 · ${thinkingNames[employeeRuntime[selectedEmployee].thinkingMode || 'auto']}，不展示原始思考链。`
+      document.getElementById('workbench-run-status').textContent = '思考中'
+      window.setTimeout(() => {
+        phase.hidden = true
+        document.getElementById('workbench-run-status').textContent = '已完成'
+      }, 600)
+    })
+    const strategyLabels = { inherit: '继承默认', auto: '自动思考', deep: '深度思考', off: '关闭思考' }
+    const effortLabels = { auto: '自动', low: '低', medium: '中', high: '高' }
+    const verbosityLabels = { concise: '简洁', standard: '标准', detailed: '详细' }
+    function updateStrategyPreview() {
+      const mode = document.getElementById('thinking-mode').value
+      const effort = document.getElementById('thinking-effort').value
+      const verbosity = document.getElementById('response-verbosity').value
+      const budget = document.getElementById('reasoning-budget').value
+      document.getElementById('preview-mode').textContent = strategyLabels[mode] || mode
+      document.getElementById('preview-effort').textContent = effortLabels[effort] || effort
+      document.getElementById('preview-verbosity').textContent = verbosityLabels[verbosity] || verbosity
+      document.getElementById('preview-budget').textContent = budget === 'auto' ? '自动' : `${Number(budget) / 1024}K token`
+      document.getElementById('preview-source').textContent = mode === 'inherit' && effort === 'auto' && verbosity === 'standard' && budget === 'auto' ? '个人默认 → 租户默认' : 'Deployment 覆盖'
+      document.getElementById('preview-diff').innerHTML = `<span>保存后只影响新 Session，旧对话继续使用原快照。</span><strong>${strategyLabels[mode]} · ${effortLabels[effort]} · ${verbosityLabels[verbosity]} · 预算 ${budget === 'auto' ? '自动' : `${Number(budget) / 1024}K`}</strong>`
+    }
+    ['thinking-mode', 'thinking-effort', 'response-verbosity', 'reasoning-budget'].forEach((id) => document.getElementById(id).addEventListener('change', updateStrategyPreview))
+    document.querySelectorAll('[data-panel-state]').forEach((button) => button.addEventListener('click', () => {
+      const state = button.dataset.panelState
+      document.getElementById('strategy-loading').classList.toggle('visible', state === 'loading')
+      document.getElementById('strategy-error').classList.toggle('visible', state === 'error')
+      document.getElementById('strategy-success').classList.toggle('visible', state === 'saved')
+    }))
+    document.getElementById('save-and-new').addEventListener('click', () => {
+      document.getElementById('config-form').requestSubmit()
+      window.setTimeout(() => { showPage('workbench'); showToast('策略已保存；新 Session 已准备使用真实 ModelRoute。') }, 0)
+    })
+    addPublishedProfileOptions()
+    renderModelRoutes()
+    renderProfileCatalog()
+    updateDefaultScopeRole()
+    refreshEmployeeSummary()
+    showPage('workbench')
+    window.setTimeout(() => openConfig(), 0)
+  </script>
+</body>
+</html>

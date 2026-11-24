@@ -119,6 +119,7 @@
     .conversation-demo button.active { border-color:#c5ddd7; background:var(--pine-soft); }
     .timeline-demo { display:grid; align-content:start; gap:9px; padding:13px; }
     .run-demo { padding:10px; border-radius:7px; background:#f5f8f7; font-size:10px; line-height:1.5; }
+    .run-demo .run-meta { display:block; margin-bottom:3px; color:#77858a; font-size:9px; }
     .workbench-right { padding:13px; }
     .compact-config { display:grid; gap:5px; margin:12px 0; padding:9px; border:1px solid #e1eae5; border-radius:7px; background:#fbfdfb; font-size:9px; }
     .compact-config span { color:var(--muted); }
@@ -141,6 +142,11 @@
     .inherit-summary span,.inherit-summary p { margin:0; color:var(--muted); font-size:9px; }
     .override-fields { display:grid; grid-template-columns:1fr 1fr; gap:9px; }
     .callout { padding:8px 9px; border-left:3px solid #d7a14a; border-radius:4px; color:#6f5928; background:#fff8e9; font-size:9px; line-height:1.5; }
+    .strategy-card { display:grid; gap:9px; padding:10px; border:1px solid #cfe2dc; border-radius:7px; background:#f7fbf9; }
+    .strategy-card h3 { margin:0; font-size:11px; }
+    .strategy-card .strategy-note { margin:0; color:#62767a; font-size:9px; line-height:1.5; }
+    .strategy-badge { width:max-content; padding:3px 6px; border:1px solid #e4c681; border-radius:4px; color:#7e5a1e; background:#fff7e5; font-size:8px; font-weight:700; }
+    .phase-demo { border-left:3px solid #b17a1b; color:#71551e; background:#fff8e6; }
     .dialog-footer { display:flex; justify-content:flex-end; gap:7px; }
     .status-controls { margin-top:8px; }
     .status-controls summary { color:#77858a; cursor:pointer; font-size:9px; }
@@ -249,8 +255,8 @@
           <header class="workbench-heading"><div><span class="page-head kicker">员工执行 / 工作台</span><h1>对话工作区</h1><p>任务、工具活动与审批预览在这里连续保存。</p></div><div class="employee-row"><div class="field"><label for="employee">当前员工</label><select id="employee"><option value="a">A · 订单分析员工</option><option value="b">B · 数据探索助手</option><option value="c">C · 代码协作员工（Claude Code 待启用）</option></select></div><button class="secondary" id="open-config" type="button"><span id="workbench-profile-state">Deployment 覆盖 · 配置 v2</span></button></div></header>
           <div class="workbench-grid">
             <nav class="workbench-panel workbench-left" aria-label="对话列表"><h2>最近工作</h2><div class="conversation-demo"><button class="active" type="button">数仓工单周报<br>已完成 · 10:42</button><button type="button">本周数据源巡检<br>已完成 · 昨天</button><button type="button">订单明细校验<br>等待确认 · 11/20</button></div></nav>
-            <section class="workbench-panel"><div class="card-head"><h2>当前任务 · 数仓工单周报</h2><span class="pill" id="workbench-run-status">已完成</span></div><div class="timeline-demo" id="workbench-timeline"><div class="run-demo">你：按负责人汇总最近一周未关闭的工单。</div><div class="run-demo">员工：已完成汇总，共 18 条未关闭工单，涉及 4 位负责人。</div></div><form class="defaults-form" id="task-form" style="padding:12px"><div class="field"><label for="task">提交任务</label><textarea id="task" rows="3" placeholder="描述你要完成的工作…"></textarea></div><div class="defaults-actions"><span class="route-subtitle">写操作先预览并审批</span><button class="primary" type="submit">提交任务</button></div></form></section>
-            <aside class="workbench-panel workbench-right"><h2>本次 Run 快照</h2><div class="compact-config"><span>执行引擎</span><strong id="session-engine">Codex CLI</strong><span>模型</span><strong id="session-model">北岸 OpenAI · GPT-5.4</strong><span id="session-source">来源 · 引擎：Deployment 覆盖 / 模型：个人默认</span><span>员工/工具权限</span><strong id="snapshot-employee">A · 订单分析 · Skills/Tools 固定</strong></div><button class="link-button global-shortcut" type="button" id="open-defaults-from-workbench">管理全局默认值</button></aside>
+            <section class="workbench-panel"><div class="card-head"><h2>当前任务 · 数仓工单周报</h2><span class="pill" id="workbench-run-status">已完成</span></div><div class="timeline-demo" id="workbench-timeline"><div class="run-demo"><small class="run-meta">你 · 2026-11-23 10:23:41</small>按负责人汇总最近一周未关闭的工单。</div><div class="run-demo phase-demo" id="thinking-phase" hidden><small class="run-meta">运行阶段 · 2026-11-23 10:23:42</small>思考中 · 正在整理任务约束（不展示原始思考链）。</div><div class="run-demo"><small class="run-meta">员工 · 2026-11-23 10:23:58</small>已完成汇总，共 18 条未关闭工单。</div></div><form class="defaults-form" id="task-form" style="padding:12px"><div class="field"><label for="task">提交任务</label><textarea id="task" rows="3" placeholder="描述你要完成的工作…"></textarea></div><div class="defaults-actions"><span class="route-subtitle">写操作先预览并审批</span><button class="primary" type="submit">提交任务</button></div></form></section>
+            <aside class="workbench-panel workbench-right"><h2>本次 Run 快照</h2><div class="compact-config"><span>执行引擎</span><strong id="session-engine">Codex CLI</strong><span>模型</span><strong id="session-model">北岸 OpenAI · GPT-5.4</strong><span id="session-source">来源 · 引擎：Deployment 覆盖 / 模型：个人默认</span><span>回答策略</span><strong id="snapshot-thinking">自动思考 · 标准答复</strong><span>员工/工具权限</span><strong id="snapshot-employee">A · 订单分析 · Skills/Tools 固定</strong></div><button class="link-button global-shortcut" type="button" id="open-defaults-from-workbench">管理全局默认值</button></aside>
           </div>
           <p class="demo-footer">静态原型 · 会话、员工和运行结果均为演示数据，不连接真实服务。</p>
         </section>
@@ -258,7 +264,7 @@
     </div>
   </div>
   <dialog id="config-dialog" aria-labelledby="dialog-title">
-    <form id="config-form"><div class="dialog-head"><h2 id="dialog-title">A · 订单分析员工运行配置</h2><p>ExecutionProfile 与 ModelRoute 分开选择；只覆盖一项时，另一项继续继承各自默认。</p></div><div class="dialog-body"><div class="dialog-context"><span>租户 A</span><span>Deployment · Active</span></div><div class="mode-switch"><button type="button" id="mode-inherit" aria-pressed="false">全部继承默认</button><button type="button" id="mode-override" aria-pressed="true">设置员工覆盖</button></div><div class="inherit-summary" id="inherit-summary" hidden><strong id="effective-profile">用户默认 · Codex CLI</strong><span id="effective-engine-source">引擎来源：个人默认</span><p id="effective-route">模型来源：个人默认 · 北岸 OpenAI · GPT-5.4</p><span>优先级：Deployment 字段 → 个人 → 租户 → 平台/系统</span></div><div class="dialog-fields" id="override-fields"><div class="field"><label for="deployment-profile">执行引擎（ExecutionProfile）</label><select id="deployment-profile"><option value="">继承默认引擎</option><option value="codex_profile@2">Codex CLI · Profile v2</option><option value="deepseek_profile@1">DeepSeek Harness · Profile v1</option><option value="claude_profile@1" disabled>Claude Code · 未启用</option></select></div><div class="field"><label for="deployment-route">模型（ModelRoute）</label><select id="deployment-route"><option value="">继承默认模型</option><option value="local-gpt">本地模型测试 · gpt-6.1-sol</option><option value="openai-gpt">北岸 OpenAI · GPT-5.4</option><option value="openai-gpt-mini">北岸 OpenAI Mini · GPT-5.4 Mini</option><option value="deepseek-v3">北岸 DeepSeek · V3</option></select></div></div><p class="apply-note">模型列表不会因所选引擎自动变化。Session 创建前检查兼容性；不兼容时提示修正，不自动换模型。保存只影响新 Session；已有对话保留原快照。</p><div class="dialog-actions"><button type="button" class="secondary" id="close-config">取消</button><button type="submit" class="primary">保存 Deployment 配置</button></div></div></form>
+    <form id="config-form"><div class="dialog-head"><h2 id="dialog-title">A · 订单分析员工运行配置</h2><p>ExecutionProfile、ModelRoute 与回答策略分开选择；只覆盖一项时，其他维度继续继承各自默认。</p></div><div class="dialog-body"><div class="dialog-context"><span>租户 A</span><span>Deployment · Active</span></div><div class="mode-switch"><button type="button" id="mode-inherit" aria-pressed="false">全部继承默认</button><button type="button" id="mode-override" aria-pressed="true">设置员工覆盖</button></div><div class="inherit-summary" id="inherit-summary" hidden><strong id="effective-profile">用户默认 · Codex CLI</strong><span id="effective-engine-source">引擎来源：个人默认</span><p id="effective-route">模型来源：个人默认 · 北岸 OpenAI · GPT-5.4</p><span>优先级：Deployment 字段 → 个人 → 租户 → 平台/系统</span></div><div class="dialog-fields" id="override-fields"><div class="field"><label for="deployment-profile">执行引擎（ExecutionProfile）</label><select id="deployment-profile"><option value="">继承默认引擎</option><option value="codex_profile@2">Codex CLI · Profile v2</option><option value="deepseek_profile@1">DeepSeek Harness · Profile v1</option><option value="claude_profile@1" disabled>Claude Code · 未启用</option></select></div><div class="field"><label for="deployment-route">模型（ModelRoute）</label><select id="deployment-route"><option value="">继承默认模型</option><option value="local-gpt">本地模型测试 · gpt-6.1-sol</option><option value="openai-gpt">北岸 OpenAI · GPT-5.4</option><option value="openai-gpt-mini">北岸 OpenAI Mini · GPT-5.4 Mini</option><option value="deepseek-v3">北岸 DeepSeek · V3</option></select></div></div><section class="strategy-card" aria-labelledby="strategy-title"><div class="card-head" style="min-height:auto;padding:0;border:0"><h3 id="strategy-title">回答策略</h3><span class="strategy-badge">已接入平台 API · 真实 Provider 未验证</span></div><div class="override-fields"><div class="field"><label for="thinking-mode">思考模式</label><select id="thinking-mode"><option value="inherit">继承默认策略</option><option value="auto">自动思考</option><option value="deep">深度思考</option><option value="off">关闭思考</option></select></div><div class="field"><label for="thinking-effort">推理强度</label><select id="thinking-effort"><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div><div class="field"><label for="response-verbosity">答复详细程度</label><select id="response-verbosity"><option value="standard">标准</option><option value="concise">简洁</option><option value="detailed">详细</option></select></div><div class="field"><label for="reasoning-budget">推理预算</label><select id="reasoning-budget"><option value="auto">自动</option><option value="8192">8K token</option><option value="16384">16K token</option></select></div></div><p class="strategy-note" id="thinking-capability">只显示“思考中 / 调用工具 / 生成答复”等阶段，不保存或展示原始思考链。平台已接入 runtime_options；真实 Provider 字段语义仍按 capability 结果提示。</p></section><p class="apply-note">模型列表不会因所选引擎自动变化。Session 创建前检查兼容性；不兼容时提示修正，不自动换模型。保存只影响新 Session；已有对话保留原快照。</p><div class="dialog-actions"><button type="button" class="secondary" id="close-config">取消</button><button type="submit" class="primary">保存 Deployment 配置</button></div></div></form>
   </dialog>
   <dialog id="route-dialog" aria-labelledby="route-dialog-title">
     <form id="route-form"><div class="dialog-head"><h2 id="route-dialog-title">创建模型路由</h2><p>ModelRoute 使用当前租户的连接和目录模型；变更产生新版本，旧运行快照不变。</p></div><div class="dialog-body">
@@ -300,9 +306,9 @@
     const routeNames = { 'local-gpt': '本地模型测试 · gpt-6.1-sol', 'openai-gpt': '北岸 OpenAI · GPT-5.4', 'openai-gpt-mini': '北岸 OpenAI Mini · GPT-5.4 Mini', 'deepseek-v3': '北岸 DeepSeek · V3', 'claude-sonnet': 'Claude Sonnet' }
     const routeEngines = { 'local-gpt': ['codex_cli'], 'openai-gpt': ['codex_cli'], 'openai-gpt-mini': ['codex_cli'], 'deepseek-v3': ['deepseek_harness'] }
     const employeeRuntime = {
-      a: { name: 'A · 订单分析员工', profileRef: 'codex_profile@2', routeId: null, version: 2 },
-      b: { name: 'B · 数据探索助手', profileRef: 'deepseek_profile@1', routeId: 'deepseek-v3', version: 1 },
-      c: { name: 'C · 代码协作员工（Claude Code 待启用）', profileRef: null, routeId: null, version: 1 },
+      a: { name: 'A · 订单分析员工', profileRef: 'codex_profile@2', routeId: null, thinkingMode: 'auto', thinkingEffort: 'auto', responseVerbosity: 'standard', version: 2 },
+      b: { name: 'B · 数据探索助手', profileRef: 'deepseek_profile@1', routeId: 'deepseek-v3', thinkingMode: 'deep', thinkingEffort: 'high', responseVerbosity: 'standard', version: 1 },
+      c: { name: 'C · 代码协作员工（Claude Code 待启用）', profileRef: null, routeId: null, thinkingMode: 'inherit', thinkingEffort: 'auto', responseVerbosity: 'standard', version: 1 },
     }
     let userDefault = 'codex_profile@2'
     let tenantDefault = 'deepseek_profile@1'
@@ -313,6 +319,9 @@
     let currentSessionVersion = 2
     let profileDraftTarget = null
     let activeSessionSnapshot = null
+    const thinkingNames = { inherit: '继承默认', auto: '自动思考', deep: '深度思考', off: '关闭思考' }
+    const effortNames = { auto: '自动', low: '低', medium: '中', high: '高' }
+    const verbosityNames = { concise: '简洁', standard: '标准', detailed: '详细' }
 
     function showToast(text) {
       toast.textContent = text
@@ -859,6 +868,8 @@
       document.getElementById('session-engine').textContent = engineNames[activeSessionSnapshot.engine]
       document.getElementById('session-model').textContent = routeNames[activeSessionSnapshot.route]
       document.getElementById('session-source').textContent = `来源 · 引擎：${scopeName(activeSessionSnapshot.engineSource)} / 模型：${scopeName(activeSessionSnapshot.routeSource)}`
+      const thinkingMode = item.thinkingMode || 'auto'
+      document.getElementById('snapshot-thinking').textContent = `${thinkingNames[thinkingMode] || thinkingNames.auto} · ${verbosityNames[item.responseVerbosity || 'standard']}答复`
       document.getElementById('workbench-profile-state').textContent = `${item.profileRef || item.routeId ? 'Deployment 部分覆盖' : '继承默认'} · 配置 v${item.version}`
     }
     function openConfig() {
@@ -871,11 +882,15 @@
       document.getElementById('override-fields').hidden = selectedMode !== 'OVERRIDE'
       document.getElementById('deployment-profile').value = item.profileRef ?? ''
       document.getElementById('deployment-route').value = item.routeId ?? ''
+      document.getElementById('thinking-mode').value = item.thinkingMode || 'inherit'
+      document.getElementById('thinking-effort').value = item.thinkingEffort || 'auto'
+      document.getElementById('response-verbosity').value = item.responseVerbosity || 'standard'
       updateEffectiveSummary()
       configDialog.showModal()
     }
     function setMode(mode) {
       selectedMode = mode
+      if (mode === 'INHERIT') document.getElementById('thinking-mode').value = 'inherit'
       document.getElementById('mode-inherit').setAttribute('aria-pressed', String(mode === 'INHERIT'))
       document.getElementById('mode-override').setAttribute('aria-pressed', String(mode === 'OVERRIDE'))
       document.getElementById('inherit-summary').hidden = mode !== 'INHERIT'
@@ -957,12 +972,16 @@
       const item = employeeRuntime[selectedEmployee]
       item.profileRef = selectedMode === 'OVERRIDE' ? document.getElementById('deployment-profile').value || null : null
       item.routeId = selectedMode === 'OVERRIDE' ? document.getElementById('deployment-route').value || null : null
+      item.thinkingMode = selectedMode === 'OVERRIDE' ? document.getElementById('thinking-mode').value : 'inherit'
+      item.thinkingEffort = document.getElementById('thinking-effort').value
+      item.responseVerbosity = document.getElementById('response-verbosity').value
       item.version += 1
       document.getElementById('workbench-profile-state').textContent = `${item.profileRef || item.routeId ? 'Deployment 部分覆盖' : '继承默认'} · 配置 v${item.version}`
       const proposed = resolveEmployee(item)
       const compatibility = routeIsCompatible(proposed.engine, proposed.route)
       configDialog.close()
       const compatibilityNote = compatibility ? '' : ' 当前引擎与模型不兼容；新 Session 会拒绝启动，不会自动切换模型。'
+      refreshEmployeeSummary()
       showToast(`Deployment 配置已保存。现有 Session 保留旧快照；新 Session 使用新配置。${compatibilityNote}`)
     })
     document.getElementById('employee').addEventListener('change', (event) => {
@@ -981,10 +1000,21 @@
       }
       const eventRow = document.createElement('div')
       eventRow.className = 'run-demo'
-      eventRow.textContent = `你：${text}`
+      const eventMeta = document.createElement('small')
+      eventMeta.className = 'run-meta'
+      eventMeta.textContent = '你 · 2026-11-23 10:24:07'
+      eventRow.append(eventMeta, `你：${text}`)
       document.querySelector('.timeline-demo').append(eventRow)
       document.getElementById('workbench-run-status').textContent = `已排队 · Session v${currentSessionVersion}`
       document.getElementById('task').value = ''
+      const phase = document.getElementById('thinking-phase')
+      phase.hidden = false
+      phase.textContent = `思考中 · ${thinkingNames[employeeRuntime[selectedEmployee].thinkingMode || 'auto']}，不展示原始思考链。`
+      document.getElementById('workbench-run-status').textContent = '思考中'
+      window.setTimeout(() => {
+        phase.hidden = true
+        document.getElementById('workbench-run-status').textContent = '已完成'
+      }, 600)
     })
     addPublishedProfileOptions()
     renderModelRoutes()

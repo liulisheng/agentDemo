@@ -12,6 +12,8 @@ V008 新增 `model_connections`、`model_catalog_items` 和 `model_test_records`
 
 V009 新增租户隔离的 `model_route_bindings` 和 Deployment 不可变运行配置修订表；从旧 `execution_profile_bindings`、EmployeeVersion 和 Profile 回填模型路由/Deployment 配置，保留已运行员工的本地设置。旧 Deployment 的 `model_route_snapshot_json` 按当前 `ModelRouteSnapshot` 契约回填 tenant/route/connection 版本、模型 ID、协议、端点和受控 SecretRef 对象；凭据明文不迁移，迁移后 Session 可恢复该快照。V009 还为 `deployments`/`sessions` 添加运行配置修订和来源字段，使 EmployeeVersion 的旧运行字段可空，并将 `execution_profiles.model_alias` 改为可空的历史兼容字段。新 ModelRoute 选择独立保存；迁移不创建或复制连接、模型凭据。Runner 使用两张新表及 Deployment/Session 指针字段识别 V009 部分 DDL；迁移完成后还需从 `information_schema` 验证所有新增/变更字段的中文注释、可空性、租户复合外键和配置回填。V009 down 仅可在 disposable database 演练；生产回滚保留配置修订、表和列，不能回退到要求新旧字段非空的旧二进制。
 
+V010 新增租户范围的 `runtime_strategy_bindings`，独立保存用户/租户/平台的回答策略默认值。回答策略不写入 EngineProfile 或 ModelRoute；`runtime_options_json` 只允许类型化白名单字段。V010 需要通过 `information_schema.TABLES`/`COLUMNS` 验证表和字段中文 COMMENT、租户复合外键、作用域唯一键和 down 边界。生产回滚保留已写入的策略 JSON 和配置修订；只回滚兼容代码，不删除历史绑定。
+
 升级到 V007 前先停止新 Run claim 并排空 Worker；迁移会把既有 STARTING/RUNNING/CANCELLING Run 的 lease 写入新表。如果同一 Session 仍有多个活动 Run，Session 主键冲突会使迁移停止，必须先人工核对这些 Run，不能由迁移任意选一个继续。
 
 ## 显式预检和迁移
