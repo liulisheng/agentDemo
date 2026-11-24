@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from agent_platform.domain.deployment_runtime import RuntimeOptions
+
 
 class RuntimeDefaultScope(StrEnum):
     """全局运行默认允许持久化的作用域。"""
@@ -79,3 +81,31 @@ class ModelRouteDefaultBinding:
             raise ValueError("platform scope_id must match platform_id")
         if self.status not in {"ACTIVE", "DISABLED"}:
             raise ValueError("unsupported ModelRoute binding status")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStrategyDefaultBinding:
+    """把一组回答策略绑定到用户或租户的默认作用域。"""
+
+    binding_id: str
+    platform_id: str
+    tenant_id: str
+    scope_type: RuntimeDefaultScope
+    scope_id: str
+    runtime_options: RuntimeOptions
+    status: str = "ACTIVE"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "scope_type", RuntimeDefaultScope(self.scope_type))
+        for name in ("binding_id", "platform_id", "tenant_id", "scope_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must not be blank")
+        if self.scope_type is RuntimeDefaultScope.TENANT and self.scope_id != self.tenant_id:
+            raise ValueError("tenant scope_id must match tenant_id")
+        if self.scope_type is RuntimeDefaultScope.PLATFORM and self.scope_id != self.platform_id:
+            raise ValueError("platform scope_id must match platform_id")
+        if not isinstance(self.runtime_options, RuntimeOptions):
+            raise TypeError("runtime_options must be RuntimeOptions")
+        if self.status not in {"ACTIVE", "DISABLED"}:
+            raise ValueError("unsupported RuntimeStrategy binding status")

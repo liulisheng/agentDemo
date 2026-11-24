@@ -14,6 +14,7 @@ from agent_platform.domain.common import DomainError
 from agent_platform.domain.deployment_runtime import (
     DeploymentRuntimeConfig,
     DeploymentRuntimeMode,
+    RuntimeOptions,
 )
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import ModelRouteSnapshot
@@ -138,8 +139,10 @@ class DeploymentRuntimeConfigService:
             raise DomainError("INVALID_ARGUMENT", "Sandbox 版本不能单独提供")
 
         options = dict(runtime_options or {})
-        if options:
-            raise DomainError("INVALID_ARGUMENT", "当前没有已启用的高级运行参数")
+        try:
+            RuntimeOptions.from_mapping(options)
+        except (TypeError, ValueError) as error:
+            raise DomainError("INVALID_ARGUMENT", str(error)) from error
 
         route_snapshot = self._model_route_snapshot(identity, model_route_id) if model_route_id else None
         current_version = deployment.runtime_config_version or 0

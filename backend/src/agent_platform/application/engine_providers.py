@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
 from agent_platform.domain.catalog import ExecutionProfile
 from agent_platform.domain.common import DomainError
+from agent_platform.domain.deployment_runtime import ReasoningMode, RuntimeOptions
 from agent_platform.domain.model_routes import ModelRouteSnapshot
 from agent_platform.ports.runtime import RuntimeAdapter, RuntimeCapabilities
 
@@ -25,6 +26,10 @@ class EngineProviderCapabilities:
     approvals: bool = False
     model_route_required: bool = False
     route_secret_required: bool = False
+    reasoning: bool = False
+    reasoning_effort: bool = False
+    reasoning_budget: bool = False
+    max_output_tokens: bool = False
 
     @classmethod
     def from_runtime(cls, value: RuntimeCapabilities) -> EngineProviderCapabilities:
@@ -38,6 +43,10 @@ class EngineProviderCapabilities:
             workspace=value.workspace,
             sandbox=value.sandbox,
             approvals=value.approvals,
+            reasoning=value.reasoning,
+            reasoning_effort=value.reasoning_effort,
+            reasoning_budget=value.reasoning_budget,
+            max_output_tokens=value.max_output_tokens,
         )
 
     def to_public_dict(self) -> dict[str, bool]:
@@ -53,6 +62,10 @@ class EngineProviderCapabilities:
             "approvals": self.approvals,
             "model_route_required": self.model_route_required,
             "route_secret_required": self.route_secret_required,
+            "reasoning": self.reasoning,
+            "reasoning_effort": self.reasoning_effort,
+            "reasoning_budget": self.reasoning_budget,
+            "max_output_tokens": self.max_output_tokens,
         }
 
 
@@ -201,6 +214,10 @@ class EngineProviderRegistry:
                     workspace=runtime_capabilities.workspace,
                     sandbox=runtime_capabilities.sandbox,
                     approvals=runtime_capabilities.approvals,
+                    reasoning=runtime_capabilities.reasoning,
+                    reasoning_effort=runtime_capabilities.reasoning_effort,
+                    reasoning_budget=runtime_capabilities.reasoning_budget,
+                    max_output_tokens=runtime_capabilities.max_output_tokens,
                     model_route_required=True,
                     route_secret_required=True,
                 ),
@@ -286,6 +303,7 @@ class EngineProviderRegistry:
         *,
         requires_tools: bool = False,
         requires_mcp: bool = False,
+        runtime_options: RuntimeOptions | None = None,
     ) -> RegisteredEngineProvider:
         """在新 Session 前校验选定的 ModelRoute 协议与 Profile 声明能力。"""
 
@@ -317,6 +335,16 @@ class EngineProviderRegistry:
                 },
             )
         missing: list[str] = []
+        if runtime_options is not None:
+            effective = runtime_options.resolve()
+            if effective.reasoning_mode is ReasoningMode.DEEP and not provider.capabilities.reasoning:
+                missing.append("reasoning")
+            if effective.reasoning_effort is not None and effective.reasoning_effort.value != "AUTO" and not provider.capabilities.reasoning_effort:
+                missing.append("reasoning_effort")
+            if effective.reasoning_budget_tokens is not None and not provider.capabilities.reasoning_budget:
+                missing.append("reasoning_budget")
+            if effective.max_output_tokens is not None and not provider.capabilities.max_output_tokens:
+                missing.append("max_output_tokens")
         if profile.tool_policy and not provider.capabilities.tool_calls:
             missing.append("tool_policy")
         if requires_tools and not provider.capabilities.tool_calls:

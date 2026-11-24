@@ -11,6 +11,7 @@ from typing import Any
 from agent_platform.domain.common import DomainError
 from agent_platform.domain.context import ContextSnapshot, ContextSource, ContextSourceType
 from agent_platform.domain.conversations import Message, MessageSource
+from agent_platform.domain.deployment_runtime import RuntimeOptions
 from agent_platform.domain.execution import RuntimeReference, RuntimeStatus, UsageRecord
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import ModelRouteSnapshot
@@ -32,7 +33,7 @@ from agent_platform.domain.usage import (
     UsageStatus,
 )
 from agent_platform.ports.conversation_repository import StoredMessage
-from agent_platform.ports.execution_repository import RunClaim, RunInputRef
+from agent_platform.ports.execution_repository import AssistantMessageRef, RunClaim, RunInputRef
 
 
 class _SessionRuntimeLeaseLost(RuntimeError):
@@ -69,6 +70,7 @@ def _snapshot_data(snapshot: RunSnapshot) -> dict[str, object]:
         "runtime_config_version": snapshot.runtime_config_version,
         "runtime_profile_source": snapshot.runtime_profile_source,
         "runtime_model_route_source": snapshot.runtime_model_route_source,
+        "runtime_options": snapshot.runtime_options.to_mapping(include_none=True),
         "model_route_snapshot": (
             snapshot.model_route_snapshot.to_snapshot_dict()
             if snapshot.model_route_snapshot is not None
@@ -227,6 +229,7 @@ class MySqlExecutionRepository:
                                 if session.model_route_snapshot is not None
                                 else None
                             ),
+                            "runtime_options": session.runtime_options.to_mapping(include_none=True),
                         }
                     ),
                     session.deployment_id,
@@ -250,6 +253,7 @@ class MySqlExecutionRepository:
                             "runtime_config_version": session.runtime_config_version,
                             "runtime_profile_source": session.runtime_profile_source,
                             "runtime_model_route_source": session.runtime_model_route_source,
+                            "runtime_options": session.runtime_options.to_mapping(include_none=True),
                         }
                     ),
                 ),
@@ -331,6 +335,9 @@ class MySqlExecutionRepository:
                 if isinstance(metadata, dict) and metadata.get("model_alias") is not None
                 else None
             ),
+            runtime_options=RuntimeOptions.from_mapping(
+                metadata.get("runtime_options", {}) if isinstance(metadata, dict) else {}
+            ).resolve(),
         )
 
     def save_run(self, identity: IdentityContext, run: RunRecord, idempotency_key: str) -> None:
@@ -1111,6 +1118,101 @@ class MySqlExecutionRepository:
 
         return self.complete_run(identity, run, fencing_token, (), None)
 
+    @staticmethod
+    def _insert_assistant_message(
+        cursor: Any,
+        identity: IdentityContext,
+        run: RunRecord,
+        message: AssistantMessageRef,
+    ) -> None:
+        """在 Run 终态事务内追加助手消息；同一 Run 重入时复用已有行。"""
+
+        if (
+            message.message_id != run.run_id
+            or message.conversation_id.strip() == ""
+            or message.sender_id.strip() == ""
+            or message.content_ref.strip() == ""
+            or len(message.content_sha256) != 64
+            or message.byte_length <= 0
+            or message.content_type.strip() == ""
+        ):
+            raise DomainError("INVALID_ARGUMENT", "助手消息引用不完整")
+        cursor.execute(
+            "SELECT message_id, conversation_id, platform_id, tenant_id, sender_id, source, "
+            "content_ref, content_sha256, byte_length, content_type, sequence_no, routing_depth, created_at "
+            "FROM messages WHERE platform_id=%s AND tenant_id=%s AND run_id=%s "
+            "AND role='ASSISTANT' AND source='agent' LIMIT 1 FOR UPDATE",
+            (identity.platform_id, identity.tenant_id, run.run_id),
+        )
+        if cursor.fetchone() is not None:
+            return
+        cursor.execute(
+            "SELECT 1 FROM conversations WHERE platform_id=%s AND tenant_id=%s AND conversation_id=%s",
+            (identity.platform_id, identity.tenant_id, message.conversation_id),
+        )
+        if cursor.fetchone() is None:
+            raise DomainError("RESOURCE_NOT_FOUND", "助手消息所属 Conversation 不存在")
+        cursor.execute(
+            "SELECT last_message_sequence FROM sessions "
+            "WHERE platform_id=%s AND tenant_id=%s AND session_id=%s FOR UPDATE",
+            (identity.platform_id, identity.tenant_id, run.session_id),
+        )
+        session = cursor.fetchone()
+        if session is None:
+            raise DomainError("RESOURCE_NOT_FOUND", "助手消息所属 Session 不存在")
+        sequence = int(session[0]) + 1
+        cursor.execute(
+            "INSERT INTO messages "
+            "(platform_id,tenant_id,message_id,session_id,run_id,sequence_no,role,status,"
+            "content_ref,content_sha256,byte_length,content_type,sender_id,source,routing_depth,"
+            "conversation_id,retention_policy) "
+            "VALUES (%s,%s,%s,%s,%s,%s,'ASSISTANT','COMPLETE',%s,%s,%s,%s,%s,'agent',0,%s,'conversation')",
+            (
+                identity.platform_id,
+                identity.tenant_id,
+                message.message_id,
+                run.session_id,
+                run.run_id,
+                sequence,
+                message.content_ref,
+                message.content_sha256,
+                message.byte_length,
+                message.content_type,
+                message.sender_id,
+                message.conversation_id,
+            ),
+        )
+        cursor.execute(
+            "UPDATE sessions SET last_message_sequence=%s WHERE platform_id=%s "
+            "AND tenant_id=%s AND session_id=%s",
+            (sequence, identity.platform_id, identity.tenant_id, run.session_id),
+        )
+        cursor.execute(
+            "UPDATE conversations SET updated_at=CURRENT_TIMESTAMP(6) "
+            "WHERE platform_id=%s AND tenant_id=%s AND conversation_id=%s",
+            (identity.platform_id, identity.tenant_id, message.conversation_id),
+        )
+
+    def complete_run_with_assistant_message(
+        self,
+        identity: IdentityContext,
+        run: RunRecord,
+        fencing_token: int,
+        spans: Sequence[TraceSpan],
+        usage: UsageRecord | None,
+        assistant_message: AssistantMessageRef,
+    ) -> bool:
+        """以兼容端口保留旧仓储实现，同时把助手消息纳入同一终态事务。"""
+
+        return self.complete_run(
+            identity,
+            run,
+            fencing_token,
+            spans,
+            usage,
+            assistant_message=assistant_message,
+        )
+
     def complete_run(
         self,
         identity: IdentityContext,
@@ -1118,6 +1220,7 @@ class MySqlExecutionRepository:
         fencing_token: int,
         spans: Sequence[TraceSpan],
         usage: UsageRecord | None,
+        assistant_message: AssistantMessageRef | None = None,
     ) -> bool:
         """在同一事务提交 Run 终态、Trace 索引、Usage 台账和 Runtime 结果引用。"""
 
@@ -1146,6 +1249,8 @@ class MySqlExecutionRepository:
             if cursor.rowcount != 1:
                 return False
             self._touch_conversations_for_run(cursor, identity, run.run_id)
+            if assistant_message is not None:
+                self._insert_assistant_message(cursor, identity, run, assistant_message)
             self._inject_failure("after_run_update")
             for span in spans:
                 run_id = span.run_id or run.run_id
@@ -1180,9 +1285,9 @@ class MySqlExecutionRepository:
                 cursor.execute(
                     "INSERT INTO usage_ledger "
                     "(platform_id, tenant_id, call_id, run_id, session_id, user_id, employee_id, model_route_id, "
-                    "provider_request_id, input_tokens, output_tokens, total_tokens, cost_amount, currency, pricing_version, "
+                    "provider_request_id, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, cost_amount, currency, pricing_version, "
                     "usage_status, estimation_method) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
                         identity.platform_id,
                         identity.tenant_id,
@@ -1195,6 +1300,8 @@ class MySqlExecutionRepository:
                         usage.provider_request_id,
                         usage.input_tokens,
                         usage.output_tokens,
+                        0,
+                        usage.reasoning_tokens,
                         usage.total_tokens,
                         usage.cost_amount,
                         usage.currency,
@@ -1374,7 +1481,7 @@ class MySqlExecutionRepository:
     def get_usage_record(self, identity: IdentityContext, run_id: str) -> UsageRecord:
         with self._reader() as (_, cursor):
             cursor.execute(
-                "SELECT input_tokens, output_tokens, total_tokens, usage_status, estimation_method, "
+                "SELECT input_tokens, output_tokens, reasoning_tokens, total_tokens, usage_status, estimation_method, "
                 "cost_amount, currency, pricing_version, provider_request_id FROM usage_ledger "
                 "WHERE platform_id=%s AND tenant_id=%s AND run_id=%s ORDER BY call_id LIMIT 1",
                 (identity.platform_id, identity.tenant_id, run_id),
@@ -1382,17 +1489,18 @@ class MySqlExecutionRepository:
             row = cursor.fetchone()
         if row is None:
             return UsageRecord(0, 0, 0, source="UNAVAILABLE", estimated=True)
-        status = UsageStatus(str(row[3]))
+        status = UsageStatus(str(row[4]))
         return UsageRecord(
             input_tokens=int(row[0]),
             output_tokens=int(row[1]),
-            total_tokens=int(row[2]),
-            source=str(row[4] or status.value),
+            total_tokens=int(row[3]),
+            reasoning_tokens=int(row[2]),
+            source=str(row[5] or status.value),
             estimated=status is not UsageStatus.EXACT,
-            cost_amount=float(row[5]),
-            currency=str(row[6]),
-            pricing_version=str(row[7]),
-            provider_request_id=str(row[8]) if row[8] is not None else None,
+            cost_amount=float(row[6]),
+            currency=str(row[7]),
+            pricing_version=str(row[8]),
+            provider_request_id=str(row[9]) if row[9] is not None else None,
         )
 
     def list_usage_records(self, identity: IdentityContext, run_id: str, *, limit: int = 100) -> tuple[ModelCallRecord, ...]:
@@ -1610,6 +1718,9 @@ class MySqlExecutionRepository:
                 if snapshot_data.get("runtime_model_route_source") is not None
                 else None
             ),
+            runtime_options=RuntimeOptions.from_mapping(
+                snapshot_data.get("runtime_options", {})
+            ).resolve(),
             hub_resource_refs=tuple(
                 HubResourceSnapshot(
                     local_resource_type=str(item["local_resource_type"]),

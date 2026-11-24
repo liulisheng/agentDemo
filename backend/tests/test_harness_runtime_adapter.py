@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import pytest
 
 from agent_platform.adapters.runtime.harness import HarnessRuntimeAdapter
+from agent_platform.domain.deployment_runtime import RuntimeOptions
 from agent_platform.domain.model_routes import ModelRouteSnapshot, SecretRef
 from agent_platform.domain.observability import SkillFilePackageSnapshot, SkillFileSnapshotEntry
 from agent_platform.ports.runtime import (
@@ -155,6 +156,91 @@ def test_harness_adapter_passes_pinned_model_config_without_secret_reference() -
     assert result.usage.pricing_version == "estimated-v1"
 
 
+def test_harness_adapter_maps_canonical_runtime_options_to_engine_request() -> None:
+    harness = FakeHarness()
+    adapter = HarnessRuntimeAdapter(
+        lambda _engine_request, _runtime_request: harness,
+        engine_name="deepseek",
+    )
+
+    adapter.run(
+        RuntimeRequest(
+            run_id="strategy-run",
+            session_ref=None,
+            prompt="分析任务",
+            skill_instructions=(),
+            allowed_tools=(),
+            runtime_options=RuntimeOptions.from_mapping(
+                {
+                    "reasoning_mode": "DEEP",
+                    "reasoning_effort": "HIGH",
+                    "reasoning_budget_tokens": 8192,
+                    "response_verbosity": "DETAILED",
+                    "max_output_tokens": 4096,
+                }
+            ),
+        )
+    )
+
+    assert harness.last_request.reasoning_effort == "high"
+    assert harness.last_request.reasoning_budget_tokens == 8192
+    assert harness.last_request.response_verbosity == "detailed"
+    assert harness.last_request.max_tokens == 4096
+
+
+def test_harness_adapter_does_not_send_auto_effort_to_provider() -> None:
+    harness = FakeHarness()
+    adapter = HarnessRuntimeAdapter(
+        lambda _engine_request, _runtime_request: harness,
+        engine_name="deepseek",
+    )
+
+    adapter.run(
+        RuntimeRequest(
+            run_id="auto-effort-run",
+            session_ref=None,
+            prompt="分析任务",
+            skill_instructions=(),
+            allowed_tools=(),
+            runtime_options=RuntimeOptions.from_mapping({"reasoning_effort": "AUTO"}),
+        )
+    )
+
+    assert harness.last_request.reasoning_effort is None
+
+
+def test_harness_adapter_normalizes_provider_strategy_rejection() -> None:
+    class RejectingHarness(FakeHarness):
+        def run(self, request, on_event=None):
+            raise RuntimeError('provider "openai-compatible" does not support reasoning effort "high"')
+
+    adapter = HarnessRuntimeAdapter(
+        lambda _engine_request, _runtime_request: RejectingHarness(),
+        engine_name="deepseek",
+    )
+    with pytest.raises(Exception) as error:
+        adapter.run(
+            RuntimeRequest(
+                run_id="strategy-rejected-run",
+                session_ref=None,
+                prompt="分析任务",
+                skill_instructions=(),
+                allowed_tools=(),
+                runtime_options=RuntimeOptions.from_mapping({"reasoning_effort": "HIGH"}),
+            )
+        )
+    assert getattr(error.value, "code", None) == "ENGINE_CAPABILITY_UNSUPPORTED"
+
+
+def test_harness_adapter_advertises_strategy_capabilities() -> None:
+    adapter = HarnessRuntimeAdapter(lambda _engine_request, _runtime_request: FakeHarness(), engine_name="deepseek")
+
+    assert adapter.capabilities.reasoning is True
+    assert adapter.capabilities.reasoning_effort is True
+    assert adapter.capabilities.reasoning_budget is True
+    assert adapter.capabilities.max_output_tokens is True
+
+
 def test_harness_adapter_normalizes_upstream_usage_and_request_id() -> None:
     class EngineWithUpstreamUsage(FakeHarness):
         def run(self, request, on_event=None):
@@ -168,6 +254,7 @@ def test_harness_adapter_normalizes_upstream_usage_and_request_id() -> None:
                     "usage": {
                         "prompt_tokens": 13,
                         "completion_tokens": 5,
+                    "reasoning_tokens": 3,
                         "total_tokens": 18,
                         "api_key": "must-not-escape",
                     },
@@ -192,6 +279,7 @@ def test_harness_adapter_normalizes_upstream_usage_and_request_id() -> None:
     assert result.usage.input_tokens == 13
     assert result.usage.output_tokens == 5
     assert result.usage.total_tokens == 18
+    assert result.usage.reasoning_tokens == 3
     assert result.usage.source == "UPSTREAM"
     assert result.usage.estimated is False
     assert result.usage.provider_request_id == "req-provider-123"

@@ -4,6 +4,7 @@ import pytest
 
 from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
 from agent_platform.adapters.runtime.harness import HarnessRuntimeAdapter
+from agent_platform.domain.deployment_runtime import RuntimeOptions
 from agent_platform.domain.execution import RuntimeStatus
 from agent_platform.ports.runtime import (
     RuntimeEmployeeContext,
@@ -51,6 +52,27 @@ def test_fake_runtime_denies_tool_outside_allowed_intersection() -> None:
     assert result.status is RuntimeStatus.FAILED
     assert result.events[1].event_type == "tool_denied"
     assert result.events[1].payload["error_category"] == "POLICY_DENIED"
+
+
+def test_fake_runtime_normalizes_reasoning_phase_events() -> None:
+    runtime = FakeRuntimeAdapter()
+
+    result = runtime.run(
+        RuntimeRequest(
+            run_id="run-thinking",
+            session_ref=None,
+            prompt="分析任务",
+            skill_instructions=(),
+            allowed_tools=(),
+            runtime_options=RuntimeOptions.from_mapping({"reasoning_mode": "DEEP"}),
+        )
+    )
+
+    assert [event.event_type for event in result.events[:3]] == [
+        "run_started",
+        "reasoning_started",
+        "reasoning_completed",
+    ]
 
 
 def test_fake_runtime_rejects_unknown_session() -> None:

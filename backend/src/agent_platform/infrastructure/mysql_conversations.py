@@ -176,6 +176,7 @@ class MySqlConversationRepository(ConversationRepository):
         value: Any,
         *,
         session_id: str,
+        run_id: str | None = None,
         content_ref: str,
         content_sha256: str,
         byte_length: int,
@@ -200,18 +201,30 @@ class MySqlConversationRepository(ConversationRepository):
                 raise self._not_found("conversation")
             sequence = int(session[0]) + 1
             role = "USER" if value.source is MessageSource.USER else "ASSISTANT"
-            sender_id = value.sender_id if value.source is MessageSource.USER else identity.user_id
+            sender_id = value.sender_id if value.source in {MessageSource.USER, MessageSource.AGENT} else identity.user_id
+            if run_id is not None and value.source is MessageSource.AGENT:
+                cursor.execute(
+                    "SELECT message_id, conversation_id, platform_id, tenant_id, sender_id, source, "
+                    "content_ref, content_sha256, byte_length, content_type, sequence_no, routing_depth, created_at "
+                    "FROM messages WHERE platform_id=%s AND tenant_id=%s AND run_id=%s "
+                    "AND role='ASSISTANT' AND source='agent' LIMIT 1",
+                    (identity.platform_id, identity.tenant_id, run_id),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    return self._stored_message(existing)
             cursor.execute(
                 "INSERT INTO messages "
                 "(platform_id, tenant_id, message_id, session_id, run_id, sequence_no, role, status, "
                 "content_ref, content_sha256, byte_length, content_type, sender_id, source, routing_depth, "
                 "conversation_id, retention_policy) "
-                "VALUES (%s,%s,%s,%s,NULL,%s,%s,'COMPLETE',%s,%s,%s,%s,%s,%s,%s,%s,'conversation')",
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,'COMPLETE',%s,%s,%s,%s,%s,%s,%s,%s,'conversation')",
                 (
                     identity.platform_id,
                     identity.tenant_id,
                     value.message_id,
                     session_id,
+                    run_id,
                     sequence,
                     role,
                     content_ref,

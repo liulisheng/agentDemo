@@ -407,8 +407,8 @@ class MySqlMcpRepository(McpRepository):
                 cursor.execute(
                     "INSERT INTO usage_ledger "
                     "(platform_id, tenant_id, call_id, run_id, session_id, user_id, employee_id, model_route_id, "
-                    "input_tokens, output_tokens, total_tokens, cost_amount, currency, pricing_version, "
-                    "usage_status, estimation_method) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, cost_amount, currency, pricing_version, "
+                    "usage_status, estimation_method) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
                         identity.platform_id,
                         identity.tenant_id,
@@ -420,6 +420,8 @@ class MySqlMcpRepository(McpRepository):
                         str(run_row[5]) if run_row[5] is not None else None,
                         usage.input_tokens,
                         usage.output_tokens,
+                        0,
+                        usage.reasoning_tokens,
                         usage.total_tokens,
                         usage.cost_amount,
                         usage.currency,

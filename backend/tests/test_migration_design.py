@@ -98,3 +98,19 @@ def test_v009_runtime_configuration_migration_has_tenant_scoped_schema_and_rever
 
     for table in ("model_route_bindings", "deployment_runtime_config_versions"):
         assert f"DROP TABLE IF EXISTS {table}" in rollback
+
+
+def test_v010_runtime_strategy_defaults_has_chinese_comments_and_reversal() -> None:
+    root = Path(__file__).parents[2]
+    up = root / "docs/migrations/V010__runtime_strategy_defaults.sql"
+    down = root / "docs/migrations/V010__runtime_strategy_defaults.down.sql"
+    text = up.read_text(encoding="utf-8")
+    rollback = down.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE runtime_strategy_bindings" in text
+    assert "runtime_options_json JSON NOT NULL COMMENT" in text
+    assert "uk_runtime_strategy_scope" in text
+    assert "fk_runtime_strategy_tenant" in text
+    assert "ck_runtime_strategy_scope" in text
+    assert "INSERT INTO schema_version (version) VALUES (10)" in text
+    assert "DROP TABLE IF EXISTS runtime_strategy_bindings" in rollback

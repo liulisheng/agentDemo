@@ -105,10 +105,30 @@ def test_session_resolves_engine_and_model_independently_and_pins_sources() -> N
     )
     assert deployment.status_code == 201
     deployment_id = deployment.json()["id"]
+    invalid_options = client.put(
+        f"/api/v1/deployments/{deployment_id}/runtime-config",
+        headers=admin,
+        json={
+            "expected_config_version": None,
+            "mode": "INHERIT",
+            "runtime_options": {"unknown_option": True},
+        },
+    )
+    assert invalid_options.status_code == 422
+    assert invalid_options.json()["code"] == "INVALID_ARGUMENT"
     configured = client.put(
         f"/api/v1/deployments/{deployment_id}/runtime-config",
         headers=admin,
-        json={"expected_config_version": None, "mode": "INHERIT"},
+        json={
+            "expected_config_version": None,
+            "mode": "INHERIT",
+            "runtime_options": {
+                "reasoning_mode": "DEEP",
+                "reasoning_effort": "HIGH",
+                "response_verbosity": "STANDARD",
+                "max_tool_steps": 12,
+            },
+        },
     )
     assert configured.status_code == 200
 
@@ -124,6 +144,8 @@ def test_session_resolves_engine_and_model_independently_and_pins_sources() -> N
     assert first["model_route_id"] == route_gpt
     assert first["runtime_profile_source"] == "USER_DEFAULT"
     assert first["runtime_model_route_source"] == "TENANT_DEFAULT"
+    assert first["runtime_options"]["reasoning_mode"] == "DEEP"
+    assert first["runtime_options"]["reasoning_effort"] == "HIGH"
 
     first_run = client.post(
         f"/api/v1/sessions/{first['id']}/runs",
@@ -135,6 +157,26 @@ def test_session_resolves_engine_and_model_independently_and_pins_sources() -> N
     assert first_run.json()["snapshot"]["model_route_snapshot"]["model_id"] == "gpt-local"
     assert first_run.json()["snapshot"]["runtime_profile_source"] == "USER_DEFAULT"
     assert first_run.json()["snapshot"]["runtime_model_route_source"] == "TENANT_DEFAULT"
+    assert first_run.json()["snapshot"]["runtime_options"]["reasoning_mode"] == "DEEP"
+    assert first_run.json()["snapshot"]["runtime_options"]["max_tool_steps"] == 12
+
+    updated_config = client.put(
+        f"/api/v1/deployments/{deployment_id}/runtime-config",
+        headers=admin,
+        json={
+            "expected_config_version": 1,
+            "mode": "INHERIT",
+            "runtime_options": {"reasoning_mode": "OFF"},
+        },
+    )
+    assert updated_config.status_code == 200, updated_config.text
+    updated_session = client.post(
+        "/api/v1/sessions",
+        headers=admin,
+        json={"deployment_id": deployment_id},
+    )
+    assert updated_session.status_code == 201, updated_session.text
+    assert updated_session.json()["runtime_options"]["reasoning_mode"] == "OFF"
 
     assert client.put(
         "/api/v1/execution-profile-bindings/user",
@@ -180,6 +222,7 @@ def test_session_resolves_engine_and_model_independently_and_pins_sources() -> N
     assert old_session_run.json()["snapshot"]["execution_profile_id"] == profile_codex.json()["id"]
     assert old_session_run.json()["snapshot"]["model_route_id"] == route_gpt
     assert old_session_run.json()["snapshot"]["model_route_snapshot"]["model_id"] == "gpt-local"
+    assert old_session_run.json()["snapshot"]["runtime_options"]["reasoning_mode"] == "DEEP"
     client.close()
 
 

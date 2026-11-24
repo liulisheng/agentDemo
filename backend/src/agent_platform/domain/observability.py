@@ -9,6 +9,7 @@ from enum import StrEnum
 TraceId = str
 
 from .context import ContextSnapshot
+from .deployment_runtime import RuntimeOptions
 from .execution import RuntimeReference, RuntimeStatus, UsageRecord
 from .model_routes import ModelRouteSnapshot
 
@@ -101,6 +102,7 @@ class RunSnapshot:
     runtime_config_version: int | None = None
     runtime_profile_source: str | None = None
     runtime_model_route_source: str | None = None
+    runtime_options: RuntimeOptions = field(default_factory=RuntimeOptions.defaults)
     hub_resource_refs: tuple[HubResourceSnapshot, ...] = ()
     skill_file_packages: tuple[SkillFilePackageSnapshot, ...] = ()
 
@@ -133,6 +135,7 @@ class SessionRecord:
     runtime_config_version: int | None = None
     runtime_profile_source: str | None = None
     runtime_model_route_source: str | None = None
+    runtime_options: RuntimeOptions = field(default_factory=RuntimeOptions.defaults)
     engine_name: str = ""
     runtime_session_ref: str | None = None
     harness_home_ref: str | None = None

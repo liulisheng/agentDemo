@@ -14,6 +14,7 @@ from agent_platform.domain.execution import RuntimeStatus
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.observability import RunRecord, RunSnapshot
 from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
+from agent_platform.ports.execution_repository import AssistantMessageRef
 
 
 class _Cursor:
@@ -240,3 +241,50 @@ def test_turn_submission_rejects_message_object_digest_mismatch_before_sql() -> 
 
     assert mismatch.value.code == "INVALID_ARGUMENT"
     assert query.statements == []
+
+
+class _AssistantCursor:
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, tuple[object, ...] | None]] = []
+        self.rowcount = 0
+
+    def execute(self, statement: str, parameters: tuple[object, ...] | None = None) -> None:
+        self.statements.append((statement, parameters))
+        self.rowcount = 1
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        statement = self.statements[-1][0]
+        if "FROM messages" in statement:
+            return None
+        if "FROM conversations" in statement:
+            return (1,)
+        if "FROM sessions" in statement:
+            return (5,)
+        return None
+
+
+def test_terminal_run_can_append_an_idempotent_assistant_message_reference() -> None:
+    identity, run, _ = _request()
+    cursor = _AssistantCursor()
+    assistant = AssistantMessageRef(
+        message_id=run.run_id,
+        conversation_id="conversation-1",
+        sender_id=identity.user_id,
+        content_ref="object:answer-1",
+        content_sha256="a" * 64,
+        byte_length=7,
+        content_type="text/plain; charset=utf-8",
+    )
+
+    MySqlExecutionRepository._insert_assistant_message(cursor, identity, run, assistant)
+
+    insert = next(
+        statement
+        for statement, _ in cursor.statements
+        if statement.startswith("INSERT INTO messages")
+    )
+    assert "'ASSISTANT'" in insert
+    assert any(
+        "UPDATE sessions SET last_message_sequence" in statement
+        for statement, _ in cursor.statements
+    )

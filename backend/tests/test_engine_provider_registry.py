@@ -10,6 +10,7 @@ from agent_platform.application.engine_providers import (
 )
 from agent_platform.domain.catalog import ExecutionProfile
 from agent_platform.domain.common import DomainError
+from agent_platform.domain.deployment_runtime import RuntimeOptions
 from agent_platform.domain.model_routes import ModelRouteSnapshot, SecretRef
 
 
@@ -135,6 +136,57 @@ def test_registry_rejects_an_unavailable_sandbox_requirement() -> None:
 
     assert unsupported.value.code == "ENGINE_CAPABILITY_UNSUPPORTED"
     assert unsupported.value.details["capability"] == "sandbox"
+
+
+def test_registry_rejects_deep_reasoning_when_provider_does_not_support_it() -> None:
+    registry = EngineProviderRegistry()
+    registry.register(
+        "codex_cli",
+        FakeRuntimeAdapter(),
+        display_name="Codex CLI",
+        model_protocols={"openai-responses"},
+        capabilities=EngineProviderCapabilities(model_route_required=True),
+    )
+    profile = ExecutionProfile(
+        profile_id="codex-profile",
+        tenant_id="tenant-a",
+        engine_name="codex_cli",
+    ).publish()
+
+    with pytest.raises(DomainError) as unsupported:
+        registry.validate(
+            profile,
+            _route("openai-responses"),
+            runtime_options=RuntimeOptions.from_mapping({"reasoning_mode": "DEEP"}),
+        )
+
+    assert unsupported.value.code == "ENGINE_CAPABILITY_UNSUPPORTED"
+    assert unsupported.value.details["capability"] == "reasoning"
+
+
+def test_fake_provider_can_validate_reasoning_options_for_deterministic_contract_tests() -> None:
+    registry = EngineProviderRegistry()
+    registry.register(
+        "fake",
+        FakeRuntimeAdapter(),
+        display_name="Fake Runtime",
+        model_protocols={"openai-chat-completions"},
+    )
+    profile = ExecutionProfile(
+        profile_id="fake-profile",
+        tenant_id="tenant-a",
+        engine_name="fake",
+    ).publish()
+
+    provider = registry.validate(
+        profile,
+        _route("openai-chat-completions"),
+        runtime_options=RuntimeOptions.from_mapping(
+            {"reasoning_mode": "DEEP", "reasoning_effort": "HIGH", "reasoning_budget_tokens": 8192}
+        ),
+    )
+
+    assert provider.engine_name == "fake"
 
 
 def test_codex_provider_requires_a_supported_route_with_recipient_credentials(tmp_path) -> None:

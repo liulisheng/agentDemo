@@ -284,6 +284,11 @@ class CodexAppServerRuntimeAdapter:
         mcp=False,
         workspace=False,
         sandbox=False,
+        reasoning=True,
+        reasoning_effort=True,
+        # Codex app-server 当前没有经过契约验证的预算字段，保存时必须拒绝预算值。
+        reasoning_budget=False,
+        max_output_tokens=True,
     )
 
     def __init__(
@@ -553,12 +558,21 @@ class CodexAppServerRuntimeAdapter:
             )
         session = self._get_session(request)
         with session.lock:
+            turn_params: dict[str, object] = {
+                "threadId": session.thread_id,
+                "input": [{"type": "text", "text": request.prompt}],
+            }
+            if request.runtime_options is not None:
+                options = request.runtime_options.resolve()
+                if options.reasoning_effort is not None and options.reasoning_effort.value != "AUTO":
+                    turn_params["reasoningEffort"] = options.reasoning_effort.value.lower()
+                if options.max_output_tokens is not None:
+                    turn_params["maxOutputTokens"] = options.max_output_tokens
+                if options.response_verbosity is not None:
+                    turn_params["verbosity"] = options.response_verbosity.value.lower()
             started = session.connection.request(
                 "turn/start",
-                {
-                    "threadId": session.thread_id,
-                    "input": [{"type": "text", "text": request.prompt}],
-                },
+                turn_params,
             )
             turn = started.get("turn")
             turn_id = str(turn.get("id", "")) if isinstance(turn, dict) else ""

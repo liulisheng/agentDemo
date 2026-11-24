@@ -67,6 +67,7 @@ class ConversationRepository(Protocol):
         value: Message,
         *,
         session_id: str,
+        run_id: str | None = None,
         content_ref: str,
         content_sha256: str,
         byte_length: int,

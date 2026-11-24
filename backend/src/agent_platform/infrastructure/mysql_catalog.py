@@ -27,6 +27,7 @@ from agent_platform.domain.conversations import CapabilityBinding
 from agent_platform.domain.deployment_runtime import (
     DeploymentRuntimeConfig,
     DeploymentRuntimeMode,
+    RuntimeOptions,
 )
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import (
@@ -43,6 +44,7 @@ from agent_platform.domain.runtime_defaults import (
     EngineProfileDefaultBinding,
     ModelRouteDefaultBinding,
     RuntimeDefaultScope,
+    RuntimeStrategyDefaultBinding,
 )
 from agent_platform.ports.workspaces import SandboxProfile, WorkspaceMode, WorkspaceProfile
 
@@ -1341,6 +1343,111 @@ class MySqlCatalogRepository:
                 "execution_profile_binding",
                 f"{scope.value}:{scope_id}",
                 {"scope_type": scope.value, "scope_id": scope_id, "previous": previous, "current": current_value},
+            )
+        return current
+
+    def get_runtime_strategy_default(
+        self, identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> RuntimeStrategyDefaultBinding | None:
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT binding_id, platform_id, tenant_id, scope_type, scope_id, "
+                "runtime_options_json, status FROM runtime_strategy_bindings "
+                "WHERE platform_id=%s AND tenant_id=%s AND scope_type=%s AND scope_id=%s",
+                (identity.platform_id, identity.tenant_id, scope_type, scope_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return RuntimeStrategyDefaultBinding(
+            binding_id=str(row[0]),
+            platform_id=str(row[1]),
+            tenant_id=str(row[2]),
+            scope_type=RuntimeDefaultScope(str(row[3])),
+            scope_id=str(row[4]),
+            runtime_options=RuntimeOptions.from_mapping(_json_load(row[5])).resolve(),
+            status=str(row[6]),
+        )
+
+    def set_runtime_strategy_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        runtime_options: RuntimeOptions | None,
+    ) -> RuntimeStrategyDefaultBinding | None:
+        scope = RuntimeDefaultScope(scope_type)
+        if scope is RuntimeDefaultScope.USER and scope_id != identity.user_id:
+            raise DomainError("AUTHORIZATION_DENIED", "用户只能修改自己的个人回答策略默认")
+        if scope is RuntimeDefaultScope.TENANT and scope_id != identity.tenant_id:
+            raise DomainError("AUTHORIZATION_DENIED", "不能修改其他租户的回答策略默认")
+        if scope is RuntimeDefaultScope.PLATFORM and scope_id != identity.platform_id:
+            raise DomainError("AUTHORIZATION_DENIED", "不能修改其他平台的回答策略默认")
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "SELECT binding_id, runtime_options_json FROM runtime_strategy_bindings "
+                "WHERE platform_id=%s AND tenant_id=%s AND scope_type=%s AND scope_id=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, scope.value, scope_id),
+            )
+            previous = cursor.fetchone()
+            if runtime_options is None:
+                if previous is not None:
+                    cursor.execute(
+                        "DELETE FROM runtime_strategy_bindings WHERE platform_id=%s AND tenant_id=%s "
+                        "AND scope_type=%s AND scope_id=%s",
+                        (identity.platform_id, identity.tenant_id, scope.value, scope_id),
+                    )
+                current = None
+            else:
+                binding_id = str(previous[0]) if previous is not None else generate_database_id()
+                payload = _json_dump(runtime_options.to_mapping(include_none=True))
+                if previous is None:
+                    cursor.execute(
+                        "INSERT INTO runtime_strategy_bindings "
+                        "(platform_id,tenant_id,binding_id,scope_type,scope_id,runtime_options_json,status,created_by) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,'ACTIVE',%s)",
+                        (
+                            identity.platform_id,
+                            identity.tenant_id,
+                            binding_id,
+                            scope.value,
+                            scope_id,
+                            payload,
+                            identity.user_id,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE runtime_strategy_bindings SET runtime_options_json=%s,status='ACTIVE',created_by=%s "
+                        "WHERE platform_id=%s AND tenant_id=%s AND scope_type=%s AND scope_id=%s",
+                        (
+                            payload,
+                            identity.user_id,
+                            identity.platform_id,
+                            identity.tenant_id,
+                            scope.value,
+                            scope_id,
+                        ),
+                    )
+                current = RuntimeStrategyDefaultBinding(
+                    binding_id=binding_id,
+                    platform_id=identity.platform_id,
+                    tenant_id=identity.tenant_id,
+                    scope_type=scope,
+                    scope_id=scope_id,
+                    runtime_options=runtime_options.resolve(),
+                )
+            self._record_runtime_default_audit(
+                cursor,
+                identity,
+                "RUNTIME_STRATEGY_DEFAULT_UPDATED",
+                "runtime_strategy_binding",
+                f"{scope.value}:{scope_id}",
+                {
+                    "scope_type": scope.value,
+                    "scope_id": scope_id,
+                    "current": current.runtime_options.to_mapping() if current else None,
+                },
             )
         return current
 

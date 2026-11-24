@@ -26,7 +26,8 @@ from agent_platform.domain.catalog import (
 )
 from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.context import BusinessContextPolicy
-from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig
+from agent_platform.domain.conversations import Message, MessageSource
+from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig, RuntimeOptions
 from agent_platform.domain.execution import RuntimeReference, RuntimeStatus, UsageRecord
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.mcp import McpProfileStatus, McpRiskLevel, ToolApprovalRequest
@@ -39,7 +40,7 @@ from agent_platform.domain.observability import (
     TraceSpan,
 )
 from agent_platform.ports.conversation_repository import ConversationRepository
-from agent_platform.ports.execution_repository import ExecutionRepository
+from agent_platform.ports.execution_repository import AssistantMessageRef, ExecutionRepository
 from agent_platform.ports.mcp import McpRepository
 from agent_platform.ports.model_provider import ModelAuthorizationProvider
 from agent_platform.ports.resource_center import ResourceCenterRepository
@@ -133,11 +134,74 @@ class ControlPlaneService:
             run_id=run_id,
             span_type=span_type,
             status=status,
-            attributes=attributes or {},
+            attributes={
+                **(attributes or {}),
+                "created_at": datetime.now(UTC).isoformat(),
+            },
             sequence=len(spans) + 1,
         )
         spans.append(span)
         return span
+
+    def _assistant_message_ref(
+        self, identity: IdentityContext, run: RunRecord
+    ) -> AssistantMessageRef | None:
+        """为确定性 Run 结果生成 Conversation 消息引用；旧同步 Run 无 Conversation 时跳过。"""
+
+        if (
+            self.conversation_repository is None
+            or self.object_store is None
+            or not run.result_ref
+            or not run.result_text
+        ):
+            return None
+        try:
+            conversation_id = self.conversation_repository.get_conversation_id_for_run(
+                identity, run.run_id
+            )
+        except DomainError as error:
+            if error.code == "RESOURCE_NOT_FOUND":
+                return None
+            raise
+        content = run.result_text.encode("utf-8")
+        return AssistantMessageRef(
+            message_id=run.run_id,
+            conversation_id=conversation_id,
+            sender_id=run.submitted_by_user_id or identity.user_id,
+            content_ref=run.result_ref,
+            content_sha256=hashlib.sha256(content).hexdigest(),
+            byte_length=len(content),
+            content_type="text/plain; charset=utf-8",
+        )
+
+    def _save_assistant_message_after_approval(
+        self,
+        identity: IdentityContext,
+        run: RunRecord,
+        message: AssistantMessageRef | None,
+    ) -> None:
+        """审批事务已固定 Run 后补写答复索引；幂等仓储会复用同一 Run 的消息。"""
+
+        if message is None or self.conversation_repository is None:
+            return
+        self.conversation_repository.save_message(
+            identity,
+            Message(
+                message.message_id,
+                message.conversation_id,
+                identity.platform_id,
+                identity.tenant_id,
+                message.sender_id,
+                run.result_text,
+                MessageSource.AGENT,
+            ),
+            session_id=run.session_id,
+            run_id=run.run_id,
+            content_ref=message.content_ref,
+            content_sha256=message.content_sha256,
+            byte_length=message.byte_length,
+            content_type=message.content_type,
+        )
 
     def _require_active_deployment(self, identity: IdentityContext, deployment_id: str) -> Deployment:
         deployment = self.catalog.resolve_deployment(identity, deployment_id)
@@ -187,6 +251,7 @@ class ControlPlaneService:
             runtime_config_version=session.runtime_config_version,
             runtime_profile_source=session.runtime_profile_source,
             runtime_model_route_source=session.runtime_model_route_source,
+            runtime_options=session.runtime_options,
             model_authorization_identity=model_authorization_identity,
             **resolver_options,
         )
@@ -213,7 +278,15 @@ class ControlPlaneService:
 
     def _resolve_session_runtime(
         self, identity: IdentityContext, deployment: Deployment
-    ) -> tuple[DeploymentRuntimeConfig, ExecutionProfile, str | None, str, str, ModelRouteSnapshot | None]:
+    ) -> tuple[
+        DeploymentRuntimeConfig,
+        ExecutionProfile,
+        str | None,
+        str,
+        str,
+        ModelRouteSnapshot | None,
+        RuntimeOptions,
+    ]:
         """按 Deployment 修订和独立默认解析引擎/模型，并固定各自来源。"""
 
         repository = self.catalog.repository
@@ -224,6 +297,17 @@ class ControlPlaneService:
                 "Deployment 没有可用的运行配置修订",
                 {"deployment_id": deployment.deployment_id},
             )
+        resolved_strategy_default = (
+            self.runtime_defaults.resolve_runtime_strategy_default(identity)
+            if self.runtime_defaults is not None
+            else None
+        )
+        strategy_default = (
+            resolved_strategy_default.runtime_options
+            if resolved_strategy_default is not None
+            else RuntimeOptions.defaults()
+        )
+        runtime_options = RuntimeOptions.from_mapping(config.runtime_options).resolve(strategy_default)
 
         profile: ExecutionProfile | None = None
         profile_source: str | None = None
@@ -351,6 +435,7 @@ class ControlPlaneService:
             str(profile_source),
             route_source,
             route_snapshot,
+            runtime_options,
         )
 
     def create_session(self, identity: IdentityContext, deployment_id: str) -> SessionRecord:
@@ -362,6 +447,7 @@ class ControlPlaneService:
             profile_source,
             model_route_source,
             model_route_snapshot,
+            runtime_options,
         ) = self._resolve_session_runtime(identity, deployment)
         if model_route_snapshot is not None:
             pinned_model_route = self.agent_resolver.resolve_model_route_snapshot(
@@ -384,6 +470,7 @@ class ControlPlaneService:
                 pinned_model_route,
                 requires_tools=bool(selected_tools),
                 requires_mcp=any(tool.protocol == "mcp" for tool in selected_tools),
+                runtime_options=runtime_options,
             )
             engine_name = provider.engine_name
         else:
@@ -407,6 +494,7 @@ class ControlPlaneService:
             runtime_config_version=runtime_config.config_version,
             runtime_profile_source=profile_source,
             runtime_model_route_source=model_route_source,
+            runtime_options=runtime_options,
             engine_name=engine_name,
             harness_home_ref=(
                 "harness-session:"
@@ -512,6 +600,7 @@ class ControlPlaneService:
             tool_definitions=resolved_agent.tool_definitions,
             mcp_servers=resolved_agent.mcp_servers,
             model_route_snapshot=snapshot.model_route_snapshot,
+            runtime_options=snapshot.runtime_options,
             metadata={
                 "execution_mode": "session_run",
                 "engine_name": snapshot.engine_name or session.engine_name,
@@ -989,6 +1078,9 @@ class ControlPlaneService:
         deployment = self._require_active_deployment(identity, session.deployment_id)
         resolved_agent = self._resolve_session_agent(identity, session, deployment)
         snapshot_data = asdict(resolved_agent.snapshot)
+        snapshot_data["runtime_options"] = resolved_agent.snapshot.runtime_options.to_mapping(
+            include_none=True
+        )
         request_payload = {
             "conversation_id": conversation_id,
             "session_id": session_id,
@@ -1075,6 +1167,7 @@ class ControlPlaneService:
             "runtime_config_version": session.runtime_config_version,
             "runtime_profile_source": session.runtime_profile_source,
             "runtime_model_route_source": session.runtime_model_route_source,
+            "runtime_options": session.runtime_options.to_mapping(include_none=True),
             "model_route_snapshot": (
                 session.model_route_snapshot.to_snapshot_dict()
                 if session.model_route_snapshot is not None
@@ -1349,6 +1442,7 @@ class ControlPlaneService:
             and fencing_token is not None
             and result.status is RuntimeStatus.SUCCEEDED
         ):
+            assistant_message = self._assistant_message_ref(identity, run)
             run_spans = tuple(
                 span
                 for span in self._spans.get(run.trace_id, [])
@@ -1382,6 +1476,9 @@ class ControlPlaneService:
                     for span in self._spans.get(run.trace_id, [])
                 ]
                 self._runs[self._scope(identity, run.run_id)] = run
+                self._save_assistant_message_after_approval(
+                    identity, run, assistant_message
+                )
                 return run
 
         self._runs[self._scope(identity, run.run_id)] = run
@@ -1391,8 +1488,20 @@ class ControlPlaneService:
                 for span in self._spans.get(run.trace_id, [])
                 if span.run_id in {"", run.run_id}
             )
+            assistant_message = self._assistant_message_ref(identity, run)
             try:
-                if hasattr(self.persistence, "complete_run"):
+                if assistant_message is not None and hasattr(
+                    self.persistence, "complete_run_with_assistant_message"
+                ):
+                    committed = self.persistence.complete_run_with_assistant_message(
+                        identity,
+                        run,
+                        fencing_token,
+                        run_spans,
+                        result.usage,
+                        assistant_message,
+                    )
+                elif hasattr(self.persistence, "complete_run"):
                     committed = self.persistence.complete_run(
                         identity, run, fencing_token, run_spans, result.usage
                     )

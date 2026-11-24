@@ -7,12 +7,24 @@ from fastapi import APIRouter
 from agent_platform.api.schemas import (
     ExecutionProfileDefaultRequest,
     ModelRouteDefaultRequest,
+    RuntimeStrategyDefaultRequest,
 )
 from agent_platform.application.engine_providers import unsupported_profile_runtime_fields
+from agent_platform.domain.common import DomainError
+from agent_platform.domain.deployment_runtime import RuntimeOptions
 
 from .common import Identity, RuntimeDefaults, _check_tenant
 
 router = APIRouter()
+
+
+def _parse_runtime_options(value: dict[str, object] | None) -> RuntimeOptions | None:
+    if value is None:
+        return None
+    try:
+        return RuntimeOptions.from_mapping(value)
+    except (TypeError, ValueError) as error:
+        raise DomainError("INVALID_ARGUMENT", str(error)) from error
 
 
 def _engine_binding(binding) -> dict[str, object] | None:
@@ -36,6 +48,18 @@ def _model_binding(binding) -> dict[str, object] | None:
         "scope_type": binding.scope_type.value,
         "scope_id": binding.scope_id,
         "route_id": binding.route_id,
+        "status": binding.status,
+    }
+
+
+def _strategy_binding(binding) -> dict[str, object] | None:
+    if binding is None:
+        return None
+    return {
+        "binding_id": binding.binding_id,
+        "scope_type": binding.scope_type.value,
+        "scope_id": binding.scope_id,
+        "runtime_options": binding.runtime_options.to_mapping(),
         "status": binding.status,
     }
 
@@ -161,3 +185,47 @@ def set_tenant_model_default(
     _check_tenant(identity, request)
     binding = service.set_model_route_default(identity, "tenant", request.route_id)
     return {"binding": _model_binding(binding)}
+
+
+@router.get("/runtime-strategy-bindings/effective")
+def get_effective_runtime_strategy_default(identity: Identity, service: RuntimeDefaults) -> dict[str, object]:
+    resolved = service.resolve_runtime_strategy_default(identity)
+    return {
+        "binding": _strategy_binding(resolved.binding) if resolved else None,
+        "runtime_options": resolved.runtime_options.to_mapping() if resolved else None,
+        "source": resolved.source if resolved else None,
+    }
+
+
+@router.get("/runtime-strategy-bindings/user")
+def get_user_runtime_strategy_default(identity: Identity, service: RuntimeDefaults) -> dict[str, object]:
+    return {"binding": _strategy_binding(service.get_runtime_strategy_default(identity, "user"))}
+
+
+@router.put("/runtime-strategy-bindings/user")
+def set_user_runtime_strategy_default(
+    request: RuntimeStrategyDefaultRequest,
+    identity: Identity,
+    service: RuntimeDefaults,
+) -> dict[str, object]:
+    _check_tenant(identity, request)
+    options = _parse_runtime_options(request.runtime_options)
+    binding = service.set_runtime_strategy_default(identity, "user", options)
+    return {"binding": _strategy_binding(binding)}
+
+
+@router.get("/runtime-strategy-bindings/tenant")
+def get_tenant_runtime_strategy_default(identity: Identity, service: RuntimeDefaults) -> dict[str, object]:
+    return {"binding": _strategy_binding(service.get_runtime_strategy_default(identity, "tenant"))}
+
+
+@router.put("/runtime-strategy-bindings/tenant")
+def set_tenant_runtime_strategy_default(
+    request: RuntimeStrategyDefaultRequest,
+    identity: Identity,
+    service: RuntimeDefaults,
+) -> dict[str, object]:
+    _check_tenant(identity, request)
+    options = _parse_runtime_options(request.runtime_options)
+    binding = service.set_runtime_strategy_default(identity, "tenant", options)
+    return {"binding": _strategy_binding(binding)}

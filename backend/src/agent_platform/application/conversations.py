@@ -227,7 +227,7 @@ class ConversationService:
             content_ref, content_sha256, byte_length, content_type = self.store_message_body(
                 identity, message
             )
-            self.repository.save_message(
+            stored = self.repository.save_message(
                 identity,
                 message,
                 session_id=bound_session,
@@ -236,6 +236,7 @@ class ConversationService:
                 byte_length=byte_length,
                 content_type=content_type,
             )
+            message = replace(message, created_at=stored.created_at)
         self.remember_message(identity, message)
         return message
 
@@ -407,6 +408,7 @@ class ConversationService:
             body,
             stored.source,
             routing_depth=stored.routing_depth,
+            created_at=stored.created_at,
         )
 
     def _list_memory_summaries(

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from threading import Event, RLock
 from uuid import uuid4
 
+from agent_platform.domain.common import DomainError
 from agent_platform.domain.execution import RuntimeStatus, UsageRecord
 from agent_platform.domain.model_routes import UsageStatus, normalize_usage
 from agent_platform.ports.runtime import (
@@ -64,6 +65,12 @@ class HarnessRuntimeAdapter:
             workspace=True,
             mcp=True,
             sandbox=False,
+            # Harness EngineRequest 已接收平台统一策略；真实供应商字段仍由
+            # DeepSeek Engine 在契约验证后映射，Provider 不返回时再标记用量不可用。
+            reasoning=True,
+            reasoning_effort=True,
+            reasoning_budget=True,
+            max_output_tokens=True,
         )
 
     def create_session(self, request: RuntimeRequest | None = None) -> str:
@@ -124,8 +131,15 @@ class HarnessRuntimeAdapter:
                 events=events,
                 capabilities=self.capabilities,
             )
-        except Exception:
+        except Exception as error:
             if not active.cancel_requested.is_set():
+                message = str(error).lower()
+                if "does not support reasoning effort" in message or "does not support reasoning budget" in message:
+                    raise DomainError(
+                        "ENGINE_CAPABILITY_UNSUPPORTED",
+                        "真实模型不支持当前回答策略参数",
+                        {"engine_name": self._engine_name, "capability": "reasoning"},
+                    ) from error
                 raise
             # Engine.close() 已切断该 Run 的 Harness 传输；Worker 可将其视为已取消。
             return RuntimeResult(
@@ -240,6 +254,20 @@ class HarnessRuntimeAdapter:
                 endpoint=snapshot.endpoint,
                 parameters=snapshot.parameters,
             )
+        runtime_options = request.runtime_options.resolve() if request.runtime_options is not None else None
+        reasoning_effort = None
+        max_tokens = request.max_tokens
+        response_verbosity = None
+        if runtime_options is not None:
+            if (
+                runtime_options.reasoning_effort is not None
+                and runtime_options.reasoning_effort.value != "AUTO"
+            ):
+                reasoning_effort = runtime_options.reasoning_effort.value.lower()
+            if runtime_options.max_output_tokens is not None:
+                max_tokens = runtime_options.max_output_tokens
+            if runtime_options.response_verbosity is not None:
+                response_verbosity = runtime_options.response_verbosity.value.lower()
         return EngineRequest(
             prompt=request.prompt,
             session_id=session_ref,
@@ -249,7 +277,12 @@ class HarnessRuntimeAdapter:
             employee_context=employee_context,
             tool_definitions=tool_definitions,
             model_config=model_config,
-            max_tokens=request.max_tokens,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+            reasoning_budget_tokens=(
+                runtime_options.reasoning_budget_tokens if runtime_options is not None else None
+            ),
+            response_verbosity=response_verbosity,
         )
 
     @staticmethod
@@ -381,6 +414,7 @@ class HarnessRuntimeAdapter:
                     "output_tokens",
                     "prompt_tokens",
                     "completion_tokens",
+                    "reasoning_tokens",
                     "total_tokens",
                 )
                 if getattr(raw_usage, name, None) is not None
@@ -415,6 +449,11 @@ class HarnessRuntimeAdapter:
             normalized.input_tokens,
             normalized.output_tokens,
             normalized.total_tokens,
+            reasoning_tokens=int(
+                usage_mapping.get("reasoning_tokens", 0)
+                if isinstance(usage_mapping.get("reasoning_tokens", 0), int)
+                else 0
+            ),
             source="UPSTREAM" if exact else "ESTIMATED",
             estimated=not exact,
             pricing_version="unpriced-v1",

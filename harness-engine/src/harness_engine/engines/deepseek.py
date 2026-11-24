@@ -434,6 +434,7 @@ class DeepSeekHarnessEngine(LifecycleEngine):
                 if pinned_model_config is not None
                 else request.employee_context.model_alias or model
             ),
+            reasoning_effort=request.reasoning_effort,
             max_tokens=request.max_tokens,
             mcp_tools=tuple(
                 item.name
@@ -813,9 +814,19 @@ class DeepSeekHarnessEngine(LifecycleEngine):
             with self._run_lock:
                 self._active_runs.pop(session_id, None)
                 self._cancel_requested.discard(session_id)
-        finish_reason = getattr(result, "finish_reason", None) or "unknown"
+        final_response = str(
+            getattr(result, "final_response", None)
+            or getattr(result, "text", None)
+            or ""
+        )
+        finish_reason = getattr(result, "finish_reason", None)
+        # OpenAI-compatible端点常用 stop/length/tool_calls，部分 SDK 只返回最终正文。
+        # 有正文且没有明确失败原因时按成功收敛，避免把真实答复错误标成 UNKNOWN。
+        if not finish_reason and final_response.strip():
+            finish_reason = "completed"
+        finish_reason = finish_reason or "unknown"
         finish_reason_text = str(finish_reason)
-        if finish_reason_text in {"completed", "succeeded"}:
+        if finish_reason_text in {"completed", "succeeded", "stop", "length", "tool_calls", "content_filter"}:
             status = RunStatus.SUCCEEDED
         elif finish_reason_text in {"cancelled", "canceled"}:
             status = RunStatus.CANCELLED
@@ -837,7 +848,7 @@ class DeepSeekHarnessEngine(LifecycleEngine):
                     )
                 )
         return EngineResult(
-            text=str(getattr(result, "final_response", "")),
+            text=final_response,
             finish_reason=finish_reason_text,
             completed_at=datetime.now(UTC),
             capabilities=self.capabilities,

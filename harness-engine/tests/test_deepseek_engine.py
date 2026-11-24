@@ -96,6 +96,28 @@ def test_deepseek_engine_maps_sdk_result_and_closes(monkeypatch, tmp_path):
     assert FakeHarness.instances[0].kwargs["model"] == "gpt-6-luna"
 
 
+def test_deepseek_engine_normalizes_openai_stop_reason_to_success(monkeypatch, tmp_path):
+    class StopReasonHarness(FakeHarness):
+        def run(self, prompt: str, *, session_id: str | None = None):
+            return SimpleNamespace(final_response=f"sdk: {prompt}", finish_reason="stop")
+
+    StopReasonHarness.instances.clear()
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "deepseek_harness",
+        SimpleNamespace(DeepSeekHarness=StopReasonHarness),
+    )
+
+    engine = DeepSeekHarnessEngine(dsh_home=tmp_path / "dsh-home")
+    engine.start()
+    result = engine.run(EngineRequest(prompt="hello", session_id="session-stop"))
+
+    assert result.status.value == "succeeded"
+    assert result.finish_reason == "stop"
+    assert result.text == "sdk: hello"
+    engine.close()
+
+
 def test_deepseek_engine_accepts_explicit_dsh_bin_from_environment(monkeypatch, tmp_path):
     FakeHarness.instances.clear()
     monkeypatch.setitem(

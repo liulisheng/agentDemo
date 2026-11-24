@@ -70,7 +70,7 @@ def test_repository_migration_catalog_plans_forward_migrations_after_v003() -> N
     )
 
     assert result.action is PreflightAction.APPLY_MIGRATIONS
-    assert result.migrations_to_apply == ("V004", "V005", "V006", "V007", "V008", "V009")
+    assert result.migrations_to_apply == ("V004", "V005", "V006", "V007", "V008", "V009", "V010")
 
 
 def test_complete_v003_marker_without_checksum_requires_forward_v004() -> None:

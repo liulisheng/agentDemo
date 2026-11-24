@@ -26,6 +26,10 @@ class FakeRuntimeAdapter:
         mcp=False,
         workspace=True,
         sandbox=False,
+        reasoning=True,
+        reasoning_effort=True,
+        reasoning_budget=True,
+        max_output_tokens=True,
     )
 
     def __init__(self) -> None:
@@ -51,6 +55,19 @@ class FakeRuntimeAdapter:
         events: list[RuntimeEvent] = [
             RuntimeEvent("run_started", "RUNTIME", {"run_id": request.run_id}),
         ]
+        strategy = request.runtime_options.resolve() if request.runtime_options is not None else None
+        if strategy is not None and strategy.reasoning_mode is not None and strategy.reasoning_mode.value != "OFF":
+            events.append(
+                RuntimeEvent(
+                    "reasoning_started",
+                    "RUNTIME",
+                    {
+                        "reasoning_mode": strategy.reasoning_mode.value,
+                        "reasoning_effort": strategy.reasoning_effort.value if strategy.reasoning_effort else None,
+                    },
+                )
+            )
+            events.append(RuntimeEvent("reasoning_completed", "RUNTIME", {}))
         status = RuntimeStatus.SUCCEEDED
         text = f"fake: {request.prompt}"
         if request.prompt.startswith("echo:") and "echo" not in request.allowed_tools:

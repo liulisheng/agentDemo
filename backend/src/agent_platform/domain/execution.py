@@ -27,6 +27,7 @@ class UsageRecord:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    reasoning_tokens: int = 0
     source: str = "ESTIMATED"
     estimated: bool = True
     cost_amount: float = 0.0
@@ -35,7 +36,7 @@ class UsageRecord:
     provider_request_id: str | None = None
 
     def __post_init__(self) -> None:
-        if min(self.input_tokens, self.output_tokens, self.total_tokens) < 0:
+        if min(self.input_tokens, self.output_tokens, self.reasoning_tokens, self.total_tokens) < 0:
             raise ValueError("token counts must not be negative")
         if self.total_tokens != self.input_tokens + self.output_tokens:
             raise ValueError("total_tokens must equal input plus output tokens")

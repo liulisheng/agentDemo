@@ -23,6 +23,7 @@ from agent_platform.domain.catalog import (
     compute_skill_file_manifest_sha256,
 )
 from agent_platform.domain.common import DomainError
+from agent_platform.domain.deployment_runtime import RuntimeOptions
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.mcp import McpProfileStatus, McpRiskLevel, McpServerProfile
 from agent_platform.domain.model_routes import ModelRouteSnapshot
@@ -48,6 +49,7 @@ from agent_platform.ports.storage import ObjectStore, ObjectStoreError
 _CURRENT_MODEL_ROUTE = object()
 _CURRENT_MODEL_ALIAS = object()
 _CURRENT_RUNTIME_PROFILE = object()
+_CURRENT_RUNTIME_OPTIONS = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,6 +439,7 @@ class AgentResolver:
         runtime_config_version: int | None = None,
         runtime_profile_source: str | None = None,
         runtime_model_route_source: str | None = None,
+        runtime_options: RuntimeOptions | object = _CURRENT_RUNTIME_OPTIONS,
         model_route_snapshot_override: ModelRouteSnapshot | None | object = _CURRENT_MODEL_ROUTE,
         model_authorization_identity: IdentityContext | None = None,
     ) -> ResolvedAgent:
@@ -482,6 +485,14 @@ class AgentResolver:
                         model_route_snapshot_override = ModelRouteSnapshot.from_snapshot_dict(
                             deployment_config.model_route_snapshot
                         )
+                if runtime_options is _CURRENT_RUNTIME_OPTIONS:
+                    runtime_options = RuntimeOptions.from_mapping(
+                        deployment_config.runtime_options
+                    ).resolve()
+        if runtime_options is _CURRENT_RUNTIME_OPTIONS:
+            runtime_options = RuntimeOptions.defaults()
+        elif not isinstance(runtime_options, RuntimeOptions):
+            runtime_options = RuntimeOptions.from_mapping(runtime_options)
         if runtime_profile is not None:
             if runtime_profile.tenant_id != identity.tenant_id:
                 raise DomainError(
@@ -963,6 +974,7 @@ class AgentResolver:
             runtime_config_version=runtime_config_version,
             runtime_profile_source=runtime_profile_source,
             runtime_model_route_source=runtime_model_route_source,
+            runtime_options=runtime_options,
             hub_resource_refs=tuple(unique_refs.values()),
             skill_file_packages=tuple(skill_file_packages),
         )
@@ -1011,6 +1023,7 @@ class AgentResolver:
             runtime_config_version=snapshot.runtime_config_version,
             runtime_profile_source=snapshot.runtime_profile_source,
             runtime_model_route_source=snapshot.runtime_model_route_source,
+            runtime_options=snapshot.runtime_options,
             model_route_snapshot_override=snapshot.model_route_snapshot,
             model_authorization_identity=authorization_identity,
         )

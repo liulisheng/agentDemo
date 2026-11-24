@@ -29,7 +29,7 @@ from agent_platform.domain.catalog import (
     ToolVersion,
 )
 from agent_platform.domain.common import DomainError, generate_database_id
-from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig
+from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig, RuntimeOptions
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import (
     ModelCatalogItem,
@@ -53,6 +53,7 @@ from agent_platform.domain.runtime_defaults import (
     EngineProfileDefaultBinding,
     ModelRouteDefaultBinding,
     RuntimeDefaultScope,
+    RuntimeStrategyDefaultBinding,
 )
 from agent_platform.ports.catalog_repository import CatalogRepository, DeploymentRepository
 from agent_platform.ports.resource_center import ResourceCenterRepository
@@ -81,6 +82,9 @@ class InMemoryCatalogRepository:
         ] = {}
         self.model_route_defaults: dict[
             tuple[str, str, str, str], ModelRouteDefaultBinding
+        ] = {}
+        self.runtime_strategy_defaults: dict[
+            tuple[str, str, str, str], RuntimeStrategyDefaultBinding
         ] = {}
         self.model_connections: dict[tuple[str, str, str], ModelConnection] = {}
         self.model_catalog_items: dict[tuple[str, str, str, str], ModelCatalogItem] = {}
@@ -1109,6 +1113,46 @@ class InMemoryCatalogRepository:
             scope_id=scope_id,
             previous_value={"route_id": previous.route_id} if previous else None,
             current_value={"route_id": current.route_id} if current else None,
+        )
+        return current
+
+    def get_runtime_strategy_default(
+        self, identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> RuntimeStrategyDefaultBinding | None:
+        return self.runtime_strategy_defaults.get(
+            self._runtime_default_key(identity, scope_type, scope_id)
+        )
+
+    def set_runtime_strategy_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        runtime_options: RuntimeOptions | None,
+    ) -> RuntimeStrategyDefaultBinding | None:
+        key = self._runtime_default_key(identity, scope_type, scope_id)
+        previous = self.runtime_strategy_defaults.get(key)
+        if runtime_options is None:
+            self.runtime_strategy_defaults.pop(key, None)
+            current = None
+        else:
+            current = RuntimeStrategyDefaultBinding(
+                binding_id=previous.binding_id if previous else generate_database_id(),
+                platform_id=identity.platform_id,
+                tenant_id=identity.tenant_id,
+                scope_type=RuntimeDefaultScope(scope_type),
+                scope_id=scope_id,
+                runtime_options=runtime_options,
+            )
+            self.runtime_strategy_defaults[key] = current
+        self._record_runtime_default_event(
+            identity,
+            event_type="RUNTIME_STRATEGY_DEFAULT_UPDATED",
+            resource_type="runtime_strategy_binding",
+            scope_type=scope_type,
+            scope_id=scope_id,
+            previous_value=(previous.runtime_options.to_mapping() if previous else None),
+            current_value=(current.runtime_options.to_mapping() if current else None),
         )
         return current
 

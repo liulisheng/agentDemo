@@ -11,11 +11,13 @@ from agent_platform.application.engine_providers import (
 from agent_platform.application.model_management import ModelManagementService
 from agent_platform.domain.catalog import ExecutionProfile, LifecycleStatus
 from agent_platform.domain.common import DomainError
+from agent_platform.domain.deployment_runtime import RuntimeOptions
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import ModelRoute
 from agent_platform.domain.runtime_defaults import (
     EngineProfileDefaultBinding,
     ModelRouteDefaultBinding,
+    RuntimeStrategyDefaultBinding,
 )
 from agent_platform.ports.catalog_repository import CatalogRepository
 
@@ -35,6 +37,15 @@ class EffectiveModelRouteDefault:
 
     binding: ModelRouteDefaultBinding
     route: ModelRoute
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveRuntimeStrategyDefault:
+    """已解析的回答策略默认值和作用域来源。"""
+
+    binding: RuntimeStrategyDefaultBinding
+    runtime_options: RuntimeOptions
     source: str
 
 
@@ -210,4 +221,50 @@ class RuntimeDefaultsService:
                     {"scope_type": scope_type},
                 ) from error
             return EffectiveModelRouteDefault(binding, route, source)
+        return None
+
+    def get_runtime_strategy_default(
+        self, identity: IdentityContext, scope_type: str
+    ) -> RuntimeStrategyDefaultBinding | None:
+        self._require_member(identity)
+        if scope_type not in {"user", "tenant"}:
+            raise DomainError("INVALID_ARGUMENT", "只能直接读取个人或租户回答策略默认")
+        return self.repository.get_runtime_strategy_default(
+            identity, scope_type, self._scope_id(identity, scope_type)
+        )
+
+    def set_runtime_strategy_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        runtime_options: RuntimeOptions | None,
+    ) -> RuntimeStrategyDefaultBinding | None:
+        if scope_type == "user":
+            self._require_member(identity)
+        elif scope_type == "tenant":
+            self._require_tenant_admin(identity)
+        else:
+            raise DomainError("INVALID_ARGUMENT", "只能写入个人或租户回答策略默认")
+        return self.repository.set_runtime_strategy_default(
+            identity,
+            scope_type,
+            self._scope_id(identity, scope_type),
+            runtime_options,
+        )
+
+    def resolve_runtime_strategy_default(
+        self, identity: IdentityContext
+    ) -> EffectiveRuntimeStrategyDefault | None:
+        self._require_member(identity)
+        for scope_type, source in self._scope_precedence:
+            binding = self.repository.get_runtime_strategy_default(
+                identity, scope_type, self._scope_id(identity, scope_type)
+            )
+            if binding is None or binding.status != "ACTIVE":
+                continue
+            return EffectiveRuntimeStrategyDefault(
+                binding,
+                binding.runtime_options.resolve(),
+                source,
+            )
         return None

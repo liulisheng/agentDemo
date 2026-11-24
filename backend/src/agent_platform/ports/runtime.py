@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Protocol
 
+from agent_platform.domain.deployment_runtime import RuntimeOptions
 from agent_platform.domain.execution import RuntimeStatus, UsageRecord
 from agent_platform.domain.mcp import McpServerProfile
 from agent_platform.domain.model_routes import ModelRouteSnapshot
@@ -27,6 +28,10 @@ class RuntimeCapabilities:
     mcp: bool = False
     workspace: bool = False
     sandbox: bool = False
+    reasoning: bool = False
+    reasoning_effort: bool = False
+    reasoning_budget: bool = False
+    max_output_tokens: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +170,7 @@ class RuntimeRequest:
     mcp_servers: Sequence[RuntimeMcpServer] = ()
     model_route_snapshot: ModelRouteSnapshot | None = None
     max_tokens: int | None = None
+    runtime_options: RuntimeOptions | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("run_id", "prompt"):
@@ -188,6 +194,8 @@ class RuntimeRequest:
             raise TypeError("model_route_snapshot must be a ModelRouteSnapshot value")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError("max_tokens must be positive when provided")
+        if self.runtime_options is not None and not isinstance(self.runtime_options, RuntimeOptions):
+            raise TypeError("runtime_options must be a RuntimeOptions value")
         if (
             self.employee_context is not None
             and self.employee_context.model_route_id is not None

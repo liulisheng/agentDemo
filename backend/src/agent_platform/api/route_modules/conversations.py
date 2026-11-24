@@ -131,6 +131,7 @@ def list_conversation_messages(
                 "source": message.source.value,
                 "text": message.text,
                 "routing_depth": message.routing_depth,
+                "created_at": message.created_at,
             }
             for message in service.list_messages(identity, conversation_id)
         ]

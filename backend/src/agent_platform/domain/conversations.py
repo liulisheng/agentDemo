@@ -68,6 +68,7 @@ class Message:
     reply_to_id: str | None = None
     routing_depth: int = 0
     trigger_kind: str | None = None
+    created_at: datetime | None = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
         _text(self.message_id, "message_id")

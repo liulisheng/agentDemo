@@ -16,7 +16,7 @@ from agent_platform.domain.catalog import (
     ToolVersion,
 )
 from agent_platform.domain.conversations import CapabilityBinding
-from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig
+from agent_platform.domain.deployment_runtime import DeploymentRuntimeConfig, RuntimeOptions
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.model_routes import (
     ModelCatalogItem,
@@ -28,6 +28,7 @@ from agent_platform.domain.model_routes import (
 from agent_platform.domain.runtime_defaults import (
     EngineProfileDefaultBinding,
     ModelRouteDefaultBinding,
+    RuntimeStrategyDefaultBinding,
 )
 from agent_platform.ports.workspaces import SandboxProfile, WorkspaceProfile
 
@@ -145,6 +146,18 @@ class CatalogRepository(Protocol):
         scope_id: str,
         route_id: str | None,
     ) -> ModelRouteDefaultBinding | None: ...
+
+    def get_runtime_strategy_default(
+        self, identity: IdentityContext, scope_type: str, scope_id: str
+    ) -> RuntimeStrategyDefaultBinding | None: ...
+
+    def set_runtime_strategy_default(
+        self,
+        identity: IdentityContext,
+        scope_type: str,
+        scope_id: str,
+        runtime_options: RuntimeOptions | None,
+    ) -> RuntimeStrategyDefaultBinding | None: ...
 
     def save_model_route(self, identity: IdentityContext, value: ModelRoute) -> None: ...
 

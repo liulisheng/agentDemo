@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from agent_platform.application.engine_providers import (
     EngineProviderRegistry,
 )
 from agent_platform.domain.common import DomainError
+from agent_platform.domain.deployment_runtime import RuntimeOptions
 from agent_platform.domain.execution import RuntimeStatus
 from agent_platform.domain.model_routes import ModelRouteSnapshot, SecretRef
 from agent_platform.ports.runtime import (
@@ -148,6 +150,50 @@ def test_codex_app_server_pins_route_and_resumes_the_same_thread(tmp_path: Path)
     assert resumed_result.status is RuntimeStatus.SUCCEEDED
     assert any(method == "thread/resume" for method, _ in restarted_connection.requests)
     restarted.close()
+
+
+def test_codex_adapter_maps_canonical_reasoning_options_to_turn_params(tmp_path: Path) -> None:
+    connection = _FakeAppServerConnection()
+    adapter = CodexAppServerRuntimeAdapter(
+        command=("codex", "app-server", "--stdio"),
+        state_root=tmp_path,
+        secret_resolver=lambda reference: f"resolved:{reference.secret_id}",
+        connection_factory=lambda *_args: connection,
+    )
+    request = replace(
+        _request(),
+        runtime_options=RuntimeOptions.from_mapping(
+            {
+                "reasoning_mode": "DEEP",
+                "reasoning_effort": "HIGH",
+                "response_verbosity": "DETAILED",
+                "max_output_tokens": 4096,
+            }
+        ),
+    )
+
+    adapter.run(request)
+
+    turn = next(params for method, params in connection.requests if method == "turn/start")
+    assert turn["reasoningEffort"] == "high"
+    assert turn["verbosity"] == "detailed"
+    assert turn["maxOutputTokens"] == 4096
+    adapter.close()
+
+
+def test_codex_adapter_advertises_only_verified_strategy_capabilities(tmp_path: Path) -> None:
+    adapter = CodexAppServerRuntimeAdapter(
+        command=("codex", "app-server", "--stdio"),
+        state_root=tmp_path,
+        secret_resolver=lambda reference: f"resolved:{reference.secret_id}",
+        connection_factory=lambda *_args: _FakeAppServerConnection(),
+    )
+
+    assert adapter.capabilities.reasoning is True
+    assert adapter.capabilities.reasoning_effort is True
+    assert adapter.capabilities.reasoning_budget is False
+    assert adapter.capabilities.max_output_tokens is True
+    adapter.close()
 
 
 def test_codex_adapter_rejects_unsupported_route_or_platform_tools(tmp_path: Path) -> None:

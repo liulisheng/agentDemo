@@ -141,6 +141,7 @@ def _session_response(value: SessionRecord) -> dict[str, object]:
         "runtime_config_version": value.runtime_config_version,
         "runtime_profile_source": value.runtime_profile_source,
         "runtime_model_route_source": value.runtime_model_route_source,
+        "runtime_options": value.runtime_options.to_mapping(),
     }
 
 
@@ -166,6 +167,7 @@ def _run_response(value: RunRecord) -> dict[str, object]:
             "runtime_config_version": value.snapshot.runtime_config_version,
             "runtime_profile_source": value.snapshot.runtime_profile_source,
             "runtime_model_route_source": value.snapshot.runtime_model_route_source,
+            "runtime_options": value.snapshot.runtime_options.to_mapping(),
             "model_route_snapshot": (
                 {
                     "route_id": value.snapshot.model_route_snapshot.route_id,
@@ -242,6 +244,7 @@ def _timeline_response(value: RunTimeline) -> dict[str, object]:
             "input_tokens": value.usage.input_tokens,
             "output_tokens": value.usage.output_tokens,
             "total_tokens": value.usage.total_tokens,
+            "reasoning_tokens": value.usage.reasoning_tokens,
             "source": value.usage.source,
             "estimated": value.usage.estimated,
             "cost_amount": value.usage.cost_amount,

@@ -100,6 +100,7 @@ class ConversationTurnService:
             identity.user_id,
             text,
             MessageSource.USER,
+            created_at=stored_message.created_at,
         )
         self._conversations.remember_message(identity, persisted_message)
         self._conversations.note_run(

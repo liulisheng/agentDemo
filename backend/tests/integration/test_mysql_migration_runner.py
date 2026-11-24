@@ -72,7 +72,7 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
 
     assert first.action is PreflightAction.APPLY_MIGRATIONS
     assert first.applied_migrations == (
-        "V001", "V002", "V003", "V004", "V005", "V006", "V007", "V008", "V009"
+        "V001", "V002", "V003", "V004", "V005", "V006", "V007", "V008", "V009", "V010"
     )
     assert second.action is PreflightAction.UP_TO_DATE
     assert second.applied_migrations == ()
@@ -80,9 +80,9 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 9
+        assert cursor.fetchone()[0] == 10
         cursor.execute("SELECT version FROM schema_migration_history ORDER BY version")
-        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     finally:
         cursor.close()
         connection.close()

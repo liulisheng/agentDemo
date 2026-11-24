@@ -211,6 +211,10 @@ class ExecutionProfileDefaultRequest(TenantAwareRequest):
 class ModelRouteDefaultRequest(TenantAwareRequest):
     route_id: str | None = Field(default=None, min_length=1, max_length=64)
 
+
+class RuntimeStrategyDefaultRequest(TenantAwareRequest):
+    runtime_options: dict[str, object] | None = Field(default=None)
+
 class DeploymentRollbackRequest(TenantAwareRequest):
     employee_id: str
     version: int

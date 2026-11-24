@@ -34,6 +34,19 @@ class RunInputRef:
     byte_length: int
 
 
+@dataclass(frozen=True, slots=True)
+class AssistantMessageRef:
+    """Run 完成时写入 Conversation 的助手正文引用；正文只在对象存储。"""
+
+    message_id: str
+    conversation_id: str
+    sender_id: str
+    content_ref: str
+    content_sha256: str
+    byte_length: int
+    content_type: str
+
+
 class ExecutionRepository(Protocol):
     """承载 Session/Run 的跨进程状态；实现必须在每次读写中限定平台和租户。"""
 
@@ -120,6 +133,7 @@ class ExecutionRepository(Protocol):
         fencing_token: int,
         spans: tuple[TraceSpan, ...],
         usage: UsageRecord | None,
+        assistant_message: AssistantMessageRef | None = None,
     ) -> bool: ...
 
     def mark_unknown(self, identity: IdentityContext, run_id: str, fencing_token: int) -> bool: ...

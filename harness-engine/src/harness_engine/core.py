@@ -270,6 +270,9 @@ class EngineRequest:
     harness_home_ref: str | None = None
     model_config: EngineModelConfig | None = None
     max_tokens: int | None = None
+    reasoning_effort: str | None = None
+    reasoning_budget_tokens: int | None = None
+    response_verbosity: str | None = None
 
     def __post_init__(self) -> None:
         if not self.prompt.strip():
@@ -303,6 +306,12 @@ class EngineRequest:
             raise TypeError("model_config must be an EngineModelConfig value")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError("max_tokens must be positive when provided")
+        if self.reasoning_effort is not None and not self.reasoning_effort.strip():
+            raise ValueError("reasoning_effort must not be blank when provided")
+        if self.reasoning_budget_tokens is not None and self.reasoning_budget_tokens < 1:
+            raise ValueError("reasoning_budget_tokens must be positive when provided")
+        if self.response_verbosity is not None and not self.response_verbosity.strip():
+            raise ValueError("response_verbosity must not be blank when provided")
         object.__setattr__(self, "tool_definitions", definitions)
 
     @property
