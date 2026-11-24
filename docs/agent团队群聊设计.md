@@ -834,7 +834,7 @@ worker_pool
 
 右上角只保留一个当前工作上下文选择器：团队模式显示“当前团队”，单员工模式显示“当前数字员工”。左侧最近对话列表不再重复提供员工或团队选择器，只展示当前模式下的 Conversation；时间线标题和右侧快照以只读方式显示已选上下文。
 
-右上角同时提供当前模式对应的运行配置入口：团队模式打开团队成员的 EngineProvider、ModelRoute、能力和 Worker Pool 配置；单员工模式打开当前 Deployment 的 ExecutionProfile、ModelRoute、回答策略和审批策略。运行配置沿用现有“新配置只对新 Conversation 生效”的固定快照规则。
+右上角提供当前模式需要的配置入口：团队模式只显示“团队配置”，由团队配置弹框统一查看成员的 EngineProvider、ModelRoute、能力和 Worker Pool；单员工模式显示“运行配置”，打开当前 Deployment 的 ExecutionProfile、ModelRoute、回答策略和审批策略。两种配置都沿用现有“新配置只对新 Conversation 生效”的固定快照规则。
 
 ### 14.1 左栏：团队对话
 

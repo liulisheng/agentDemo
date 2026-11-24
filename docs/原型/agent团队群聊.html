@@ -411,7 +411,6 @@
             <div class="heading-actions">
             <div class="field team-select team-only-control"><label for="team-select">当前团队</label><select id="team-select"><option selected>数据分析与交付团队 · v3</option><option>代码质量团队 · v2</option></select></div>
             <div class="field team-select single-only-control" hidden><label for="header-single-employee">当前数字员工</label><select id="header-single-employee"><option selected>海豚调度数仓开发</option><option>订单分析员工</option><option>代码协作员工</option></select></div>
-            <button class="secondary team-only-control" id="open-team-runtime-config" type="button">运行配置</button>
             <button class="secondary single-only-control" id="open-single-runtime-config" type="button" hidden>运行配置 · v2</button>
             <button class="secondary team-only-control" id="new-team" type="button">新建团队</button>
             <button class="secondary team-only-control" id="open-team-settings" type="button">团队配置 · 只读</button>
@@ -726,7 +725,6 @@
       showFeedback('new-team-feedback', `${name} 已保存为草稿，可在团队管理中继续配置并发布。`);
       showFeedback('panel-feedback', `${name} 团队草稿已创建。当前对话仍使用数据分析与交付团队 v3。`);
     });
-    document.getElementById('open-team-runtime-config').addEventListener('click', () => openDialog('team-config-dialog'));
     document.getElementById('open-single-runtime-config').addEventListener('click', () => openDialog('single-runtime-dialog'));
     document.getElementById('new-single-conversation').addEventListener('click', () => {
       showFeedback('single-runtime-feedback', '已准备使用新运行配置创建对话；当前 Conversation 保持不变。');
