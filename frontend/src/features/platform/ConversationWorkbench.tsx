@@ -45,6 +45,15 @@ export interface WorkbenchSnapshot {
   runtimeConfigVersion?: number | null
   runtimeProfileSource?: string | null
   runtimeModelRouteSource?: string | null
+  runtimeOptions?: {
+    reasoning_mode?: 'OFF' | 'AUTO' | 'DEEP'
+    reasoning_effort?: 'AUTO' | 'LOW' | 'MEDIUM' | 'HIGH'
+    reasoning_budget_tokens?: number | null
+    response_verbosity?: 'CONCISE' | 'STANDARD' | 'DETAILED'
+    max_output_tokens?: number | null
+    max_tool_steps?: number | null
+    timeout_seconds?: number | null
+  }
 }
 
 export interface WorkbenchApprovalPreview {
@@ -98,11 +107,29 @@ function formatTime(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '时间未知'
   return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
     month: 'numeric',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
   }).format(date)
+}
+
+function strategyLabel(snapshot: WorkbenchSnapshot): string {
+  const mode = {
+    OFF: '关闭思考',
+    AUTO: '自动思考',
+    DEEP: '深度思考',
+  }[snapshot.runtimeOptions?.reasoning_mode ?? 'AUTO']
+  const effort = snapshot.runtimeOptions?.reasoning_effort
+  const verbosity = {
+    CONCISE: '简洁答复',
+    STANDARD: '标准答复',
+    DETAILED: '详细答复',
+  }[snapshot.runtimeOptions?.response_verbosity ?? 'STANDARD']
+  return `${mode}${effort && effort !== 'AUTO' ? ` · 强度${effort === 'HIGH' ? '高' : effort === 'MEDIUM' ? '中' : '低'}` : ''} · ${verbosity}`
 }
 
 function StatusPill({ status }: { status?: WorkbenchRunStatus }) {
@@ -418,6 +445,11 @@ export function ConversationWorkbench({
                   <small>{snapshot.runtimeModelRouteSource ?? '来源未知'}</small>
                 </div>
               )}
+              <div className="workbench-snapshot-row workbench-snapshot-strategy">
+                <span>回答策略</span>
+                <strong>{strategyLabel(snapshot)}</strong>
+                <small>推理预算：{snapshot.runtimeOptions?.reasoning_budget_tokens ? `${snapshot.runtimeOptions.reasoning_budget_tokens.toLocaleString()} token` : '自动'} · 最大工具步骤：{snapshot.runtimeOptions?.max_tool_steps ?? 20}</small>
+              </div>
               <div className="workbench-snapshot-section">
                 <span>Skill 指令</span>
                 {snapshot.skills.length ? (

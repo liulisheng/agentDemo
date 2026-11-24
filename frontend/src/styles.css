@@ -507,6 +507,10 @@ body { color: var(--ink); background: var(--canvas); }
 .runtime-default-member-note, .runtime-default-empty-hint { display: block; line-height: 1.55; }
 .runtime-default-save-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding-top: 4px; }
 .runtime-default-feedback { color: #246957; font-size: 12px; }
+.runtime-default-strategy-box { display: grid; gap: 8px; padding: 12px; border: 1px solid #cfe2dc; border-radius: 9px; background: #f7fbf9; }
+.runtime-default-strategy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.runtime-default-strategy-grid label { display: grid; gap: 4px; color: #4f6368; font-size: 11px; font-weight: 650; }
+.runtime-default-strategy-grid select { min-height: 34px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font-size: 11px; }
 .runtime-effective-card .ant-card-body { display: grid; gap: 12px; }
 .runtime-effective-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .runtime-effective-grid > div { display: grid; justify-items: start; gap: 6px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: #fafcfc; }
@@ -532,6 +536,35 @@ body { color: var(--ink); background: var(--canvas); }
 .default-runtime-environment .ant-select-focused,
 .default-runtime-environment input:focus-visible { outline: 3px solid #48818a; outline-offset: 3px; }
 .deployment-runtime-config-content { display: grid; gap: 16px; }
+.runtime-resource-card { display: grid; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.runtime-resource-card > .ant-typography { margin: 0; }
+.runtime-strategy-panel { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(260px, .92fr); gap: 14px; align-items: start; }
+.runtime-default-form > .runtime-strategy-panel { grid-column: 1 / -1; width: 100%; }
+.runtime-strategy-editor, .runtime-strategy-preview { min-width: 0; }
+.runtime-strategy-editor { display: grid; gap: 12px; }
+.runtime-strategy-section-heading, .runtime-strategy-preview-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.runtime-strategy-section-heading > div { display: grid; gap: 4px; }
+.runtime-strategy-section-heading .ant-typography, .runtime-strategy-preview-heading .ant-typography { margin: 0; }
+.runtime-strategy-fieldset { display: grid; gap: 12px; min-width: 0; margin: 0; padding: 14px; border: 1px solid #cfe2dc; border-radius: 9px; background: #f7fbf9; }
+.runtime-strategy-fieldset legend { padding: 0 6px; color: var(--ink); font-weight: 650; }
+.runtime-strategy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.runtime-strategy-grid label { display: grid; gap: 5px; color: #52656b; font-size: 11px; font-weight: 650; }
+.runtime-strategy-grid select { width: 100%; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--ink); background: var(--paper); font: inherit; font-size: 13px; }
+.runtime-strategy-capability-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.runtime-strategy-capability-list > span { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; color: #52656b; background: #fff; font-size: 10px; }
+.runtime-strategy-capability-list b { padding: 2px 6px; border-radius: 5px; color: #348345; background: #f1faf3; font-size: 9px; font-weight: 650; }
+.runtime-strategy-capability-list b.unavailable { color: #7e5a1e; background: #fff7e5; }
+.runtime-strategy-preview { display: grid; gap: 10px; padding: 14px; border: 1px solid #d8e5df; border-radius: 9px; background: #fbfdfb; }
+.runtime-strategy-preview-heading { align-items: center; }
+.runtime-strategy-preview-card { display: grid; gap: 6px; padding: 10px; border: 1px solid #e1eae5; border-radius: 7px; background: #fff; }
+.runtime-strategy-preview-card > span { color: #647672; font-size: 10px; }
+.runtime-strategy-preview-card > strong { color: #314944; font-size: 11px; overflow-wrap: anywhere; }
+.runtime-strategy-preview-card > small { color: #74858a; font-size: 10px; }
+.runtime-strategy-preview-card > p { margin: 0; color: #74858a; font-size: 10px; line-height: 1.5; }
+.runtime-strategy-diff { display: flex; justify-content: space-between; gap: 10px; padding: 7px 8px; border-left: 3px solid #21645a; border-radius: 4px; color: #36594c; background: #f1f7f3; font-size: 10px; }
+.runtime-strategy-diff span { color: #6c7d7f; }
+.runtime-strategy-diff strong { color: #314944; text-align: right; }
+.runtime-strategy-real-note { padding: 9px 10px; border: 1px solid #e4c681; border-radius: 5px; color: #6f5928; background: #fff8e9; font-size: 10px; line-height: 1.5; }
 .deployment-runtime-dialog-context { display: flex; flex-wrap: wrap; gap: 6px; }
 .deployment-runtime-current-revision { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .deployment-runtime-fieldset { display: grid; gap: 16px; min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 9px; }
@@ -610,6 +643,7 @@ body { color: var(--ink); background: var(--canvas); }
   .runtime-default-layout { grid-template-columns: 1fr; }
   .runtime-default-binding-grid, .runtime-effective-grid { grid-template-columns: 1fr; }
   .runtime-default-form { grid-template-columns: 1fr; }
+  .runtime-default-strategy-grid { grid-template-columns: 1fr; }
   .runtime-default-save-actions { align-items: stretch; flex-direction: column; }
   .runtime-default-save-actions .ant-space { width: 100%; }
   .runtime-default-save-actions .ant-btn { flex: 1; }
@@ -617,6 +651,8 @@ body { color: var(--ink); background: var(--canvas); }
   .runtime-default-control-row { align-items: stretch; flex-direction: column; }
   .runtime-default-control-row .ant-btn { width: 100%; }
   .deployment-runtime-override-fields { grid-template-columns: 1fr; }
+  .runtime-strategy-panel { grid-template-columns: 1fr; }
+  .runtime-strategy-grid, .runtime-strategy-capability-list { grid-template-columns: 1fr; }
   .deployment-runtime-inherit-preview > div { grid-template-columns: 1fr; justify-items: start; }
   .management-page-header, .employee-workspace-header, .employee-resource-toolbar, .employee-version-workspace-header, .employee-version-card-header { align-items: stretch; flex-direction: column; }
   .employee-workspace-title { font-size: 25px !important; }

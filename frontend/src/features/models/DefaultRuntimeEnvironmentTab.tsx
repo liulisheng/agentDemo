@@ -23,8 +23,10 @@ import {
   forkExecutionProfileVersion,
   getEffectiveEngineProfileDefault,
   getEffectiveModelRouteDefault,
+  getEffectiveRuntimeStrategyDefault,
   getEngineProfileDefault,
   getModelRouteDefault,
+  getRuntimeStrategyDefault,
   listEngineProviders,
   listExecutionProfileVersions,
   listExecutionProfiles,
@@ -32,14 +34,17 @@ import {
   publishExecutionProfileVersion,
   setEngineProfileDefault,
   setModelRouteDefault,
+  setRuntimeStrategyDefault,
   updateExecutionProfileDraft,
 } from '../../api/client'
 import type {
   EngineProviderSummary,
   ExecutionProfileSummary,
   RuntimeDefaultBinding,
+  RuntimeOptions,
 } from '../../api/client'
 import { useTenantContext } from '../management/TenantContext'
+import { RuntimeStrategyPanel } from '../platform/RuntimeStrategyPanel'
 
 const { Paragraph, Text } = Typography
 
@@ -77,6 +82,8 @@ export function DefaultRuntimeEnvironmentTab() {
   const [tenantProfileValue, setTenantProfileValue] = useState<string>()
   const [userRouteValue, setUserRouteValue] = useState<string>()
   const [tenantRouteValue, setTenantRouteValue] = useState<string>()
+  const [userRuntimeOptions, setUserRuntimeOptions] = useState<RuntimeOptions>({})
+  const [tenantRuntimeOptions, setTenantRuntimeOptions] = useState<RuntimeOptions>({})
   const [profileModal, setProfileModal] = useState<
     | { mode: 'create' }
     | { mode: 'edit'; profile: ExecutionProfileSummary }
@@ -126,6 +133,18 @@ export function DefaultRuntimeEnvironmentTab() {
     queryKey: ['runtime-default-route', fakeUser, 'tenant'],
     queryFn: () => getModelRouteDefault('tenant', fakeUser),
   })
+  const effectiveStrategyQuery = useQuery({
+    queryKey: ['runtime-default-strategy-effective', fakeUser],
+    queryFn: () => getEffectiveRuntimeStrategyDefault(fakeUser),
+  })
+  const userStrategyQuery = useQuery({
+    queryKey: ['runtime-default-strategy', fakeUser, 'user'],
+    queryFn: () => getRuntimeStrategyDefault('user', fakeUser),
+  })
+  const tenantStrategyQuery = useQuery({
+    queryKey: ['runtime-default-strategy', fakeUser, 'tenant'],
+    queryFn: () => getRuntimeStrategyDefault('tenant', fakeUser),
+  })
 
   const allProfiles = useMemo(
     () => profileVersionsQuery.data?.flatMap((page) => page.items) ?? [],
@@ -161,6 +180,9 @@ export function DefaultRuntimeEnvironmentTab() {
     tenantRouteQuery.isPending,
     effectiveEngineQuery.isPending,
     effectiveRouteQuery.isPending,
+    effectiveStrategyQuery.isPending,
+    userStrategyQuery.isPending,
+    tenantStrategyQuery.isPending,
   ].some(Boolean)
   const pageError = [
     providerQuery.error,
@@ -173,12 +195,17 @@ export function DefaultRuntimeEnvironmentTab() {
     tenantRouteQuery.error,
     effectiveEngineQuery.error,
     effectiveRouteQuery.error,
+    effectiveStrategyQuery.error,
+    userStrategyQuery.error,
+    tenantStrategyQuery.error,
   ].find(Boolean)
 
   useEffect(() => setUserProfileValue(bindingProfileKey(userEngineQuery.data?.binding)), [userEngineQuery.data])
   useEffect(() => setTenantProfileValue(bindingProfileKey(tenantEngineQuery.data?.binding)), [tenantEngineQuery.data])
   useEffect(() => setUserRouteValue(userRouteQuery.data?.binding?.route_id), [userRouteQuery.data])
   useEffect(() => setTenantRouteValue(tenantRouteQuery.data?.binding?.route_id), [tenantRouteQuery.data])
+  useEffect(() => setUserRuntimeOptions(userStrategyQuery.data?.binding?.runtime_options ?? {}), [userStrategyQuery.data])
+  useEffect(() => setTenantRuntimeOptions(tenantStrategyQuery.data?.binding?.runtime_options ?? {}), [tenantStrategyQuery.data])
   useEffect(() => {
     if (!isAdmin && defaultScope === 'tenant') setDefaultScope('user')
   }, [defaultScope, isAdmin])
@@ -189,6 +216,8 @@ export function DefaultRuntimeEnvironmentTab() {
       queryClient.invalidateQueries({ queryKey: ['runtime-default-route', fakeUser] }),
       queryClient.invalidateQueries({ queryKey: ['runtime-default-engine-effective', fakeUser] }),
       queryClient.invalidateQueries({ queryKey: ['runtime-default-route-effective', fakeUser] }),
+      queryClient.invalidateQueries({ queryKey: ['runtime-default-strategy', fakeUser] }),
+      queryClient.invalidateQueries({ queryKey: ['runtime-default-strategy-effective', fakeUser] }),
     ])
   }
   const invalidateProfiles = async () => {
@@ -205,10 +234,13 @@ export function DefaultRuntimeEnvironmentTab() {
       routesQuery.refetch(),
       effectiveEngineQuery.refetch(),
       effectiveRouteQuery.refetch(),
+      effectiveStrategyQuery.refetch(),
       userEngineQuery.refetch(),
       tenantEngineQuery.refetch(),
       userRouteQuery.refetch(),
       tenantRouteQuery.refetch(),
+      userStrategyQuery.refetch(),
+      tenantStrategyQuery.refetch(),
     ])
   }
 
@@ -233,6 +265,17 @@ export function DefaultRuntimeEnvironmentTab() {
       message.success(feedback)
     },
     onError: (error) => setSaveFeedback(error instanceof Error ? error.message : '模型默认保存失败'),
+  })
+  const saveStrategyMutation = useMutation({
+    mutationFn: ({ scope, value }: { scope: 'user' | 'tenant'; value: RuntimeOptions }) =>
+      setRuntimeStrategyDefault(scope, value, fakeUser),
+    onSuccess: async (_value, action) => {
+      await invalidateDefaults()
+      const feedback = action.scope === 'user' ? '个人回答策略默认已保存' : '租户回答策略默认已保存'
+      setSaveFeedback(feedback)
+      message.success(feedback)
+    },
+    onError: (error) => setSaveFeedback(error instanceof Error ? error.message : '回答策略默认保存失败'),
   })
   const createProfileMutation = useMutation({
     mutationFn: (values: Record<string, unknown>) => createExecutionProfile({
@@ -381,6 +424,11 @@ export function DefaultRuntimeEnvironmentTab() {
   }
   const selectedProfileValue = defaultScope === 'user' ? userProfileValue : tenantProfileValue
   const selectedRouteValue = defaultScope === 'user' ? userRouteValue : tenantRouteValue
+  const selectedRuntimeOptions = defaultScope === 'user' ? userRuntimeOptions : tenantRuntimeOptions
+  const setSelectedRuntimeOptions = (value: RuntimeOptions) => {
+    if (defaultScope === 'user') setUserRuntimeOptions(value)
+    else setTenantRuntimeOptions(value)
+  }
   const setSelectedProfileValue = (value?: string) => {
     if (defaultScope === 'user') setUserProfileValue(value)
     else setTenantProfileValue(value)
@@ -453,6 +501,18 @@ export function DefaultRuntimeEnvironmentTab() {
                   onChange={setSelectedRouteValue}
                 />
               </Form.Item>
+              <RuntimeStrategyPanel
+                canEdit={defaultScope === 'user' || isAdmin}
+                draft={selectedRuntimeOptions}
+                effective={effectiveStrategyQuery.data?.runtime_options ?? {}}
+                source={effectiveStrategyQuery.data?.source}
+                engineLabel={effectiveEngine?.profile ? `${effectiveEngine.profile.engine_name} · v${effectiveEngine.profile.version}` : '未设置'}
+                routeLabel={effectiveRoute?.route ? `${effectiveRoute.route.alias} · ${effectiveRoute.route.model_name}` : '未设置'}
+                capabilities={effectiveProvider?.capabilities}
+                reasoningUnsupported={selectedRuntimeOptions.reasoning_mode === 'DEEP' && effectiveProvider?.capabilities.reasoning === false}
+                incompatible={incompatibleEffectiveDefaults}
+                onChange={setSelectedRuntimeOptions}
+              />
             </Form>
             <div className="runtime-default-priority-note" aria-label="默认解析优先级">
               <span>优先级</span><strong>Deployment 覆盖 → 个人默认 → 租户默认 → 平台/系统</strong>
@@ -461,6 +521,7 @@ export function DefaultRuntimeEnvironmentTab() {
               <span>当前身份解析</span>
               <span>引擎：{effectiveEngine?.profile ? `${effectiveEngine.profile.engine_name} · v${effectiveEngine.profile.version}` : '未设置'} <Tag>{effectiveEngine?.source ?? '无来源'}</Tag></span>
               <span>模型：{effectiveRoute?.route ? `${effectiveRoute.route.alias} · ${effectiveRoute.route.model_name}` : '未设置'} <Tag>{effectiveRoute?.source ?? '无来源'}</Tag></span>
+              <span>回答策略：{effectiveStrategyQuery.data?.runtime_options?.reasoning_mode ?? 'AUTO'} <Tag>{effectiveStrategyQuery.data?.source ?? '系统默认'}</Tag></span>
             </div>
             {incompatibleEffectiveDefaults && (
               <Alert className="runtime-default-warning" type="warning" showIcon message="当前引擎和模型路由协议不兼容" description="系统不会自动替换模型；新建 Session 前需要调整其中一项。" />
@@ -479,8 +540,8 @@ export function DefaultRuntimeEnvironmentTab() {
               </Text>
             )}
             {saveFeedback && <div className="runtime-default-feedback" role="status">{saveFeedback}</div>}
-            {(saveEngineMutation.isError || saveRouteMutation.isError) && (
-              <Alert className="runtime-default-action-error" type="error" showIcon message="默认配置保存失败" description={((saveEngineMutation.error ?? saveRouteMutation.error) as Error).message} />
+            {(saveEngineMutation.isError || saveRouteMutation.isError || saveStrategyMutation.isError) && (
+              <Alert className="runtime-default-action-error" type="error" showIcon message="默认配置保存失败" description={((saveEngineMutation.error ?? saveRouteMutation.error ?? saveStrategyMutation.error) as Error).message} />
             )}
             <div className="runtime-default-save-actions">
               <Text type="secondary">{defaultScope === 'user' ? `仅影响 ${currentIdentity.label} 新建的 Session` : '没有个人默认的成员会继承此值'}</Text>
@@ -496,6 +557,11 @@ export function DefaultRuntimeEnvironmentTab() {
                   disabled={defaultScope === 'tenant' && !isAdmin}
                   onClick={() => saveRouteMutation.mutate({ scope: defaultScope, value: selectedRouteValue })}
                 >保存模型默认</Button>
+                <Button
+                  loading={saveStrategyMutation.isPending}
+                  disabled={defaultScope === 'tenant' && !isAdmin}
+                  onClick={() => saveStrategyMutation.mutate({ scope: defaultScope, value: selectedRuntimeOptions })}
+                >保存回答策略</Button>
               </Space>
             </div>
           </Card>

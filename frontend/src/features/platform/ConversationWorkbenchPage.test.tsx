@@ -29,6 +29,9 @@ const { api, identity } = vi.hoisted(() => ({
     listEngineProviders: vi.fn(),
     getEffectiveEngineProfileDefault: vi.fn(),
     getEffectiveModelRouteDefault: vi.fn(),
+    getEffectiveRuntimeStrategyDefault: vi.fn(),
+    getRuntimeStrategyDefault: vi.fn(),
+    setRuntimeStrategyDefault: vi.fn(),
   },
   identity: { fakeUser: 'admin-local' },
 }))
@@ -126,9 +129,10 @@ function baseApiState() {
   api.listExecutionProfiles.mockResolvedValue({ items: [{ id: 'profile-1', tenant_id: 'tenant-a', version: 1, engine_name: 'deepseek_harness', engine_available: true, model_alias: null, status: 'PUBLISHED' }] })
   api.listExecutionProfileVersions.mockResolvedValue({ items: [{ id: 'profile-1', tenant_id: 'tenant-a', version: 1, engine_name: 'deepseek_harness', engine_available: true, model_alias: null, status: 'PUBLISHED' }] })
   api.listSelectableModelRoutes.mockResolvedValue({ items: [{ route_id: 'route-1', tenant_id: 'tenant-a', alias: '数仓模型', status: 'ACTIVE', route_version: 1, profile: { model_name: 'deepseek-chat', protocol: 'openai-chat-completions' } }] })
-  api.listEngineProviders.mockResolvedValue({ items: [{ engine_name: 'deepseek_harness', display_name: 'DeepSeek Harness', supported_model_protocols: ['openai-chat-completions'], capabilities: {}, execution_mode: 'SIMULATION' }] })
+  api.listEngineProviders.mockResolvedValue({ items: [{ engine_name: 'deepseek_harness', display_name: 'DeepSeek Harness', supported_model_protocols: ['openai-chat-completions'], capabilities: { reasoning: true, reasoning_effort: true, reasoning_budget: true, max_output_tokens: true }, execution_mode: 'SIMULATION' }] })
   api.getEffectiveEngineProfileDefault.mockResolvedValue({ binding: null, profile: null, source: null })
   api.getEffectiveModelRouteDefault.mockResolvedValue({ binding: null, route: null, source: null })
+  api.getEffectiveRuntimeStrategyDefault.mockResolvedValue({ binding: null, runtime_options: { reasoning_mode: 'AUTO', reasoning_effort: 'AUTO', response_verbosity: 'STANDARD' }, source: 'SYSTEM_DEFAULT' })
 }
 
 test('loads tenant scoped Conversation, Run, Trace and exact Approval preview', async () => {
@@ -207,6 +211,63 @@ test('submits a turn with an idempotency key and disables duplicate submission w
   finishSubmission?.({ conversation_id: 'conversation-1', message_id: 'message-2', run_id: 'run-2', status: 'QUEUED' })
 })
 
+test('keeps the first assistant answer visible after a second turn completes', async () => {
+  baseApiState()
+  let secondTurn = false
+  api.listConversationMessages.mockImplementation(() => Promise.resolve({
+    items: secondTurn
+      ? [
+          { id: 'message-1', sender_id: 'admin-local', source: 'user', text: '列出当前项目' },
+          { id: 'message-2', sender_id: 'admin-local', source: 'user', text: '继续生成工作流预览' },
+        ]
+      : [{ id: 'message-1', sender_id: 'admin-local', source: 'user', text: '列出当前项目' }],
+  }))
+  api.getRun.mockImplementation((runId: string) => Promise.resolve({
+    id: runId,
+    session_id: 'session-1',
+    status: secondTurn ? 'SUCCEEDED' : 'SUCCEEDED',
+    result: runId === 'run-1' ? '第一轮回答：已找到 AgentDemo Acceptance 项目。' : '第二轮回答：已生成离线预览。',
+    snapshot: {
+      employee_id: 'employee-1', employee_version: 3, skill_ids: [], tool_ids: [],
+      execution_profile_id: 'profile-1', execution_profile_version: 1,
+      engine_name: 'deepseek_harness', model_route_id: 'route-1', runtime_config_version: 1,
+      runtime_profile_source: 'DEPLOYMENT_DEFAULT', runtime_model_route_source: 'TENANT_DEFAULT',
+      model_route_snapshot: null,
+    },
+  }))
+  api.getRunTrace.mockImplementation((runId: string) => Promise.resolve({
+    run: { id: runId, status: 'SUCCEEDED' }, spans: [],
+    usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, source: 'test', estimated: true },
+  }))
+  api.submitConversationTurn.mockImplementation(async () => {
+    secondTurn = true
+    api.listConversations.mockResolvedValue({
+      items: [{
+        conversation_id: 'conversation-1',
+        title: 'ODS 到 DWD 工作流',
+        employee: { employee_id: 'employee-1', employee_name: '海豚调度数仓开发' },
+        session_id: 'session-1',
+        last_message: { message_id: 'message-2', preview: '继续生成工作流预览', source: 'USER' },
+        last_run: { run_id: 'run-2', status: 'SUCCEEDED' },
+        pending_approval_count: 0,
+        updated_at: '2026-11-19T08:31:00Z',
+      }],
+      next_cursor: null,
+    })
+    return { conversation_id: 'conversation-1', message_id: 'message-2', run_id: 'run-2', status: 'QUEUED' }
+  })
+
+  renderPage()
+
+  expect(await screen.findByText('第一轮回答：已找到 AgentDemo Acceptance 项目。')).toBeInTheDocument()
+  const input = screen.getByLabelText('提交任务')
+  fireEvent.change(input, { target: { value: '继续生成工作流预览' } })
+  await userEvent.click(screen.getByRole('button', { name: '提交任务' }))
+
+  expect(await screen.findByText('第二轮回答：已生成离线预览。')).toBeInTheDocument()
+  expect(screen.getByText('第一轮回答：已找到 AgentDemo Acceptance 项目。')).toBeInTheDocument()
+})
+
 test('creates a new conversation from the selected active employee deployment', async () => {
   baseApiState()
   api.listConversations.mockResolvedValueOnce({ items: [], next_cursor: null })
@@ -254,7 +315,7 @@ test('exposes pending Deployment configuration and saves a model-only override',
   await user.click(screen.getByRole('button', { name: '设置员工覆盖' }))
   await user.selectOptions(screen.getByRole('combobox', { name: '模型（ModelRoute）' }), 'route-1')
   expect(screen.getByRole('button', { name: '设置员工覆盖' })).toHaveAttribute('aria-pressed', 'true')
-  expect(screen.getByText('数仓模型 · deepseek-chat')).toBeInTheDocument()
+  expect(screen.getAllByText('数仓模型 · deepseek-chat').length).toBeGreaterThan(0)
   expect(screen.getByRole('button', { name: '保存配置' })).toBeEnabled()
   await user.click(screen.getByRole('button', { name: '保存配置' }))
 
@@ -269,6 +330,37 @@ test('exposes pending Deployment configuration and saves a model-only override',
     },
     'admin-local',
   ))
+})
+
+test('saves the strategy revision and starts a new conversation from the panel', async () => {
+  const user = userEvent.setup()
+  baseApiState()
+  api.listConversations.mockResolvedValue({ items: [], next_cursor: null })
+  api.getDeploymentRuntimeConfig.mockResolvedValue({
+    deployment_id: 'deploy-1', deployment_status: 'ACTIVE', runtime_config_version: 1,
+    revision: { config_version: 1, mode: 'INHERIT', runtime_options: {} },
+  })
+  api.saveDeploymentRuntimeConfig.mockResolvedValue({
+    deployment_id: 'deploy-1', deployment_status: 'ACTIVE', runtime_config_version: 2,
+    revision: { mode: 'OVERRIDE', runtime_options: { reasoning_mode: 'DEEP' } },
+  })
+  api.createSession.mockResolvedValue({ id: 'session-new', deployment_id: 'deploy-1' })
+  api.createConversation.mockResolvedValue({ id: 'conversation-new', title: '新对话', is_group: false, status: 'ACTIVE' })
+  api.bindConversationAgent.mockResolvedValue({ employee_id: 'employee-1', session_id: 'session-new', status: 'ACTIVE' })
+
+  renderPage()
+  await user.click(await screen.findByRole('button', { name: '运行配置' }))
+  await user.click(await screen.findByRole('button', { name: '设置员工覆盖' }))
+  await user.selectOptions(screen.getByRole('combobox', { name: '思考模式' }), 'DEEP')
+  await user.click(screen.getByRole('button', { name: '保存并新建对话' }))
+
+  await waitFor(() => expect(api.saveDeploymentRuntimeConfig).toHaveBeenCalled())
+  await waitFor(() => expect(api.bindConversationAgent).toHaveBeenCalledWith(
+    'conversation-new',
+    { employee_id: 'employee-1', employee_name: '海豚调度数仓开发', session_id: 'session-new' },
+    'admin-local',
+  ))
+  expect(api.createSession).toHaveBeenCalledWith('deploy-1', 'admin-local')
 })
 
 test('clears old field overrides when switching a Deployment revision to inherit', async () => {

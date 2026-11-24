@@ -121,7 +121,13 @@ beforeEach(() => {
     if (method === 'GET' && url === '/api/v1/model-route-bindings/effective') {
       return { ok: true, status: 200, json: async () => ({ binding: null, route: null, source: null }) }
     }
+    if (method === 'GET' && url === '/api/v1/runtime-strategy-bindings/effective') {
+      return { ok: true, status: 200, json: async () => ({ binding: null, runtime_options: {}, source: null }) }
+    }
     if (method === 'GET' && /\/api\/v1\/(execution-profile|model-route)-bindings\/(user|tenant)$/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ binding: null }) }
+    }
+    if (method === 'GET' && /\/api\/v1\/runtime-strategy-bindings\/(user|tenant)$/.test(url)) {
       return { ok: true, status: 200, json: async () => ({ binding: null }) }
     }
     if (failures[key]) {

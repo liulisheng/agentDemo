@@ -205,6 +205,10 @@ export interface RuntimeDefaultBinding {
   status: string
 }
 
+export interface RuntimeStrategyDefaultBinding extends RuntimeDefaultBinding {
+  runtime_options: RuntimeOptions
+}
+
 export interface EffectiveEngineProfileSummary {
   profile_id: string
   version: number
@@ -772,6 +776,30 @@ export async function setModelRouteDefault(
   })
 }
 
+export async function getEffectiveRuntimeStrategyDefault(
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ binding: RuntimeStrategyDefaultBinding | null; runtime_options: RuntimeOptions | null; source: string | null }> {
+  return request('/api/v1/runtime-strategy-bindings/effective', fakeUser)
+}
+
+export async function getRuntimeStrategyDefault(
+  scope: 'user' | 'tenant',
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ binding: RuntimeStrategyDefaultBinding | null }> {
+  return request(`/api/v1/runtime-strategy-bindings/${scope}`, fakeUser)
+}
+
+export async function setRuntimeStrategyDefault(
+  scope: 'user' | 'tenant',
+  runtimeOptions: RuntimeOptions | null,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ binding: RuntimeStrategyDefaultBinding | null }> {
+  return request(`/api/v1/runtime-strategy-bindings/${scope}`, fakeUser, {
+    method: 'PUT',
+    body: jsonBody({ runtime_options: runtimeOptions }),
+  })
+}
+
 export async function listModelRoutes(fakeUser = DEFAULT_FAKE_USER): Promise<Page<ModelRouteSummary>> {
   return request('/api/v1/model-routes', fakeUser)
 }
@@ -983,6 +1011,7 @@ export async function saveDeploymentRuntimeConfig(
     execution_profile_id?: string | null
     execution_profile_version?: number | null
     model_route_id?: string | null
+    runtime_options?: RuntimeOptions
   },
   fakeUser = DEFAULT_FAKE_USER,
 ): Promise<DeploymentRuntimeConfigRecord> {
@@ -1284,6 +1313,7 @@ export interface RunTrace {
   usage: {
     input_tokens: number
     output_tokens: number
+    reasoning_tokens?: number
     total_tokens: number
     source: string
     estimated: boolean
@@ -1317,6 +1347,7 @@ export interface ConversationMessage {
   source: string
   text: string
   routing_depth?: number
+  created_at?: string | null
 }
 
 export interface RunDetails {
@@ -1340,6 +1371,7 @@ export interface RunDetails {
     runtime_config_version?: number | null
     runtime_profile_source?: string | null
     runtime_model_route_source?: string | null
+    runtime_options?: RuntimeOptions
     model_route_snapshot?: {
       route_id: string
       route_version: number
@@ -1349,6 +1381,34 @@ export interface RunDetails {
       protocol: string
     } | null
   }
+}
+
+export interface RuntimeOptions {
+  reasoning_mode?: 'OFF' | 'AUTO' | 'DEEP'
+  reasoning_effort?: 'AUTO' | 'LOW' | 'MEDIUM' | 'HIGH'
+  reasoning_budget_tokens?: number | null
+  response_verbosity?: 'CONCISE' | 'STANDARD' | 'DETAILED'
+  max_output_tokens?: number | null
+  max_tool_steps?: number | null
+  timeout_seconds?: number | null
+}
+
+export interface SessionDetails {
+  id: string
+  deployment_id: string
+  employee_version: number
+  trace_id: string
+  runtime_session_ref?: string | null
+  status: string
+  execution_profile_id?: string | null
+  execution_profile_version?: number | null
+  engine_name?: string | null
+  model_route_id?: string | null
+  model_alias?: string | null
+  runtime_config_version?: number | null
+  runtime_profile_source?: string | null
+  runtime_model_route_source?: string | null
+  runtime_options?: RuntimeOptions
 }
 
 export interface ToolApprovalPreview {
@@ -1391,7 +1451,7 @@ export async function createConversation(
 export async function createSession(
   deploymentId: string,
   fakeUser = DEFAULT_FAKE_USER,
-): Promise<{ id: string; deployment_id: string; employee_version: number; trace_id: string }> {
+): Promise<SessionDetails> {
   return request('/api/v1/sessions', fakeUser, {
     method: 'POST',
     body: jsonBody({ deployment_id: deploymentId }),

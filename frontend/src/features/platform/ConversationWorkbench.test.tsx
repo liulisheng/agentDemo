@@ -34,6 +34,13 @@ type WorkbenchProps = {
     sessionId: string
     skills: string[]
     allowedTools: string[]
+    runtimeOptions?: {
+      reasoning_mode?: 'OFF' | 'AUTO' | 'DEEP'
+      reasoning_effort?: 'AUTO' | 'LOW' | 'MEDIUM' | 'HIGH'
+      reasoning_budget_tokens?: number | null
+      response_verbosity?: 'CONCISE' | 'STANDARD' | 'DETAILED'
+      max_tool_steps?: number | null
+    }
   }
   approval?: { toolName: string; preview: string; previewSha256: string; expiresAt: string; state?: string }
   loading?: boolean
@@ -96,6 +103,7 @@ test('workbench selects conversations and requests the next stable page', async 
   expect(screen.getByText('工具 · projects_list')).toBeInTheDocument()
   expect(screen.getByText('Run 状态')).toBeInTheDocument()
   expect(document.querySelector('time[datetime="2026-11-19T08:12:00Z"]')).toBeInTheDocument()
+  expect(screen.getByText(/2026\/11\/19 16:12:00/)).toBeInTheDocument()
 
   await user.click(screen.getByRole('button', { name: /ODS 到 DWD 工作流/ }))
   await user.click(screen.getByRole('button', { name: '加载更多对话' }))
@@ -190,6 +198,37 @@ test('approval preview exposes explicit actions and UNKNOWN never offers retry',
   )
   expect(screen.getAllByText('结果待对账').length).toBeGreaterThanOrEqual(2)
   expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+})
+
+test('shows the answer strategy in the Run snapshot and thinking phase in the timeline', () => {
+  render(
+    <Workbench
+      conversations={[{ ...conversation, runStatus: 'RUNNING', pendingApprovalCount: 0 }]}
+      selectedConversationId="conv-1"
+      snapshot={{
+        ...snapshot,
+        runtimeOptions: {
+          reasoning_mode: 'DEEP',
+          reasoning_effort: 'HIGH',
+          response_verbosity: 'STANDARD',
+          reasoning_budget_tokens: 8192,
+          max_tool_steps: 20,
+        },
+      }}
+      timeline={[{
+        id: 'thinking-1',
+        role: 'run',
+        label: '思考中',
+        text: '正在整理任务约束。原始思考链不会展示。',
+        status: '进行中',
+      }]}
+    />,
+  )
+
+  expect(screen.getByText('深度思考 · 强度高 · 标准答复')).toBeInTheDocument()
+  expect(screen.getByText('推理预算：8,192 token · 最大工具步骤：20')).toBeInTheDocument()
+  expect(screen.getByText('思考中')).toBeInTheDocument()
+  expect(screen.getByText('正在整理任务约束。原始思考链不会展示。')).toBeInTheDocument()
 })
 
 test('narrow viewport keeps all three workbench regions available', () => {

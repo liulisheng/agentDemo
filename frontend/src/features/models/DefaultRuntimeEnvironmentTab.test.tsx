@@ -72,6 +72,19 @@ beforeEach(() => {
         source: 'TENANT_DEFAULT',
       }) }
     }
+    if (method === 'GET' && url === '/api/v1/runtime-strategy-bindings/effective') {
+      return { ok: true, status: 200, json: async () => ({
+        binding: null,
+        runtime_options: { reasoning_mode: 'AUTO', reasoning_effort: 'AUTO', response_verbosity: 'STANDARD' },
+        source: 'SYSTEM_DEFAULT',
+      }) }
+    }
+    if (method === 'GET' && url.includes('/runtime-strategy-bindings/user')) {
+      return { ok: true, status: 200, json: async () => ({ binding: { binding_id: 's-user', scope_type: 'user', scope_id: fakeUser ?? '', runtime_options: { reasoning_mode: 'AUTO', reasoning_effort: 'AUTO', response_verbosity: 'STANDARD' }, status: 'ACTIVE' } }) }
+    }
+    if (method === 'GET' && url.includes('/runtime-strategy-bindings/tenant')) {
+      return { ok: true, status: 200, json: async () => ({ binding: { binding_id: 's-tenant', scope_type: 'tenant', scope_id: 'tenant-a', runtime_options: { reasoning_mode: 'AUTO', reasoning_effort: 'AUTO', response_verbosity: 'STANDARD' }, status: 'ACTIVE' } }) }
+    }
     if (method === 'GET' && url.includes('/execution-profile-bindings/user')) {
       return { ok: true, status: 200, json: async () => ({ binding: fakeUser === 'member-local' ? null : { binding_id: 'b-user', scope_type: 'user', scope_id: 'admin-local', profile_id: 'profile-a', profile_version: 1, status: 'ACTIVE' } }) }
     }
@@ -161,6 +174,29 @@ test('members can edit personal defaults but cannot edit tenant defaults', async
   expect(screen.getByRole('button', { name: '保存模型默认' })).toBeEnabled()
   expect(screen.getByText(/租户默认只读：/)).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '保存租户默认' })).not.toBeInTheDocument()
+})
+
+test('saves the prototype answer strategy as a scoped default', async () => {
+  const user = userEvent.setup()
+  renderTab()
+
+  await screen.findByText('默认运行环境', { exact: false })
+  expect(document.querySelector('.runtime-default-form > .runtime-strategy-panel')).toBeInTheDocument()
+  await user.selectOptions(screen.getByRole('combobox', { name: '思考模式' }), 'DEEP')
+  await user.selectOptions(screen.getByRole('combobox', { name: '推理强度' }), 'HIGH')
+  await user.click(screen.getByRole('button', { name: '保存回答策略' }))
+
+  await waitFor(() => {
+    const call = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input) === '/api/v1/runtime-strategy-bindings/user' && init?.method === 'PUT')
+    expect(call).toBeDefined()
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      runtime_options: {
+        reasoning_mode: 'DEEP',
+        reasoning_effort: 'HIGH',
+        response_verbosity: 'STANDARD',
+      },
+    })
+  })
 })
 
 test('shows a retryable page error when the effective ModelRoute default cannot be read', async () => {

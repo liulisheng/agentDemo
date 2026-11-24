@@ -56,6 +56,11 @@ interface PendingTurn {
   requestKey: string
 }
 
+interface CachedRunResult {
+  conversationId: string
+  text: string
+}
+
 type ApprovalAction =
   | { kind: 'approve'; approvalId: string; previewSha256: string }
   | { kind: 'reject'; approvalId: string }
@@ -132,7 +137,7 @@ function mapMessage(value: ConversationMessage): WorkbenchTimelineEvent {
     id: value.id,
     role: isUser ? 'user' : 'assistant',
     text: value.text,
-    createdAt: (value as ConversationMessage & { created_at?: string }).created_at,
+    createdAt: value.created_at ?? undefined,
   }
 }
 
@@ -160,6 +165,25 @@ function mapTrace(trace: RunTrace | undefined): WorkbenchTimelineEvent[] {
     const toolName = attributeText(span.attributes, 'tool_name', 'remote_tool_name', 'name')
       ?? (toolCallId ? toolNameByCallId.get(toolCallId) : undefined)
     const status = traceStatusLabel(span.status)
+    const createdAt = attributeText(span.attributes, 'created_at')
+    const phaseExplanation: Record<string, { label: string; text: string; status: string }> = {
+      reasoning_started: { label: '思考中', text: '员工正在整理任务约束和执行计划。原始思考链不会展示。', status: '进行中' },
+      'reasoning/start': { label: '思考中', text: '员工正在整理任务约束和执行计划。原始思考链不会展示。', status: '进行中' },
+      reasoning_completed: { label: '思考完成', text: '推理阶段已完成，准备生成答复或调用工具。', status: '已完成' },
+      'reasoning/end': { label: '思考完成', text: '推理阶段已完成，准备生成答复或调用工具。', status: '已完成' },
+    }
+    const phase = eventType ? phaseExplanation[eventType] : undefined
+    if (phase) {
+      return {
+        id: `span-${span.id}`,
+        role: 'run',
+        label: phase.label,
+        status: phase.status,
+        text: phase.text,
+        detail: eventType,
+        createdAt,
+      }
+    }
     if (span.span_type === 'tool') {
       const toolLabel = readableToolName(toolName)
       if (eventType === 'tool/result') {
@@ -174,6 +198,7 @@ function mapTrace(trace: RunTrace | undefined): WorkbenchTimelineEvent[] {
             ? `${toolLabel}返回错误；请查看 Trace 和错误信息。`
             : `${toolLabel}返回结果。`,
           detail: toolName,
+          createdAt,
         }
       }
       if (eventType === 'tool/call') {
@@ -188,6 +213,7 @@ function mapTrace(trace: RunTrace | undefined): WorkbenchTimelineEvent[] {
             ? `${toolLabel}的预览已生成，等待 Run 发起人确认。`
             : `${toolLabel}。`,
           detail: toolName,
+          createdAt,
         }
       }
       return {
@@ -198,6 +224,7 @@ function mapTrace(trace: RunTrace | undefined): WorkbenchTimelineEvent[] {
         status,
         text: eventType === 'tool_denied' ? '工具调用被运行策略拒绝。' : `${toolLabel}。`,
         detail: eventType,
+        createdAt,
       }
     }
 
@@ -236,6 +263,7 @@ function mapTrace(trace: RunTrace | undefined): WorkbenchTimelineEvent[] {
       text: rawEventText ?? explanation.text,
       detail: eventType,
       internal: true,
+      createdAt,
     }
   })
 }
@@ -286,6 +314,7 @@ function snapshotFromRun(
     runtimeConfigVersion: run.snapshot.runtime_config_version,
     runtimeProfileSource: run.snapshot.runtime_profile_source,
     runtimeModelRouteSource: run.snapshot.runtime_model_route_source,
+    runtimeOptions: run.snapshot.runtime_options,
   }
 }
 
@@ -304,6 +333,7 @@ export function ConversationWorkbenchPage() {
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(null)
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null)
   const [runIdOverrides, setRunIdOverrides] = useState<Record<string, string>>({})
+  const [cachedRunResults, setCachedRunResults] = useState<Record<string, CachedRunResult>>({})
   const [optimisticConversation, setOptimisticConversation] = useState<WorkbenchConversationContext | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [runtimeConfigOpen, setRuntimeConfigOpen] = useState(false)
@@ -393,6 +423,7 @@ export function ConversationWorkbenchPage() {
     setSelectedEmployeeId(null)
     setSelectedConversationId(null)
     setRunIdOverrides({})
+    setCachedRunResults({})
     setOptimisticConversation(null)
     setActionError(null)
     setRuntimeConfigNotice(null)
@@ -403,6 +434,21 @@ export function ConversationWorkbenchPage() {
       setOptimisticConversation(null)
     }
   }, [optimisticConversation, serverConversations])
+
+  useEffect(() => {
+    const result = runQuery.data
+    if (!selectedConversation || !runId || result?.id !== runId || !result.result) return
+    setCachedRunResults((current) => {
+      const previous = current[result.id]
+      if (previous?.conversationId === selectedConversation.id && previous.text === result.result) {
+        return current
+      }
+      return {
+        ...current,
+        [result.id]: { conversationId: selectedConversation.id, text: result.result },
+      }
+    })
+  }, [runId, runQuery.data, selectedConversation?.id])
 
   useEffect(() => {
     if (!selectedConversationId || !conversationContexts.some((row) => row.id === selectedConversationId)) {
@@ -498,10 +544,37 @@ export function ConversationWorkbenchPage() {
   }))
   const messages: WorkbenchTimelineEvent[] = (messagesQuery.data?.items ?? []).map(mapMessage)
   const traceEvents = mapTrace(traceQuery.data)
-  const runResultEvent: WorkbenchTimelineEvent[] = runQuery.data?.result
-    ? [{ id: `run-result-${runQuery.data.id}`, role: 'assistant', text: runQuery.data.result }]
-    : []
-  const timeline = [...messages, ...traceEvents, ...runResultEvent]
+  const persistedAssistantTexts = new Set(
+    messages.filter((event) => event.role === 'assistant').map((event) => event.text),
+  )
+  const runResultEventsById = new Map<string, WorkbenchTimelineEvent>()
+  for (const [cachedRunId, cachedResult] of Object.entries(cachedRunResults)) {
+    if (
+      cachedResult.conversationId === selectedConversation?.id
+      && cachedResult.text
+      && !persistedAssistantTexts.has(cachedResult.text)
+    ) {
+      runResultEventsById.set(cachedRunId, {
+        id: `run-result-${cachedRunId}`,
+        role: 'assistant',
+        text: cachedResult.text,
+      })
+    }
+  }
+  if (
+    runQuery.data?.result
+    && runQuery.data.id === runId
+    && selectedConversation
+    && !persistedAssistantTexts.has(runQuery.data.result)
+  ) {
+    runResultEventsById.set(runQuery.data.id, {
+      id: `run-result-${runQuery.data.id}`,
+      role: 'assistant',
+      text: runQuery.data.result,
+    })
+  }
+  const runResultEvents = [...runResultEventsById.values()]
+  const timeline = [...messages, ...traceEvents, ...runResultEvents]
   const snapshot = snapshotFromRun(runQuery.data, selectedConversation)
   const approval = approvalQuery.data
   const authorizedApproval = approval?.requested_by === fakeUser ? approval : undefined
@@ -598,6 +671,10 @@ export function ConversationWorkbenchPage() {
           setRuntimeConfigNotice('运行配置已更新；当前对话仍使用旧 Session 快照。点击“新对话”后使用新配置。')
         }
         void queryClient.invalidateQueries({ queryKey: ['workbench-employees', fakeUser] })
+      }}
+      onSavedAndCreate={() => {
+        setRuntimeConfigOpen(false)
+        createConversationMutation.mutate()
       }}
     />
     </>

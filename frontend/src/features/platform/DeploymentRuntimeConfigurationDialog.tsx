@@ -1,20 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Modal, Space, Spin, Tag, Typography, message } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 
 import {
   getDeploymentRuntimeConfig,
   getEffectiveEngineProfileDefault,
   getEffectiveModelRouteDefault,
+  getEffectiveRuntimeStrategyDefault,
   listEngineProviders,
   listExecutionProfileVersions,
   listExecutionProfiles,
   listSelectableModelRoutes,
   saveDeploymentRuntimeConfig,
 } from '../../api/client'
-import type { ExecutionProfileSummary } from '../../api/client'
+import type { ExecutionProfileSummary, RuntimeOptions } from '../../api/client'
 import { useTenantContext } from '../management/TenantContext'
+import { RuntimeStrategyPanel } from './RuntimeStrategyPanel'
 
 const { Text } = Typography
 
@@ -37,6 +38,7 @@ export interface DeploymentRuntimeConfigurationDialogProps {
   canEdit: boolean
   onClose: () => void
   onSaved: () => void
+  onSavedAndCreate?: () => void
 }
 
 export function DeploymentRuntimeConfigurationDialog({
@@ -46,12 +48,17 @@ export function DeploymentRuntimeConfigurationDialog({
   canEdit,
   onClose,
   onSaved,
+  onSavedAndCreate,
 }: DeploymentRuntimeConfigurationDialogProps) {
   const { fakeUser, currentIdentity } = useTenantContext()
   const queryClient = useQueryClient()
   const [mode, setMode] = useState<'INHERIT' | 'OVERRIDE'>('INHERIT')
   const [profileValue, setProfileValue] = useState<string>()
   const [routeValue, setRouteValue] = useState<string>()
+  const [reasoningMode, setReasoningMode] = useState<RuntimeOptions['reasoning_mode'] | 'INHERIT'>('INHERIT')
+  const [reasoningEffort, setReasoningEffort] = useState<RuntimeOptions['reasoning_effort'] | 'INHERIT'>('INHERIT')
+  const [responseVerbosity, setResponseVerbosity] = useState<RuntimeOptions['response_verbosity'] | 'INHERIT'>('INHERIT')
+  const [reasoningBudget, setReasoningBudget] = useState<number | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
 
   const configQuery = useQuery({
@@ -90,6 +97,11 @@ export function DeploymentRuntimeConfigurationDialog({
     queryFn: () => getEffectiveModelRouteDefault(fakeUser),
     enabled: open,
   })
+  const effectiveStrategyQuery = useQuery({
+    queryKey: ['runtime-default-strategy-effective', fakeUser],
+    queryFn: () => getEffectiveRuntimeStrategyDefault(fakeUser),
+    enabled: open,
+  })
 
   const profiles = useMemo(
     () => profileVersionsQuery.data?.flatMap((page) => page.items) ?? [],
@@ -113,6 +125,10 @@ export function DeploymentRuntimeConfigurationDialog({
       setMode('INHERIT')
       setProfileValue(undefined)
       setRouteValue(undefined)
+      setReasoningMode('INHERIT')
+      setReasoningEffort('INHERIT')
+      setResponseVerbosity('INHERIT')
+      setReasoningBudget(null)
       return
     }
     setMode(revision.mode)
@@ -122,6 +138,11 @@ export function DeploymentRuntimeConfigurationDialog({
         : undefined,
     )
     setRouteValue(revision.model_route_id ?? undefined)
+    const options = (revision.runtime_options ?? {}) as RuntimeOptions
+    setReasoningMode(options.reasoning_mode ?? 'INHERIT')
+    setReasoningEffort(options.reasoning_effort ?? 'INHERIT')
+    setResponseVerbosity(options.response_verbosity ?? 'INHERIT')
+    setReasoningBudget(options.reasoning_budget_tokens ?? null)
   }, [configQuery.data])
 
   useEffect(() => {
@@ -129,25 +150,34 @@ export function DeploymentRuntimeConfigurationDialog({
   }, [open, deploymentId])
 
   const saveMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: ({ createAfterSave }: { createAfterSave: boolean }) => {
       if (!deploymentId || !configQuery.data) throw new Error('运行配置尚未读取完成')
-      if (mode === 'OVERRIDE' && !profileValue && !routeValue) {
-        throw new Error('请选择一个员工覆盖项；未选择的维度会继承默认。')
+      const runtime_options: RuntimeOptions = {
+        ...(reasoningMode !== 'INHERIT' ? { reasoning_mode: reasoningMode } : {}),
+        ...(reasoningEffort !== 'INHERIT' ? { reasoning_effort: reasoningEffort } : {}),
+        ...(responseVerbosity !== 'INHERIT' ? { response_verbosity: responseVerbosity } : {}),
+        ...(reasoningBudget !== null ? { reasoning_budget_tokens: reasoningBudget } : {}),
+      }
+      if (mode === 'OVERRIDE' && !profileValue && !routeValue && Object.keys(runtime_options).length === 0) {
+        throw new Error('请选择一个员工覆盖项或设置回答策略；未选择的维度会继承默认。')
       }
       const useProfileOverride = mode === 'OVERRIDE' && Boolean(profileValue)
       const useModelOverride = mode === 'OVERRIDE' && Boolean(routeValue)
       const profile = useProfileOverride ? decodeProfileKey(profileValue) : { id: null, version: null }
       if (useProfileOverride && (!profile.id || !profile.version)) throw new Error('请选择精确的 ExecutionProfile 版本。')
       if (useModelOverride && !routeValue) throw new Error('请选择 ModelRoute。')
-      return saveDeploymentRuntimeConfig(deploymentId, {
+      if (reasoningUnsupported) throw new Error('当前引擎或模型尚未声明深度思考能力，不能保存该策略。')
+      const input = {
         expected_config_version: configQuery.data.runtime_config_version,
         mode,
         execution_profile_id: profile.id,
         execution_profile_version: profile.version,
         model_route_id: useModelOverride ? routeValue : null,
-      }, fakeUser)
+        ...(Object.keys(runtime_options).length > 0 ? { runtime_options } : {}),
+      }
+      return saveDeploymentRuntimeConfig(deploymentId, input, fakeUser)
     },
-    onSuccess: async () => {
+    onSuccess: async (_value, variables) => {
       setFormError(null)
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['deployment-runtime-config', fakeUser, deploymentId] }),
@@ -156,6 +186,7 @@ export function DeploymentRuntimeConfigurationDialog({
       ])
       message.success('员工运行配置已保存；新 Session 会使用该修订。')
       onSaved()
+      if (variables.createAfterSave) onSavedAndCreate?.()
     },
     onError: (error) => setFormError(error instanceof Error ? error.message : '运行配置保存失败'),
   })
@@ -167,6 +198,7 @@ export function DeploymentRuntimeConfigurationDialog({
     providersQuery.isPending,
     effectiveEngineQuery.isPending,
     effectiveRouteQuery.isPending,
+    effectiveStrategyQuery.isPending,
     profileRows.length > 0 && profileVersionsQuery.isPending,
   ].some(Boolean)
   const queryError = [
@@ -177,6 +209,7 @@ export function DeploymentRuntimeConfigurationDialog({
     providersQuery.error,
     effectiveEngineQuery.error,
     effectiveRouteQuery.error,
+    effectiveStrategyQuery.error,
   ].find(Boolean)
 
   const selectedProfile = profileValue ? profileByKey.get(profileValue) : undefined
@@ -185,23 +218,26 @@ export function DeploymentRuntimeConfigurationDialog({
   const effectiveRoute = effectiveRouteQuery.data?.route
   const resolvedProfile = selectedProfile ?? profiles.find((profile) => profile.id === effectiveProfile?.profile_id && profile.version === effectiveProfile.version)
   const resolvedRoute = selectedRoute ?? routes.find((route) => route.route_id === effectiveRoute?.route_id)
+  const effectiveStrategy = effectiveStrategyQuery.data?.runtime_options ?? {}
   const revision = configQuery.data?.revision
-  const legacyApprovalName = revision?.approval_policy.name
+  const legacyApprovalName = revision?.approval_policy?.name
   const selectedProfileUnsupported = selectedProfile?.runtime_policy_supported === false
   const hasUnsupportedLegacyOverrides = Boolean(
     revision && (
       revision.workspace_profile_id || revision.sandbox_profile_id
-      || (Array.isArray(revision.approval_policy.require_approval_for)
+      || (Array.isArray(revision.approval_policy?.require_approval_for)
         && revision.approval_policy.require_approval_for.length > 0)
       || (typeof legacyApprovalName === 'string' && legacyApprovalName !== 'none')
     ),
   )
   const provider = providersQuery.data?.items.find((item) => item.engine_name === resolvedProfile?.engine_name)
+  const reasoningUnsupported = reasoningMode === 'DEEP'
+    && provider
+    && provider.capabilities.reasoning !== true
   const incompatible = Boolean(
     resolvedProfile && resolvedRoute && provider
     && !provider.supported_model_protocols.includes(resolvedRoute.profile.protocol ?? ''),
   )
-  const noEffectiveProfile = !resolvedProfile
   const unavailableClaude = providersQuery.data?.items.some((item) => item.engine_name === 'claude_code') !== true
 
   return (
@@ -210,12 +246,13 @@ export function DeploymentRuntimeConfigurationDialog({
       title={<span>运行配置{employeeName ? ` · ${employeeName}` : ''}</span>}
       open={open}
       onCancel={onClose}
-      width={470}
+      width={760}
       destroyOnHidden
       footer={(
         <Space>
           <Button onClick={onClose}>关闭</Button>
-          {canEdit && <Button type="primary" loading={saveMutation.isPending} disabled={loading || Boolean(queryError)} onClick={() => saveMutation.mutate()}>保存配置</Button>}
+          {canEdit && <Button loading={saveMutation.isPending} disabled={loading || Boolean(queryError)} onClick={() => saveMutation.mutate({ createAfterSave: true })}>保存并新建对话</Button>}
+          {canEdit && <Button type="primary" loading={saveMutation.isPending} disabled={loading || Boolean(queryError)} onClick={() => saveMutation.mutate({ createAfterSave: false })}>保存配置</Button>}
         </Space>
       )}
     >
@@ -226,7 +263,7 @@ export function DeploymentRuntimeConfigurationDialog({
           void Promise.all([
             configQuery.refetch(), profilesQuery.refetch(), profileVersionsQuery.refetch(),
             routesQuery.refetch(), providersQuery.refetch(), effectiveEngineQuery.refetch(),
-            effectiveRouteQuery.refetch(),
+            effectiveRouteQuery.refetch(), effectiveStrategyQuery.refetch(),
           ])
         }}>重试</Button>} />
       ) : (
@@ -248,26 +285,10 @@ export function DeploymentRuntimeConfigurationDialog({
             <Alert type="warning" showIcon message="当前 Profile 含未接入 Worker 的环境策略" description="请改选一个只配置引擎的 Profile，或先在“模型管理 · 默认运行环境”创建同 ID 新版本并清除历史字段。" />
           )}
 
-          <fieldset disabled={!canEdit} className="deployment-runtime-fieldset">
-            <legend>此员工 Deployment 的配置方式</legend>
-            <Text type="secondary">ExecutionProfile 与 ModelRoute 分开选择；更换引擎不会替换模型。</Text>
-            <div className="deployment-runtime-mode-switch" role="group" aria-label="运行配置模式">
-              <button
-                type="button"
-                aria-pressed={mode === 'INHERIT'}
-                onClick={() => {
-                  setMode('INHERIT')
-                  setProfileValue(undefined)
-                  setRouteValue(undefined)
-                }}
-              >全部继承默认</button>
-              <button
-                type="button"
-                aria-pressed={mode === 'OVERRIDE'}
-                onClick={() => setMode('OVERRIDE')}
-              >设置员工覆盖</button>
-            </div>
-            {mode === 'OVERRIDE' && (
+          {mode === 'OVERRIDE' ? (
+            <div className="runtime-resource-card">
+              <Text strong>运行资源</Text>
+              <Text type="secondary">ExecutionProfile 与 ModelRoute 分开选择；更换引擎不会替换模型。</Text>
               <div className="deployment-runtime-override-fields">
                 <div className="deployment-runtime-field">
                   <label htmlFor="employee-runtime-profile">执行引擎（ExecutionProfile）</label>
@@ -277,6 +298,7 @@ export function DeploymentRuntimeConfigurationDialog({
                     aria-label="执行引擎（ExecutionProfile）"
                     value={profileValue ?? ''}
                     onChange={(event) => setProfileValue(event.target.value || undefined)}
+                    disabled={!canEdit}
                   >
                     <option value="">继承默认引擎</option>
                     {profileOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -290,30 +312,58 @@ export function DeploymentRuntimeConfigurationDialog({
                     aria-label="模型（ModelRoute）"
                     value={routeValue ?? ''}
                     onChange={(event) => setRouteValue(event.target.value || undefined)}
+                    disabled={!canEdit}
                   >
                     <option value="">继承默认模型</option>
                     {routeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                   </select>
                 </div>
-                {noEffectiveProfile && !selectedProfile && (
-                  <Alert type="warning" showIcon message="当前没有可继承的 EngineProfile 默认" description={<span>仍需先配置默认引擎或在上方选择员工专属 Profile。可前往 <Link to="/enterprise/models?tab=runtime-defaults">模型管理 · 默认运行环境</Link> 设置。</span>} />
-                )}
               </div>
-            )}
-          </fieldset>
-
-          {mode === 'INHERIT' && (
+            </div>
+          ) : (
             <div className="deployment-runtime-inherit-preview">
               <strong>{effectiveProfile ? `${effectiveProfile.engine_name} · Profile v${effectiveProfile.version}` : '尚未设置默认引擎'}</strong>
               <span>引擎来源：{effectiveEngineQuery.data?.source ?? '无来源'}</span>
               <p>模型来源：{effectiveRoute ? `${effectiveRoute.alias} · ${effectiveRoute.model_name}` : '尚未设置'} · {effectiveRouteQuery.data?.source ?? '无来源'}</p>
               <span>优先级：Deployment 字段 → 个人默认 → 租户默认 → 平台/系统</span>
-              {noEffectiveProfile && (
-                <Alert type="warning" showIcon message="当前没有可继承的 EngineProfile 默认" description={<span>保存继承后仍不能创建 Session。请先去 <Link to="/enterprise/models?tab=runtime-defaults">模型管理 · 默认运行环境</Link> 配置引擎默认。</span>} />
-              )}
             </div>
           )}
-          {incompatible && <Alert type="error" showIcon message="当前引擎和模型协议不兼容" description="保存不会替换模型；此组合创建 Session 时会被拒绝，请独立更换其中一项。" />}
+
+          <RuntimeStrategyPanel
+            mode={mode}
+            canEdit={canEdit}
+            draft={mode === 'OVERRIDE' ? {
+              ...(reasoningMode !== 'INHERIT' ? { reasoning_mode: reasoningMode } : {}),
+              ...(reasoningEffort !== 'INHERIT' ? { reasoning_effort: reasoningEffort } : {}),
+              ...(responseVerbosity !== 'INHERIT' ? { response_verbosity: responseVerbosity } : {}),
+              ...(reasoningBudget !== null ? { reasoning_budget_tokens: reasoningBudget } : {}),
+            } : {}}
+            effective={effectiveStrategy}
+            source={effectiveStrategyQuery.data?.source}
+            engineLabel={resolvedProfile ? `${resolvedProfile.engine_name} · Profile v${resolvedProfile.version}` : '尚未设置'}
+            routeLabel={resolvedRoute ? `${resolvedRoute.alias} · ${resolvedRoute.profile.model_name}` : '尚未设置'}
+            configVersion={configQuery.data?.runtime_config_version}
+            capabilities={provider?.capabilities}
+            reasoningUnsupported={Boolean(reasoningUnsupported)}
+            incompatible={incompatible}
+            onModeChange={(nextMode) => {
+              setMode(nextMode)
+              if (nextMode === 'INHERIT') {
+                setProfileValue(undefined)
+                setRouteValue(undefined)
+                setReasoningMode('INHERIT')
+                setReasoningEffort('INHERIT')
+                setResponseVerbosity('INHERIT')
+                setReasoningBudget(null)
+              }
+            }}
+            onChange={(value) => {
+              setReasoningMode(value.reasoning_mode ?? 'INHERIT')
+              setReasoningEffort(value.reasoning_effort ?? 'INHERIT')
+              setResponseVerbosity(value.response_verbosity ?? 'INHERIT')
+              setReasoningBudget(value.reasoning_budget_tokens ?? null)
+            }}
+          />
 
           {unavailableClaude && <Text className="deployment-runtime-provider-note" type="secondary">Claude Code 当前未注册适配器，因此不会出现在可选引擎中。</Text>}
           {formError && <Alert type="error" showIcon message="运行配置未保存" description={formError} />}
