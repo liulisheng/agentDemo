@@ -88,21 +88,26 @@ function eventTitle(event: OrchestrationEventSummary): string {
     task_assigned: '任务已分配', task_run_started: '成员开始执行任务',
     task_run_finished: '成员执行任务结束', task_state_changed: '任务状态更新',
     task_retried: '任务已重新尝试', orchestration_cancelled: '编排已取消',
+    plan_requested: '请求 Router 计划', router_run_submitted: 'Router Run 已入队',
+    task_queued_for_worker: '任务已进入 Worker 队列', task_blocked: '任务已阻塞',
   }
   return labels[event.event_type] ?? event.event_type
 }
 
-function eventSummary(event: OrchestrationEventSummary): string {
+function eventFields(event: OrchestrationEventSummary): Array<{ label: string; value: string }> {
   const payload = event.payload ?? {}
   const labels: Record<string, string> = {
     status: '状态', run_id: 'Run', member_id: '成员', worker_id: 'Worker',
     engine_name: '引擎', worker_pool: 'Worker Pool', error_code: '错误',
+    task_count: '任务数', plan_revision: '计划版本', source: '来源',
   }
-  const entries = Object.entries(payload)
-    .filter(([, value]) => value !== null && value !== undefined && value !== '')
+  return Object.entries(payload)
+    .filter(([key, value]) => !['prompt_sha256', 'input_message_id'].includes(key) && value !== null && value !== undefined && value !== '')
     .slice(0, 6)
-    .map(([key, value]) => `${labels[key] ?? key}：${typeof value === 'object' ? JSON.stringify(value) : String(value)}`)
-  return entries.length ? entries.join(' · ') : '服务端追加事件，无额外摘要字段。'
+    .map(([key, value]) => ({
+      label: labels[key] ?? key,
+      value: typeof value === 'object' ? JSON.stringify(value) : String(value),
+    }))
 }
 
 export function TeamWorkbench({ fakeUser, onSwitchToSingle }: TeamWorkbenchProps) {
@@ -712,7 +717,7 @@ export function TeamWorkbench({ fakeUser, onSwitchToSingle }: TeamWorkbenchProps
             })}
             {orchestrationTasks.map((task) => <article key={task.task_id} className="event task"><span className="marker" aria-hidden="true" /><div><div className="event-meta"><span className="event-label">{statusLabel(task.status)} · {members.find((member) => member.member_id === task.assigned_member_id)?.employee_id ? employees.find((employee) => employee.id === members.find((member) => member.member_id === task.assigned_member_id)?.employee_id)?.name : '等待分配'}</span><time>{formatTime(task.started_at)}</time></div><p>{task.title}{task.error_code ? ` · ${task.error_code}` : ''}</p><div className="task-inline"><strong>{task.client_key} · {statusLabel(task.status)}</strong><span>{task.engine_name ?? '等待引擎'} · {task.latest_attempt?.worker_pool ?? '尚未领取'} · Attempt {task.latest_attempt?.attempt_no ?? task.attempt}</span></div></div></article>)}
             {activeConversationId && messageItems.length === 0 && orchestrationTasks.length === 0 && !messagesQuery.isLoading && <div className="team-prototype-empty">这是团队对话的开始，提交一条任务后 Router Agent 会生成执行计划。</div>}
-            {events.length > 0 && <details className="workbench-internal-details"><summary>执行详情（{events.length} 条服务端事件）</summary><p className="workbench-internal-intro">按服务端 sequence 展示任务、Worker、Run 和状态变化；隐藏原始 Prompt 与完整内部载荷。</p><div className="workbench-internal-list">{events.slice(-10).map((event) => <article className="workbench-internal-event" key={event.event_id}><div className="workbench-internal-meta"><strong>{eventTitle(event)}</strong><span>seq {event.sequence} · {formatTime(event.created_at)}</span></div><p>{eventSummary(event)}</p></article>)}</div></details>}
+            {events.length > 0 && <details className="workbench-internal-details"><summary>执行详情（{events.length} 条服务端事件）</summary><p className="workbench-internal-intro">按服务端 sequence 展示任务、Worker、Run 和状态变化；隐藏原始 Prompt、哈希和完整内部载荷。</p><div className="workbench-internal-list">{events.slice(-10).map((event) => { const fields = eventFields(event); return <article className="workbench-internal-event" key={event.event_id}><div className="workbench-internal-meta"><strong>{eventTitle(event)}</strong><span>seq {event.sequence} · {formatTime(event.created_at)}</span></div>{fields.length ? <div className="workbench-internal-fields">{fields.map((field) => <span key={field.label}><b>{field.label}</b><code>{field.value}</code></span>)}</div> : <span className="workbench-internal-empty">无附加摘要字段</span>}</article> })}</div></details>}
           </div>
           <form className="team-prototype-composer workbench-composer" onSubmit={submitTeamTask}>
             <label htmlFor="team-workbench-message-input">提交任务</label><textarea id="team-workbench-message-input" aria-label="提交新的团队任务" value={taskInput} onChange={(event) => setTaskInput(event.target.value)} placeholder="描述要交给团队完成的工作…" rows={3} disabled={!activeConversationId || !canOperate || status === 'CANCELLED' || status === 'PLANNING'} />
