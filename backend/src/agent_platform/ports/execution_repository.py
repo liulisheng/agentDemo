@@ -86,10 +86,41 @@ class ExecutionRepository(Protocol):
         """在一个租户事务里插入 USER Message 和 QUEUED Run，按同一幂等键重放。"""
         ...
 
+    def submit_worker_run(
+        self,
+        identity: IdentityContext,
+        conversation_id: str,
+        run: RunRecord,
+        idempotency_key: str,
+        input_message: Message,
+        *,
+        input_content_ref: str,
+        input_content_sha256: str,
+        input_byte_length: int,
+        input_content_type: str,
+        display_message: Message | None = None,
+        display_content_ref: str | None = None,
+        display_content_sha256: str | None = None,
+        display_byte_length: int | None = None,
+        display_content_type: str | None = None,
+    ) -> tuple[RunRecord, bool]:
+        """在事务中保存 QUEUED Run 和 Worker 私有输入；可同时保存一条用户可见消息。"""
+        ...
+
     def get_run_by_idempotency(
         self, identity: IdentityContext, session_id: str, idempotency_key: str
     ) -> RunRecord | None:
         """按平台、租户及 Session 范围读取已提交的 Run。"""
+        ...
+
+    def worker_pool_metrics(self, identity: IdentityContext, engine_name: str) -> dict[str, int | bool]:
+        """按租户和固定 Session Engine 汇总持久化队列与有效 Worker 租约。"""
+        ...
+
+    def heartbeat_worker(
+        self, platform_id: str, worker_id: str, engine_name: str, *, status: str = "ACTIVE"
+    ) -> None:
+        """记录受信 Worker 对指定 EngineProvider 的健康心跳。"""
         ...
 
     def acquire_lease(
@@ -97,7 +128,12 @@ class ExecutionRepository(Protocol):
     ) -> int | None: ...
 
     def claim_next_queued_run(
-        self, platform_id: str, worker_id: str, *, lease_seconds: int = 30
+        self,
+        platform_id: str,
+        worker_id: str,
+        *,
+        lease_seconds: int = 30,
+        engine_names: tuple[str, ...] | None = None,
     ) -> RunClaim | None: ...
 
     def start_claimed_run(

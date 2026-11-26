@@ -61,10 +61,13 @@ class _Repository:
         self.completed: list[tuple[RunRecord, int]] = []
         self.unknown: list[tuple[str, int]] = []
         self.fencing_token = 4
+        self.claim_engine_names = None
+        self.worker_heartbeats: list[tuple[str, str, str]] = []
 
-    def claim_next_queued_run(self, platform_id, worker_id, *, lease_seconds):
+    def claim_next_queued_run(self, platform_id, worker_id, *, lease_seconds, engine_names=None):
         assert platform_id == "platform-1"
         assert worker_id == "worker-1"
+        self.claim_engine_names = engine_names
         if self.claimed:
             return None
         self.claimed = True
@@ -106,6 +109,9 @@ class _Repository:
         self.fencing_token += 1
         self.run.status = RuntimeStatus.UNKNOWN
         return True
+
+    def heartbeat_worker(self, platform_id, worker_id, engine_name, *, status):
+        self.worker_heartbeats.append((worker_id, engine_name, status))
 
 
 class _ObjectStore:
@@ -154,7 +160,7 @@ class _ControlPlane:
         return run
 
 
-def _worker(repository, store, control_plane):
+def _worker(repository, store, control_plane, *, engine_names=None, worker_heartbeat_interval_seconds=10):
     from agent_platform.workers.run_worker import RunWorker
 
     control_plane.repository = repository
@@ -168,6 +174,8 @@ def _worker(repository, store, control_plane):
         heartbeat_interval_seconds=0.01,
         poll_interval_seconds=0.01,
         cancellation_grace_seconds=0.2,
+        engine_names=engine_names,
+        worker_heartbeat_interval_seconds=worker_heartbeat_interval_seconds,
     )
 
 
@@ -188,6 +196,40 @@ def test_run_worker_reads_verified_user_message_and_executes_once() -> None:
     assert prompt == "生成离线工作流"
     assert fencing_token == 4
     assert repository.run.status is RuntimeStatus.SUCCEEDED
+
+
+def test_run_worker_claims_only_its_registered_engine_pool() -> None:
+    repository = _Repository()
+    runtime = _Runtime()
+    control_plane = _ControlPlane(runtime)
+    worker = _worker(repository, _ObjectStore(), control_plane, engine_names=("deepseek-harness",))
+
+    assert asyncio.run(worker.run_once())
+
+    assert repository.claim_engine_names == ("deepseek_harness",)
+
+
+def test_run_worker_reports_engine_pool_heartbeat_and_shutdown() -> None:
+    repository = _Repository()
+    runtime = _Runtime()
+    control_plane = _ControlPlane(runtime)
+    worker = _worker(
+        repository, _ObjectStore(), control_plane,
+        engine_names=("deepseek_harness",), worker_heartbeat_interval_seconds=0.01,
+    )
+    stop = asyncio.Event()
+
+    async def stop_soon():
+        await asyncio.sleep(0.03)
+        stop.set()
+
+    async def run_with_stop():
+        await asyncio.gather(worker.run_forever(stop), stop_soon())
+
+    asyncio.run(run_with_stop())
+
+    assert ("worker-1", "deepseek_harness", "ACTIVE") in repository.worker_heartbeats
+    assert repository.worker_heartbeats[-1] == ("worker-1", "deepseek_harness", "STOPPING")
 
 
 def test_run_worker_rejects_a_changed_input_digest_before_runtime() -> None:

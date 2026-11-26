@@ -565,7 +565,7 @@
         <div class="config-field"><label for="delivery-policy">产出物交付</label><select id="delivery-policy"><option selected>CONFIRM · 用户确认后交付</option><option>ATTACHMENTS · 自动附带</option><option>MANUAL · 手动选择</option></select></div>
       </div>
       <div class="config-card"><div class="config-card-heading"><strong>团队成员和能力</strong><span>固定到 Team Version v3</span></div><div class="config-member-row"><span class="config-member-avatar deepseek">路</span><span class="config-member-info"><strong>路由 Agent · DeepSeek Harness</strong><span>EngineProfile v2 · ModelRoute route-deepseek-analysis</span><span class="capability-list"><span class="capability">reasoning</span><span class="capability">structured output</span></span></span><span class="pool-status"><i></i>可用</span></div><div class="config-member-row"><span class="config-member-avatar deepseek">数</span><span class="config-member-info"><strong>数据 Agent · DeepSeek Harness</strong><span>EngineProfile v4 · ModelRoute route-sales-analysis</span><span class="capability-list"><span class="capability">tool_calls</span><span class="capability">reasoning</span></span></span><span class="pool-status busy"><i></i>执行中</span></div><div class="config-member-row"><span class="config-member-avatar codex">代</span><span class="config-member-info"><strong>代码 Agent · Codex CLI</strong><span>EngineProfile v3 · ModelRoute route-codex-local</span><span class="capability-list"><span class="capability">workspace</span><span class="capability">sandbox</span><span class="capability">tool_calls</span></span></span><span class="pool-status busy"><i></i>执行中</span></div><div class="config-member-row"><span class="config-member-avatar codex">汇</span><span class="config-member-info"><strong>汇总 Agent · Codex CLI</strong><span>EngineProfile v3 · ModelRoute route-codex-local</span><span class="capability-list"><span class="capability">workspace</span><span class="capability">reasoning</span></span></span><span class="pool-status"><i></i>可用</span></div></div>
-      <div class="config-card"><div class="config-card-heading"><strong>Worker Pool 健康</strong><span>最近心跳 10:24:18</span></div><div class="pool-grid"><div class="pool-card"><strong>Codex Pool</strong><span>队列 1 · Worker 2/2</span><span class="pool-status busy"><i></i>忙碌</span></div><div class="pool-card"><strong>DeepSeek Pool</strong><span>队列 0 · Worker 3/3</span><span class="pool-status"><i></i>可用</span></div></div></div>
+    <div class="config-card"><div class="config-card-heading"><strong>Worker Pool 健康</strong><span>最近心跳 · 30 秒内视为在线</span></div><div class="pool-grid"><div class="pool-card"><strong>Codex Pool</strong><span>队列 1 · 运行中 2 · Worker 2/2</span><span class="pool-status busy"><i></i>忙碌</span></div><div class="pool-card"><strong>DeepSeek Pool</strong><span>队列 0 · 运行中 0 · Worker 3/3</span><span class="pool-status"><i></i>可用</span></div></div></div>
       <div class="config-note">成员的 EngineProvider、ModelRoute 和能力快照在 Conversation 创建时固定。修改团队配置不会改变当前 Conversation 的运行环境。</div>
       <div class="dialog-actions"><button class="close" type="button" data-close-dialog="team-config-dialog">关闭</button><button class="save" id="save-team-config" type="button">保存团队配置</button></div>
       <div class="feedback" id="team-config-feedback" role="status"></div>
@@ -621,12 +621,23 @@
 
     function openDialog(id) {
       const dialog = document.getElementById(id);
-      if (dialog && typeof dialog.showModal === 'function') dialog.showModal();
+      if (!dialog) return;
+      if (typeof dialog.showModal === 'function') {
+        dialog.showModal();
+      } else {
+        // 部分内嵌预览器没有实现 showModal；保留 open 属性仍可完成静态原型交互。
+        dialog.setAttribute('open', '');
+      }
     }
 
     function closeDialog(id) {
       const dialog = document.getElementById(id);
-      if (dialog?.open) dialog.close();
+      if (!dialog) return;
+      if (typeof dialog.close === 'function' && dialog.open) {
+        dialog.close();
+      } else {
+        dialog.removeAttribute('open');
+      }
     }
 
     function showFeedback(elementId, message, isError = false) {

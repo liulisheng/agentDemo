@@ -32,6 +32,9 @@ const { api, identity } = vi.hoisted(() => ({
     getEffectiveRuntimeStrategyDefault: vi.fn(),
     getRuntimeStrategyDefault: vi.fn(),
     setRuntimeStrategyDefault: vi.fn(),
+    listTeams: vi.fn(),
+    getTeam: vi.fn(),
+    listTeamWorkerPools: vi.fn(),
   },
   identity: { fakeUser: 'admin-local' },
 }))
@@ -133,6 +136,9 @@ function baseApiState() {
   api.getEffectiveEngineProfileDefault.mockResolvedValue({ binding: null, profile: null, source: null })
   api.getEffectiveModelRouteDefault.mockResolvedValue({ binding: null, route: null, source: null })
   api.getEffectiveRuntimeStrategyDefault.mockResolvedValue({ binding: null, runtime_options: { reasoning_mode: 'AUTO', reasoning_effort: 'AUTO', response_verbosity: 'STANDARD' }, source: 'SYSTEM_DEFAULT' })
+  api.listTeams.mockResolvedValue({ items: [] })
+  api.getTeam.mockResolvedValue({ items: [] })
+  api.listTeamWorkerPools.mockResolvedValue({ items: [] })
 }
 
 test('loads tenant scoped Conversation, Run, Trace and exact Approval preview', async () => {
@@ -455,4 +461,15 @@ test('switching tenant changes query scope and removes the previous tenant conve
   expect(await screen.findByText('租户 B 工作')).toBeInTheDocument()
   await waitFor(() => expect(screen.queryByText('租户 A 工作')).not.toBeInTheDocument())
   expect(api.listConversations).toHaveBeenCalledWith('employee-1', expect.any(Object), 'admin-other')
+})
+
+test('switches between single employee and team workbench modes', async () => {
+  baseApiState()
+  api.listTeams.mockResolvedValue({ items: [] })
+  renderPage()
+
+  expect(await screen.findByRole('tab', { name: '数字员工对话' })).toHaveAttribute('aria-selected', 'true')
+  await userEvent.click(screen.getByRole('tab', { name: '团队协作' }))
+  expect(await screen.findByText('Agent 团队群聊')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '数字员工对话' })).toBeInTheDocument()
 })

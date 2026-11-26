@@ -5,12 +5,14 @@ import {
   approveToolApproval,
   bindConversationAgent,
   createConversation,
+  continueConversationAsTeam,
   createSession,
   getDigitalEmployee,
   getRun,
   getRunTrace,
   getToolApproval,
   listConversationMessages,
+  listTeams,
   listConversations,
   listDeployments,
   rejectToolApproval,
@@ -32,6 +34,7 @@ import {
   type WorkbenchSnapshot,
   type WorkbenchTimelineEvent,
 } from './ConversationWorkbench'
+import { TeamWorkbench } from './TeamWorkbench'
 
 interface EmployeeOption {
   id: string
@@ -338,6 +341,7 @@ export function ConversationWorkbenchPage() {
   const [actionError, setActionError] = useState<string | null>(null)
   const [runtimeConfigOpen, setRuntimeConfigOpen] = useState(false)
   const [runtimeConfigNotice, setRuntimeConfigNotice] = useState<string | null>(null)
+  const [workspaceMode, setWorkspaceMode] = useState<'single' | 'team'>('single')
   const previousFakeUser = useRef(fakeUser)
   const turnKeys = useRef(new Map<string, string>())
   const approvalKeys = useRef(new Map<string, string>())
@@ -602,6 +606,22 @@ export function ConversationWorkbenchPage() {
     })
   }
 
+  async function continueAsTeam() {
+    if (!selectedConversation) return
+    const teams = await listTeams(fakeUser)
+    const team = teams.items.find((item) => item.status === 'PUBLISHED')
+    if (!team) {
+      setActionError('当前租户还没有已发布团队，请先创建并发布团队。')
+      return
+    }
+    await continueConversationAsTeam(
+      selectedConversation.id,
+      { team_id: team.team_id, team_version: team.version },
+      fakeUser,
+    )
+    setWorkspaceMode('team')
+  }
+
   const queryError = [employeesQuery.error, conversationsQuery.error, messagesQuery.error, runQuery.error, traceQuery.error]
     .map(errorMessage)
     .find(Boolean)
@@ -613,6 +633,12 @@ export function ConversationWorkbenchPage() {
 
   return (
     <>
+    <div className="workspace-mode-shell">
+    <div className="workspace-mode-tabs" role="tablist" aria-label="工作台模式">
+      <button type="button" role="tab" aria-selected={workspaceMode === 'single'} onClick={() => setWorkspaceMode('single')}>数字员工对话</button>
+      <button type="button" role="tab" aria-selected={workspaceMode === 'team'} onClick={() => setWorkspaceMode('team')}>团队协作</button>
+    </div>
+    {workspaceMode === 'team' ? <TeamWorkbench fakeUser={fakeUser} onSwitchToSingle={() => setWorkspaceMode('single')} /> : <>
     <ConversationWorkbench
       employeeName={activeEmployee?.name ?? '没有可运行的员工'}
       employeeOptions={employeeOptions.map(({ id, name }) => ({ id, name }))}
@@ -650,6 +676,7 @@ export function ConversationWorkbenchPage() {
       onNewConversation={activeEmployee?.deploymentStatus === 'ACTIVE' ? () => createConversationMutation.mutate() : undefined}
       onOpenRuntimeConfig={activeEmployee ? () => setRuntimeConfigOpen(true) : undefined}
       onSubmit={submitTurn}
+      onContinueAsTeam={() => void continueAsTeam()}
       onApprove={canApprove && approvalId ? (previewSha256) => {
         if (authorizedApproval?.preview_sha256 !== previewSha256) {
           setActionError('预览摘要已变化，请重新读取后再确认。')
@@ -677,6 +704,8 @@ export function ConversationWorkbenchPage() {
         createConversationMutation.mutate()
       }}
     />
+    </>}
+    </div>
     </>
   )
 }

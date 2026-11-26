@@ -70,7 +70,79 @@ def test_repository_migration_catalog_plans_forward_migrations_after_v003() -> N
     )
 
     assert result.action is PreflightAction.APPLY_MIGRATIONS
-    assert result.migrations_to_apply == ("V004", "V005", "V006", "V007", "V008", "V009", "V010")
+    assert result.migrations_to_apply == ("V004", "V005", "V006", "V007", "V008", "V009", "V010", "V011", "V012", "V013", "V014")
+
+
+def test_v010_database_plans_team_and_worker_heartbeat_migrations() -> None:
+    from agent_platform.infrastructure.migrations import (
+        V001_SENTINEL_OBJECTS,
+        V002_SENTINEL_OBJECTS,
+        V004_SENTINEL_OBJECTS,
+        V005_SENTINEL_OBJECTS,
+        V005_SKILL_COLUMNS,
+        V006_APPROVAL_COLUMNS,
+        V006_RUN_COLUMNS,
+        V006_SENTINEL_OBJECTS,
+        V006_TOOL_COLUMNS,
+        V007_LEASE_COLUMNS,
+        V007_SENTINEL_OBJECTS,
+        V008_MODEL_ROUTE_COLUMNS,
+        V008_SENTINEL_OBJECTS,
+        V009_DEPLOYMENT_COLUMNS,
+        V009_SENTINEL_OBJECTS,
+        V009_SESSION_COLUMNS,
+    )
+
+    result = MigrationPreflight({version: f"v{version}" for version in range(1, 15)}).assess(
+        MigrationBaseline(
+            schema_version=10,
+            applied_checksums={version: f"v{version}" for version in range(1, 11)},
+            schema_objects=V001_SENTINEL_OBJECTS
+            | V002_SENTINEL_OBJECTS
+            | V003_OBJECTS
+            | V004_SENTINEL_OBJECTS
+            | V005_SENTINEL_OBJECTS
+            | V006_SENTINEL_OBJECTS
+            | V007_SENTINEL_OBJECTS
+            | V008_SENTINEL_OBJECTS
+            | V009_SENTINEL_OBJECTS
+            | {"runtime_strategy_bindings"},
+            schema_columns={
+                "sessions": frozenset({"last_message_sequence"}) | V009_SESSION_COLUMNS,
+                "skill_versions": V005_SKILL_COLUMNS,
+                "tool_versions": V006_TOOL_COLUMNS,
+                "tool_approval_requests": V006_APPROVAL_COLUMNS,
+                "runs": V006_RUN_COLUMNS,
+                "model_routes": V008_MODEL_ROUTE_COLUMNS,
+                "deployments": V009_DEPLOYMENT_COLUMNS,
+                "session_runtime_leases": V007_LEASE_COLUMNS,
+            },
+            checksum_history_available=True,
+            introspection_available=True,
+        )
+    )
+
+    assert result.action is PreflightAction.APPLY_MIGRATIONS
+    assert result.migrations_to_apply == ("V011", "V012", "V013", "V014")
+
+
+def test_partial_v014_worker_heartbeat_schema_fails_closed() -> None:
+    from agent_platform.infrastructure.migrations import (
+        V014_SENTINEL_OBJECTS,
+        V014_WORKER_HEARTBEAT_COLUMNS,
+    )
+
+    checksums = {version: f"v{version}" for version in range(1, 15)}
+    baseline = MigrationBaseline(
+        schema_version=13,
+        applied_checksums={version: f"v{version}" for version in range(1, 14)},
+        schema_objects=V003_OBJECTS | V014_SENTINEL_OBJECTS,
+        schema_columns={"runtime_worker_heartbeats": V014_WORKER_HEARTBEAT_COLUMNS},
+        checksum_history_available=True,
+        introspection_available=True,
+    )
+    result = MigrationPreflight(checksums).assess(baseline)
+    assert result.action is PreflightAction.BLOCK_PARTIAL_MIGRATION
 
 
 def test_complete_v003_marker_without_checksum_requires_forward_v004() -> None:

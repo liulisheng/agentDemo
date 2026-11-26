@@ -1,6 +1,7 @@
 from agent_platform.adapters.channel.fake import FakeChannelAdapter
 from agent_platform.adapters.identity.fake import FakeIdentityProvider
 from agent_platform.application.conversations import ConversationService
+from agent_platform.domain.conversations import ConversationMode
 
 
 def test_duplicate_channel_message_is_idempotent() -> None:
@@ -38,3 +39,16 @@ def test_delivery_retry_keeps_one_logical_delivery() -> None:
     retry = service.retry_delivery(identity, delivery.delivery_id)
     assert retry.delivery_id == delivery.delivery_id
     assert retry.retry_count == 1
+
+
+def test_single_employee_conversation_list_excludes_team_conversations() -> None:
+    identity = FakeIdentityProvider().resolve_identity("admin-local")
+    service = ConversationService()
+    single = service.create_conversation(identity, "单员工讨论", is_group=False)
+    team = service.create_conversation(identity, "团队群聊", is_group=True, conversation_mode=ConversationMode.TEAM)
+    service.bind_agent(identity, single.conversation_id, "employee-a", "员工 A", "session-single")
+    service.bind_agent(identity, team.conversation_id, "employee-a", "员工 A", "session-team", team_member_id="member-a")
+
+    page = service.list_for_employee(identity, "employee-a")
+
+    assert [item.conversation_id for item in page.items] == [single.conversation_id]

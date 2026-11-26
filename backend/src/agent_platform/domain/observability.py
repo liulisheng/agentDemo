@@ -162,6 +162,11 @@ class RunRecord:
     context_snapshot: ContextSnapshot | None = None
     span_id: str = ""
     submitted_by_user_id: str | None = None
+    orchestration_id: str | None = None
+    task_id: str | None = None
+    attempt_no: int | None = None
+    worker_id: str | None = None
+    fencing_token: int = 0
 
 
 @dataclass(frozen=True, slots=True)

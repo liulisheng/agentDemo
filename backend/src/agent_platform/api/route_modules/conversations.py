@@ -98,8 +98,19 @@ def submit_conversation_turn(
 @router.post("/conversations", status_code=201)
 def create_conversation(request: ConversationCreateRequest, identity: Identity, service: Conversations) -> dict[str, object]:
     _check_tenant(identity, request)
-    conversation = service.create_conversation(identity, request.title, is_group=request.is_group)
-    return {"id": conversation.conversation_id, "title": conversation.title, "is_group": conversation.is_group, "status": conversation.status}
+    conversation = service.create_conversation(
+        identity,
+        request.title,
+        is_group=request.is_group,
+        conversation_mode=request.conversation_mode,
+    )
+    return {
+        "id": conversation.conversation_id,
+        "title": conversation.title,
+        "is_group": conversation.is_group,
+        "conversation_mode": conversation.conversation_mode.value,
+        "status": conversation.status,
+    }
 
 
 @router.post("/conversations/{conversation_id}/bindings", status_code=201)
@@ -128,12 +139,16 @@ def list_conversation_messages(
                 "id": message.message_id,
                 "conversation_id": message.conversation_id,
                 "sender_id": message.sender_id,
+                "sender_name": message.sender_name,
+                "team_member_id": message.team_member_id,
                 "source": message.source.value,
                 "text": message.text,
                 "routing_depth": message.routing_depth,
                 "created_at": message.created_at,
             }
+            # SYSTEM Message 可作为受限 Run Worker 输入载荷，不能从用户可见对话 API 回传。
             for message in service.list_messages(identity, conversation_id)
+            if message.source.value != "system"
         ]
     }
 

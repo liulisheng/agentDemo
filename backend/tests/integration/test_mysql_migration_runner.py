@@ -72,7 +72,7 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
 
     assert first.action is PreflightAction.APPLY_MIGRATIONS
     assert first.applied_migrations == (
-        "V001", "V002", "V003", "V004", "V005", "V006", "V007", "V008", "V009", "V010"
+        "V001", "V002", "V003", "V004", "V005", "V006", "V007", "V008", "V009", "V010", "V011", "V012", "V013", "V014"
     )
     assert second.action is PreflightAction.UP_TO_DATE
     assert second.applied_migrations == ()
@@ -80,9 +80,9 @@ def test_runner_applies_chain_records_checksums_and_is_idempotent(disposable_mys
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 10
+        assert cursor.fetchone()[0] == 14
         cursor.execute("SELECT version FROM schema_migration_history ORDER BY version")
-        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     finally:
         cursor.close()
         connection.close()
@@ -115,11 +115,131 @@ def test_runner_blocks_checksum_mismatch_before_any_write(disposable_mysql_datab
     cursor = connection.cursor()
     try:
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 9
+        assert cursor.fetchone()[0] == 14
     finally:
         cursor.close()
         connection.close()
 
+
+def test_v011_team_schema_has_chinese_comments_and_tenant_columns(disposable_mysql_database) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    runner = MigrationRunner(
+        lambda: mysql.connect(**config, database=database),
+        Path(__file__).parents[3] / "docs" / "migrations",
+    )
+    runner.apply()
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    tables = (
+        "teams",
+        "team_versions",
+        "team_members",
+        "conversation_team_bindings",
+        "orchestration_runs",
+        "orchestration_tasks",
+        "orchestration_task_dependencies",
+        "orchestration_task_attempts",
+        "orchestration_task_events",
+        "execution_artifacts",
+        "artifact_links",
+        "artifact_deliveries",
+    )
+    try:
+        for table in tables:
+            cursor.execute(
+                "SELECT table_comment FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,),
+            )
+            comment = cursor.fetchone()[0]
+            assert _has_chinese(comment), table
+            cursor.execute(
+                "SELECT column_name, column_comment FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,),
+            )
+            columns = cursor.fetchall()
+            assert columns and all(_has_chinese(column_comment) for _, column_comment in columns), table
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = 'conversations' AND column_name = 'conversation_mode'"
+        )
+        assert cursor.fetchone() is not None
+        cursor.execute(
+            "SELECT column_name,column_comment FROM information_schema.columns "
+            "WHERE table_schema=DATABASE() AND table_name='orchestration_task_attempts' AND column_name IN ('worker_id','fencing_token')"
+        )
+        lease_columns = cursor.fetchall()
+        assert {column_name for column_name, _ in lease_columns} == {"worker_id", "fencing_token"}
+        assert all(_has_chinese(comment) for _, comment in lease_columns)
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v013_agent_binding_cardinality_has_generated_column_and_indexes(disposable_mysql_database) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    MigrationRunner(
+        lambda: mysql.connect(**config, database=database),
+        Path(__file__).parents[3] / "docs" / "migrations",
+    ).apply()
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT column_comment,extra FROM information_schema.columns "
+            "WHERE table_schema=DATABASE() AND table_name='agent_bindings' AND column_name='single_agent_employee_id'"
+        )
+        row = cursor.fetchone()
+        assert row is not None and _has_chinese(row[0]) and "STORED GENERATED" in row[1]
+        cursor.execute(
+            "SELECT index_name FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='agent_bindings'"
+        )
+        indexes = {row[0] for row in cursor.fetchall()}
+        assert "uk_conversation_single_agent_employee" in indexes
+        assert "uk_conversation_team_member" in indexes
+        assert "uk_conversation_employee" not in indexes
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_v014_worker_heartbeat_schema_has_chinese_comments_and_engine_index(disposable_mysql_database) -> None:
+    from agent_platform.infrastructure.migrations import MigrationRunner
+
+    database, config = disposable_mysql_database
+    MigrationRunner(
+        lambda: mysql.connect(**config, database=database),
+        Path(__file__).parents[3] / "docs" / "migrations",
+    ).apply()
+    connection = mysql.connect(**config, database=database)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT table_comment FROM information_schema.tables "
+            "WHERE table_schema=DATABASE() AND table_name='runtime_worker_heartbeats'"
+        )
+        row = cursor.fetchone()
+        assert row is not None and _has_chinese(row[0])
+        cursor.execute(
+            "SELECT column_name,column_comment FROM information_schema.columns "
+            "WHERE table_schema=DATABASE() AND table_name='runtime_worker_heartbeats'"
+        )
+        columns = cursor.fetchall()
+        assert {name for name, _ in columns} == {"platform_id", "worker_id", "engine_name", "status", "heartbeat_at"}
+        assert all(_has_chinese(comment) for _, comment in columns)
+        cursor.execute(
+            "SELECT index_name FROM information_schema.statistics "
+            "WHERE table_schema=DATABASE() AND table_name='runtime_worker_heartbeats'"
+        )
+        assert "idx_worker_engine_heartbeat" in {item[0] for item in cursor.fetchall()}
+    finally:
+        cursor.close()
+        connection.close()
 
 def test_runner_failure_does_not_record_failed_migration(tmp_path: Path, disposable_mysql_database) -> None:
     from agent_platform.infrastructure.migrations import (
@@ -256,7 +376,7 @@ def test_v006_schema_has_tenant_keys_and_chinese_comments(disposable_mysql_datab
             assert all(_has_chinese(comment) for comment in comment_columns.values())
 
         assert "MCP 调用配置" in tables["tool_versions"]
-        assert "审批等待状态" in tables["runs"]
+        assert "编排父子关联" in tables["runs"]
 
         cursor.execute(
             "SELECT column_name FROM information_schema.statistics "
@@ -379,7 +499,7 @@ def test_v007_schema_has_tenant_keys_and_chinese_comments(disposable_mysql_datab
             ("fk_session_runtime_lease_run", "session_runtime_leases", "run_id", "runs"),
         } <= references
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 9
+        assert cursor.fetchone()[0] == 14
     finally:
         cursor.close()
         connection.close()
@@ -574,7 +694,7 @@ def test_v008_model_management_schema_has_tenant_keys_and_chinese_comments(
         assert ("model_test_records", "connection_id", "model_connections", "connection_id") in foreign_keys
 
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 9
+        assert cursor.fetchone()[0] == 14
     finally:
         cursor.close()
         connection.close()
@@ -652,7 +772,7 @@ def test_v008_backfills_multiple_legacy_routes_to_one_tenant_connection(
         )
         assert [row[0] for row in cursor.fetchall()] == ["chat-model", "reasoning-model"]
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 9
+        assert cursor.fetchone()[0] == 14
     finally:
         cursor.close()
         connection.close()
@@ -763,7 +883,7 @@ def test_v009_runtime_configuration_schema_has_tenant_keys_and_chinese_comments(
         assert "INHERIT" in checks["ck_runtime_config_mode"]
         assert "OVERRIDE" in checks["ck_runtime_config_mode"]
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 9
+        assert cursor.fetchone()[0] == 14
     finally:
         cursor.close()
         connection.close()
@@ -955,7 +1075,7 @@ def test_v009_backfills_independent_route_defaults_and_active_deployments(
         )
         assert cursor.fetchone()[0] == "legacy-gpt-local"
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 9
+        assert cursor.fetchone()[0] == 14
     finally:
         cursor.close()
         connection.close()
@@ -996,7 +1116,7 @@ def test_v009_down_restores_the_v008_schema_boundary(disposable_mysql_database) 
             cursor.execute(statement)
         connection.commit()
         cursor.execute("SELECT MAX(version) FROM schema_version")
-        assert cursor.fetchone()[0] == 8
+        assert cursor.fetchone()[0] == 14
         cursor.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() "
             "AND table_name IN ('model_route_bindings','deployment_runtime_config_versions')"

@@ -11,6 +11,7 @@ from .route_modules import (
     resource_center,
     runtime_defaults,
     skill_files,
+    teams,
     tool_approvals,
 )
 
@@ -24,6 +25,7 @@ for route_group in (
     runtime_defaults.router,
     skill_files.router,
     conversations.router,
+    teams.router,
     tool_approvals.router,
 ):
     router.include_router(route_group)

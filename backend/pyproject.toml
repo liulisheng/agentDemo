@@ -9,7 +9,8 @@ description = "Enterprise Agent platform control plane"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115,<1",
-  "pydantic>=2.9,<3",
+  # 暂时限制到 2.14.3：当前 ARM64 镜像无法下载 Pydantic 2.14.4 对应的 Core 发行包。
+  "pydantic>=2.9,<2.14.4",
   "uvicorn[standard]>=0.30,<1",
   "cryptography>=43,<51",
 ]

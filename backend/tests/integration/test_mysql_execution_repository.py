@@ -1335,3 +1335,49 @@ def test_session_harness_lease_serializes_runs_and_quarantines_unknown_home(
         cursor.close()
         connection.close()
     assert repository.claim_next_queued_run(admin.platform_id, "worker-a") is None
+
+
+def test_run_worker_engine_filter_claims_only_matching_provider(mysql_execution_database) -> None:
+    from agent_platform.adapters.identity.fake import FakeIdentityProvider
+    from agent_platform.domain.common import generate_database_id
+    from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
+
+    database, config = mysql_execution_database
+    admin = FakeIdentityProvider().resolve_identity("admin-local")
+    connection_factory = lambda: mysql.connect(**config, database=database)
+    sessions = {
+        engine: generate_database_id()
+        for engine in ("deepseek_harness", "codex_cli")
+    }
+    runs = {engine: generate_database_id() for engine in sessions}
+    connection = connection_factory()
+    cursor = connection.cursor()
+    try:
+        for engine, session_id in sessions.items():
+            cursor.execute(
+                "INSERT INTO sessions "
+                "(platform_id,tenant_id,session_id,user_id,engine_name,engine_session_id,status,metadata_json) "
+                "VALUES (%s,%s,%s,%s,%s,%s,'ACTIVE','{}')",
+                (admin.platform_id, admin.tenant_id, session_id, admin.user_id, engine, session_id),
+            )
+            cursor.execute(
+                "INSERT INTO runs "
+                "(platform_id,tenant_id,run_id,session_id,idempotency_key,request_digest,state) "
+                "VALUES (%s,%s,%s,%s,%s,%s,'QUEUED')",
+                (admin.platform_id, admin.tenant_id, runs[engine], session_id, f"run-{engine}", engine.ljust(64, "0")[:64]),
+            )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
+
+    repository = MySqlExecutionRepository(connection_factory)
+    deepseek_claim = repository.claim_next_queued_run(
+        admin.platform_id, "worker-deepseek", engine_names=("deepseek-harness",)
+    )
+    codex_claim = repository.claim_next_queued_run(
+        admin.platform_id, "worker-codex", engine_names=("codex_cli",)
+    )
+
+    assert deepseek_claim is not None and deepseek_claim.run_id == runs["deepseek_harness"]
+    assert codex_claim is not None and codex_claim.run_id == runs["codex_cli"]

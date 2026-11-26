@@ -14,6 +14,12 @@ V009 新增租户隔离的 `model_route_bindings` 和 Deployment 不可变运行
 
 V010 新增租户范围的 `runtime_strategy_bindings`，独立保存用户/租户/平台的回答策略默认值。回答策略不写入 EngineProfile 或 ModelRoute；`runtime_options_json` 只允许类型化白名单字段。V010 需要通过 `information_schema.TABLES`/`COLUMNS` 验证表和字段中文 COMMENT、租户复合外键、作用域唯一键和 down 边界。生产回滚保留已写入的策略 JSON 和配置修订；只回滚兼容代码，不删除历史绑定。
 
+V011 新增 Agent 团队、不可变 TeamVersion、Conversation 团队绑定、OrchestrationRun、Task DAG、TaskAttempt、任务事件、ExecutionArtifact、ArtifactLink 和 ArtifactDelivery，并为 Conversation、Run、AgentBinding 增加模式/编排关联字段。V011 所有表和字段必须通过 `information_schema.TABLES`/`COLUMNS` 验证中文 COMMENT、platform/tenant 复合外键、状态约束和幂等索引。生产回滚保留已创建团队、编排、任务和产出物，仅回滚兼容代码；V011 down 仅用于 disposable database 演练。
+
+V012 为 `orchestration_task_attempts` 增加 `worker_id` 与 `fencing_token`，使团队任务租约可跨进程持久化；新增字段需通过 `information_schema.COLUMNS` 验证中文 COMMENT。生产回滚不删除已创建的团队/编排业务对象；移除 V012 列仅用于可恢复的向前兼容发布窗口。
+
+V013 调整 `agent_bindings` 的唯一性：SINGLE_AGENT 仍按 Conversation+员工唯一，TEAM 改为按 Conversation+TeamMember 唯一，允许同一员工的两个部署在同一团队内使用不同 Session/EngineProvider。生成列 `single_agent_employee_id` 和两个唯一索引由 MySQL 集成测试验证；若生产已有 TEAM 重复成员绑定，回滚到旧员工唯一索引前必须先解决重复记录。
+
 升级到 V007 前先停止新 Run claim 并排空 Worker；迁移会把既有 STARTING/RUNNING/CANCELLING Run 的 lease 写入新表。如果同一 Session 仍有多个活动 Run，Session 主键冲突会使迁移停止，必须先人工核对这些 Run，不能由迁移任意选一个继续。
 
 ## 显式预检和迁移
@@ -46,7 +52,7 @@ python -m pytest tests/integration/test_production_control_plane_migration.py \
   tests/integration/test_mysql_migration_runner.py -q
 ```
 
-测试覆盖 V003 正向/回滚、V004 资源中心、V005 Skill 文件包、V006 MCP/审批迁移、V007 Session lease、V008 模型连接/目录/测试迁移、V009 运行配置及历史回填、外键与租户联合键、中文表/字段注释、重复迁移、checksum 变化和失败停止。V006/V007/V008/V009 down 脚本只在 disposable database 验证；生产回滚保留增量 schema。运行版本和最终 checksum 记录在 [`../验证记录.md`](../验证记录.md)。
+测试覆盖 V003 正向/回滚、V004 资源中心、V005 Skill 文件包、V006 MCP/审批迁移、V007 Session lease、V008 模型连接/目录/测试迁移、V009 运行配置及历史回填、V011–V014 Agent 团队与 Worker Pool、外键与租户联合键、中文表/字段注释、重复迁移、checksum 变化和失败停止。V006/V007/V008/V009/V011–V014 down 脚本只在 disposable database 验证；生产回滚保留增量 schema。运行版本和最终 checksum 记录在 [`../验证记录.md`](../验证记录.md)。
 
 ## 备份与回滚
 

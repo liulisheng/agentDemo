@@ -8,7 +8,12 @@ from threading import Lock
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversations import ConversationService
 from agent_platform.domain.common import DomainError, generate_database_id
-from agent_platform.domain.conversations import AgentBinding, Message, MessageSource
+from agent_platform.domain.conversations import (
+    AgentBinding,
+    ConversationMode,
+    Message,
+    MessageSource,
+)
 from agent_platform.domain.identity import IdentityContext
 from agent_platform.domain.observability import RunRecord
 
@@ -54,6 +59,11 @@ class ConversationTurnService:
             raise DomainError("INVALID_ARGUMENT", "idempotency_key 不能为空")
         if len(idempotency_key) > 255:
             raise DomainError("INVALID_ARGUMENT", "idempotency_key 超过长度上限")
+        if self._conversations.get_conversation(identity, conversation_id).conversation_mode is ConversationMode.TEAM:
+            raise DomainError(
+                "CONVERSATION_MODE_MISMATCH",
+                "TEAM Conversation 必须通过团队编排接口提交",
+            )
         binding = self._conversations.resolve_active_binding(
             identity, conversation_id, employee_id
         )

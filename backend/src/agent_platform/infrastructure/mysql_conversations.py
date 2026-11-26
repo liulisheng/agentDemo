@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -55,14 +56,15 @@ class MySqlConversationRepository(ConversationRepository):
         with self._transaction() as (_, cursor):
             cursor.execute(
                 "INSERT INTO conversations "
-                "(platform_id, tenant_id, conversation_id, title, is_group, status, created_by) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                "(platform_id, tenant_id, conversation_id, title, is_group, conversation_mode, status, created_by) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     identity.platform_id,
                     identity.tenant_id,
                     value.conversation_id,
                     value.title,
                     value.is_group,
+                    value.conversation_mode.value,
                     value.status,
                     identity.user_id,
                 ),
@@ -76,7 +78,7 @@ class MySqlConversationRepository(ConversationRepository):
     def get_conversation(self, identity: IdentityContext, conversation_id: str) -> Conversation:
         with self._reader() as (_, cursor):
             cursor.execute(
-                "SELECT c.conversation_id, c.platform_id, c.tenant_id, c.title, c.is_group, c.status, c.updated_at "
+                "SELECT c.conversation_id, c.platform_id, c.tenant_id, c.title, c.is_group, c.status, c.updated_at, c.conversation_mode "
                 "FROM conversations c JOIN conversation_participants cp ON cp.platform_id=c.platform_id "
                 "AND cp.tenant_id=c.tenant_id AND cp.conversation_id=c.conversation_id AND cp.user_id=%s "
                 "WHERE c.platform_id=%s AND c.tenant_id=%s AND c.conversation_id=%s",
@@ -93,15 +95,16 @@ class MySqlConversationRepository(ConversationRepository):
             bool(row[4]),
             str(row[5]),
             row[6],
+            conversation_mode=str(row[7]),
         )
 
     def get_conversation_id_for_run(self, identity: IdentityContext, run_id: str) -> str:
-        """只从同租户、同 Run 的 USER 消息解析审批归属 Conversation。"""
+        """从同租户、同 Run 的 USER-role 输入解析审批归属 Conversation；内部 SYSTEM 输入也属于该 Run。"""
 
         with self._reader() as (_, cursor):
             cursor.execute(
                 "SELECT conversation_id FROM messages WHERE platform_id=%s AND tenant_id=%s "
-                "AND run_id=%s AND source='user' ORDER BY sequence_no LIMIT 1",
+                "AND run_id=%s AND role='USER' AND status='COMPLETE' ORDER BY sequence_no LIMIT 1",
                 (identity.platform_id, identity.tenant_id, run_id),
             )
             row = cursor.fetchone()
@@ -121,10 +124,11 @@ class MySqlConversationRepository(ConversationRepository):
                 raise self._not_found("session")
             cursor.execute(
                 "INSERT INTO agent_bindings "
-                "(platform_id, tenant_id, binding_id, conversation_id, employee_id, employee_version, deployment_id, session_id, status) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "(platform_id, tenant_id, binding_id, conversation_id, employee_id, employee_version, deployment_id, session_id, team_member_id, team_member_role, capabilities_snapshot_json, status) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE employee_version=VALUES(employee_version), deployment_id=VALUES(deployment_id), "
-                "session_id=VALUES(session_id), status=VALUES(status)",
+                "session_id=VALUES(session_id), team_member_id=VALUES(team_member_id), team_member_role=VALUES(team_member_role), "
+                "capabilities_snapshot_json=VALUES(capabilities_snapshot_json), status=VALUES(status)",
                 (
                     identity.platform_id,
                     identity.tenant_id,
@@ -134,6 +138,9 @@ class MySqlConversationRepository(ConversationRepository):
                     int(row[1]),
                     str(row[2]),
                     value.session_id,
+                    value.team_member_id,
+                    value.team_member_role,
+                    json.dumps(list(value.capabilities_snapshot), ensure_ascii=False),
                     value.status,
                 ),
             )
@@ -141,7 +148,7 @@ class MySqlConversationRepository(ConversationRepository):
     def list_bindings(self, identity: IdentityContext, conversation_id: str) -> tuple[AgentBinding, ...]:
         with self._reader() as (_, cursor):
             cursor.execute(
-                "SELECT b.conversation_id, b.employee_id, e.name, b.session_id, b.status "
+                "SELECT b.conversation_id, b.employee_id, e.name, b.session_id, b.status, b.team_member_id,b.team_member_role,b.capabilities_snapshot_json "
                 "FROM agent_bindings b JOIN digital_employees e ON e.platform_id=b.platform_id "
                 "AND e.tenant_id=b.tenant_id AND e.employee_id=b.employee_id "
                 "WHERE b.platform_id=%s AND b.tenant_id=%s AND b.conversation_id=%s "
@@ -149,7 +156,13 @@ class MySqlConversationRepository(ConversationRepository):
                 (identity.platform_id, identity.tenant_id, conversation_id),
             )
             rows = cursor.fetchall()
-        return tuple(AgentBinding(*map(str, row)) for row in rows)
+        return tuple(
+            AgentBinding(
+                str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]), row[5], row[6],
+                tuple(json.loads(row[7] or "[]")),
+            )
+            for row in rows
+        )
 
     @staticmethod
     def _stored_message(row: tuple[Any, ...]) -> StoredMessage:
@@ -168,6 +181,8 @@ class MySqlConversationRepository(ConversationRepository):
             sequence_no=int(row[10]),
             routing_depth=int(row[11]),
             created_at=row[12] if len(row) > 12 else None,
+            sender_name=str(row[13]) if len(row) > 13 and row[13] is not None else None,
+            team_member_id=str(row[14]) if len(row) > 14 and row[14] is not None else None,
         )
 
     def save_message(
@@ -186,6 +201,23 @@ class MySqlConversationRepository(ConversationRepository):
 
         with self._transaction() as (_, cursor):
             cursor.execute(
+                "SELECT message_id,conversation_id,platform_id,tenant_id,sender_id,source,"
+                "content_ref,content_sha256,byte_length,content_type,sequence_no,routing_depth,created_at "
+                "FROM messages WHERE platform_id=%s AND tenant_id=%s AND message_id=%s FOR UPDATE",
+                (identity.platform_id, identity.tenant_id, value.message_id),
+            )
+            previous_message = cursor.fetchone()
+            if previous_message is not None:
+                stored = self._stored_message(previous_message)
+                if (
+                    stored.conversation_id != value.conversation_id
+                    or stored.source is not value.source
+                    or stored.content_sha256 != content_sha256
+                    or stored.byte_length != byte_length
+                ):
+                    raise DomainError("IDEMPOTENCY_CONFLICT", "Message ID 对应的内容或 Conversation 已改变")
+                return stored
+            cursor.execute(
                 "SELECT last_message_sequence FROM sessions "
                 "WHERE platform_id=%s AND tenant_id=%s AND session_id=%s FOR UPDATE",
                 (identity.platform_id, identity.tenant_id, session_id),
@@ -201,7 +233,8 @@ class MySqlConversationRepository(ConversationRepository):
                 raise self._not_found("conversation")
             sequence = int(session[0]) + 1
             role = "USER" if value.source is MessageSource.USER else "ASSISTANT"
-            sender_id = value.sender_id if value.source in {MessageSource.USER, MessageSource.AGENT} else identity.user_id
+            # Agent 的显示身份由 Session 对应的 AgentBinding 联查恢复；sender_id 保持用户外键语义。
+            sender_id = value.sender_id if value.source is MessageSource.USER else identity.user_id
             if run_id is not None and value.source is MessageSource.AGENT:
                 cursor.execute(
                     "SELECT message_id, conversation_id, platform_id, tenant_id, sender_id, source, "
@@ -265,14 +298,19 @@ class MySqlConversationRepository(ConversationRepository):
             sequence,
             value.routing_depth,
             created_at,
+            value.sender_name,
+            value.team_member_id,
         )
 
     def get_message(self, identity: IdentityContext, message_id: str) -> StoredMessage:
         with self._reader() as (_, cursor):
             cursor.execute(
-                "SELECT message_id, conversation_id, platform_id, tenant_id, sender_id, source, content_ref, "
-                "content_sha256, byte_length, content_type, sequence_no, routing_depth, created_at FROM messages "
-                "WHERE platform_id=%s AND tenant_id=%s AND message_id=%s",
+                "SELECT m.message_id,m.conversation_id,m.platform_id,m.tenant_id,m.sender_id,m.source,m.content_ref,"
+                "m.content_sha256,m.byte_length,m.content_type,m.sequence_no,m.routing_depth,m.created_at,e.name,b.team_member_id "
+                "FROM messages m LEFT JOIN agent_bindings b ON b.platform_id=m.platform_id AND b.tenant_id=m.tenant_id "
+                "AND b.conversation_id=m.conversation_id AND b.session_id=m.session_id AND b.status='ACTIVE' AND m.source='agent' "
+                "LEFT JOIN digital_employees e ON e.platform_id=b.platform_id AND e.tenant_id=b.tenant_id AND e.employee_id=b.employee_id "
+                "WHERE m.platform_id=%s AND m.tenant_id=%s AND m.message_id=%s",
                 (identity.platform_id, identity.tenant_id, message_id),
             )
             row = cursor.fetchone()
@@ -285,10 +323,13 @@ class MySqlConversationRepository(ConversationRepository):
     ) -> tuple[StoredMessage, ...]:
         with self._reader() as (_, cursor):
             cursor.execute(
-                "SELECT message_id, conversation_id, platform_id, tenant_id, sender_id, source, content_ref, "
-                "content_sha256, byte_length, content_type, sequence_no, routing_depth, created_at FROM messages "
-                "WHERE platform_id=%s AND tenant_id=%s AND conversation_id=%s AND status='COMPLETE' "
-                "ORDER BY sequence_no, message_id",
+                "SELECT m.message_id,m.conversation_id,m.platform_id,m.tenant_id,m.sender_id,m.source,m.content_ref,"
+                "m.content_sha256,m.byte_length,m.content_type,m.sequence_no,m.routing_depth,m.created_at,e.name,b.team_member_id "
+                "FROM messages m LEFT JOIN agent_bindings b ON b.platform_id=m.platform_id AND b.tenant_id=m.tenant_id "
+                "AND b.conversation_id=m.conversation_id AND b.session_id=m.session_id AND b.status='ACTIVE' AND m.source='agent' "
+                "LEFT JOIN digital_employees e ON e.platform_id=b.platform_id AND e.tenant_id=b.tenant_id AND e.employee_id=b.employee_id "
+                "WHERE m.platform_id=%s AND m.tenant_id=%s AND m.conversation_id=%s AND m.status='COMPLETE' "
+                "ORDER BY m.sequence_no, m.message_id",
                 (identity.platform_id, identity.tenant_id, conversation_id),
             )
             rows = cursor.fetchall()
@@ -337,6 +378,7 @@ class MySqlConversationRepository(ConversationRepository):
             "AND r0.tenant_id=b.tenant_id AND r0.session_id=b.session_id "
             "ORDER BY r0.created_at DESC, r0.run_id DESC LIMIT 1) "
             "WHERE c.platform_id=%s AND c.tenant_id=%s AND c.status=%s "
+            "AND c.conversation_mode='SINGLE_AGENT' "
             + cursor_filter
             + "ORDER BY c.updated_at DESC, c.conversation_id DESC LIMIT %s"
         )

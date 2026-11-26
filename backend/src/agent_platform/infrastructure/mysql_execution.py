@@ -400,8 +400,8 @@ class MySqlExecutionRepository:
                 "(platform_id, tenant_id, run_id, session_id, idempotency_key, request_digest, state, "
                 "submitted_by_user_id, "
                 "employee_id, employee_version, execution_profile_id, execution_profile_version, model_route_id, "
-                "trace_id, snapshot_json, context_snapshot_json) "
-                "VALUES (%s,%s,%s,%s,%s,%s,'QUEUED',%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "trace_id, snapshot_json, context_snapshot_json, orchestration_id, task_id, attempt_no) "
+                "VALUES (%s,%s,%s,%s,%s,%s,'QUEUED',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON DUPLICATE KEY UPDATE run_id=run_id",
                 (
                     identity.platform_id,
@@ -419,6 +419,9 @@ class MySqlExecutionRepository:
                     run.trace_id,
                     _json_dump(_snapshot_data(snapshot)),
                     _json_dump(_context_data(run.context_snapshot)),
+                    run.orchestration_id,
+                    run.task_id,
+                    run.attempt_no,
                 ),
             )
             created = cursor.rowcount == 1
@@ -612,6 +615,169 @@ class MySqlExecutionRepository:
             raise RuntimeError("turn transaction did not return a stored message")
         return self.get_run(identity, existing_run_id), stored_message, created
 
+    def submit_worker_run(
+        self,
+        identity: IdentityContext,
+        conversation_id: str,
+        run: RunRecord,
+        idempotency_key: str,
+        input_message: Message,
+        *,
+        input_content_ref: str,
+        input_content_sha256: str,
+        input_byte_length: int,
+        input_content_type: str,
+        display_message: Message | None = None,
+        display_content_ref: str | None = None,
+        display_content_sha256: str | None = None,
+        display_byte_length: int | None = None,
+        display_content_type: str | None = None,
+    ) -> tuple[RunRecord, bool]:
+        """原子排队 Worker Run，并把私有执行指令与可见原文分开保存。"""
+
+        if not idempotency_key.strip() or len(idempotency_key) > 255:
+            raise DomainError("INVALID_ARGUMENT", "Worker Run 幂等键必须在 1 到 255 个字符之间")
+        if (
+            identity.platform_id != run.platform_id
+            or identity.tenant_id != run.tenant_id
+            or run.submitted_by_user_id != identity.user_id
+            or run.status is not RuntimeStatus.QUEUED
+        ):
+            raise DomainError("AUTHORIZATION_DENIED", "Worker Run 身份或状态不一致")
+        if (
+            input_message.platform_id != identity.platform_id
+            or input_message.tenant_id != identity.tenant_id
+            or input_message.conversation_id != conversation_id
+            or input_message.sender_id != identity.user_id
+            or input_message.source is not MessageSource.SYSTEM
+        ):
+            raise DomainError("AUTHORIZATION_DENIED", "Worker 私有输入不属于当前 Conversation")
+        input_payload = input_message.text.encode("utf-8")
+        if (
+            input_byte_length != len(input_payload)
+            or input_content_sha256 != hashlib.sha256(input_payload).hexdigest()
+            or not input_content_ref.strip()
+        ):
+            raise DomainError("INVALID_ARGUMENT", "Worker 输入对象引用、字节数或摘要不一致")
+        if display_message is not None:
+            if (
+                display_message.platform_id != identity.platform_id
+                or display_message.tenant_id != identity.tenant_id
+                or display_message.conversation_id != conversation_id
+                or display_message.sender_id != identity.user_id
+                or display_message.source is not MessageSource.USER
+                or display_content_ref is None
+                or display_content_sha256 is None
+                or display_byte_length is None
+                or display_content_type is None
+            ):
+                raise DomainError("AUTHORIZATION_DENIED", "Worker Run 可见消息不属于当前用户")
+            display_payload = display_message.text.encode("utf-8")
+            if (
+                display_byte_length != len(display_payload)
+                or display_content_sha256 != hashlib.sha256(display_payload).hexdigest()
+                or not display_content_ref.strip()
+            ):
+                raise DomainError("INVALID_ARGUMENT", "可见消息对象引用、字节数或摘要不一致")
+
+        created = False
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "SELECT c.status,b.employee_id,b.employee_version,s.employee_version,s.status,"
+                "s.last_message_sequence FROM conversations c "
+                "JOIN conversation_participants cp ON cp.platform_id=c.platform_id "
+                "AND cp.tenant_id=c.tenant_id AND cp.conversation_id=c.conversation_id AND cp.user_id=%s "
+                "JOIN agent_bindings b ON b.platform_id=c.platform_id AND b.tenant_id=c.tenant_id "
+                "AND b.conversation_id=c.conversation_id AND b.employee_id=%s AND b.session_id=%s "
+                "AND b.status='ACTIVE' JOIN sessions s ON s.platform_id=b.platform_id "
+                "AND s.tenant_id=b.tenant_id AND s.session_id=b.session_id "
+                "WHERE c.platform_id=%s AND c.tenant_id=%s AND c.conversation_id=%s "
+                "AND c.conversation_mode='TEAM' FOR UPDATE",
+                (
+                    identity.user_id, run.snapshot.employee_id, run.session_id,
+                    identity.platform_id, identity.tenant_id, conversation_id,
+                ),
+            )
+            binding = cursor.fetchone()
+            if binding is None:
+                raise self._not_found("team_conversation_binding")
+            if str(binding[0]) != "ACTIVE" or str(binding[4]) != "ACTIVE":
+                raise DomainError("INVALID_STATE", "Conversation 或成员 Session 不是 ACTIVE 状态")
+            if int(binding[2]) != run.snapshot.employee_version or int(binding[3]) != run.snapshot.employee_version:
+                raise DomainError("CONFLICT", "成员绑定版本与 RunSnapshot 不一致")
+
+            cursor.execute(
+                "INSERT INTO runs "
+                "(platform_id,tenant_id,run_id,session_id,idempotency_key,request_digest,state,"
+                "submitted_by_user_id,employee_id,employee_version,execution_profile_id,"
+                "execution_profile_version,model_route_id,trace_id,snapshot_json,context_snapshot_json,"
+                "orchestration_id,task_id,attempt_no) "
+                "VALUES (%s,%s,%s,%s,%s,%s,'QUEUED',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON DUPLICATE KEY UPDATE run_id=run_id",
+                (
+                    identity.platform_id, identity.tenant_id, run.run_id, run.session_id,
+                    idempotency_key, run.prompt_digest, identity.user_id, run.snapshot.employee_id,
+                    run.snapshot.employee_version, run.snapshot.execution_profile_id,
+                    run.snapshot.execution_profile_version, run.snapshot.model_route_id, run.trace_id,
+                    _json_dump(_snapshot_data(run.snapshot)), _json_dump(_context_data(run.context_snapshot)),
+                    run.orchestration_id, run.task_id, run.attempt_no,
+                ),
+            )
+            created = cursor.rowcount == 1
+            existing = self._find_run_idempotency(cursor, identity, run.session_id, idempotency_key)
+            if existing is None:
+                raise DomainError("CONFLICT", "Worker Run 标识与现有记录冲突")
+            existing_run_id = str(existing[0])
+            if str(existing[1]) != run.prompt_digest:
+                raise DomainError("IDEMPOTENCY_CONFLICT", "Worker Run 幂等键对应的快照或输入已改变")
+            self._inject_failure("after_worker_run_insert")
+
+            if created:
+                sequence = int(binding[5])
+                cursor.execute(
+                    "INSERT INTO messages "
+                    "(platform_id,tenant_id,message_id,session_id,run_id,sequence_no,role,status,"
+                    "content_ref,content_sha256,byte_length,content_type,sender_id,source,routing_depth,"
+                    "conversation_id,retention_policy) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,'USER','COMPLETE',%s,%s,%s,%s,%s,'system',0,%s,'conversation')",
+                    (
+                        identity.platform_id, identity.tenant_id, input_message.message_id,
+                        run.session_id, run.run_id, sequence + 1, input_content_ref,
+                        input_content_sha256, input_byte_length, input_content_type,
+                        identity.user_id, conversation_id,
+                    ),
+                )
+                sequence += 1
+                self._inject_failure("after_worker_input_insert")
+                if display_message is not None:
+                    cursor.execute(
+                        "INSERT INTO messages "
+                        "(platform_id,tenant_id,message_id,session_id,run_id,sequence_no,role,status,"
+                        "content_ref,content_sha256,byte_length,content_type,sender_id,source,routing_depth,"
+                        "conversation_id,retention_policy) "
+                        "VALUES (%s,%s,%s,%s,NULL,%s,'USER','COMPLETE',%s,%s,%s,%s,%s,'user',0,%s,'conversation')",
+                        (
+                            identity.platform_id, identity.tenant_id, display_message.message_id,
+                            run.session_id, sequence + 1, display_content_ref,
+                            display_content_sha256, display_byte_length, display_content_type,
+                            identity.user_id, conversation_id,
+                        ),
+                    )
+                    sequence += 1
+                cursor.execute(
+                    "UPDATE sessions SET last_message_sequence=%s WHERE platform_id=%s "
+                    "AND tenant_id=%s AND session_id=%s",
+                    (sequence, identity.platform_id, identity.tenant_id, run.session_id),
+                )
+                cursor.execute(
+                    "UPDATE conversations SET updated_at=CURRENT_TIMESTAMP(6) "
+                    "WHERE platform_id=%s AND tenant_id=%s AND conversation_id=%s",
+                    (identity.platform_id, identity.tenant_id, conversation_id),
+                )
+        if created:
+            return run, True
+        return self.get_run(identity, existing_run_id), False
+
     @staticmethod
     def _stored_message_from_row(row: tuple[Any, ...]) -> StoredMessage:
         return StoredMessage(
@@ -741,6 +907,63 @@ class MySqlExecutionRepository:
             existing = self._find_run_idempotency(cursor, identity, session_id, idempotency_key)
         return self.get_run(identity, str(existing[0])) if existing is not None else None
 
+    def worker_pool_metrics(self, identity: IdentityContext, engine_name: str) -> dict[str, int | bool]:
+        """从 MySQL Run 租约统计当前租户每个 Engine 的排队数和活跃 Worker 数。"""
+
+        normalized = engine_name.strip().casefold().replace("-", "_")
+        if normalized == "deepseek":
+            normalized = "deepseek_harness"
+        aliases = ("deepseek", "deepseek_harness") if normalized in {"deepseek", "deepseek_harness"} else (normalized,)
+        placeholders = ",".join("%s" for _ in aliases)
+        with self._reader() as (_, cursor):
+            cursor.execute(
+                "SELECT COALESCE(SUM(r.state='QUEUED'),0), "
+                "COUNT(DISTINCT CASE WHEN r.state IN ('STARTING','RUNNING','CANCELLING') "
+                "AND r.lease_expires_at>CURRENT_TIMESTAMP(6) THEN r.worker_id END) "
+                "FROM runs r JOIN sessions s ON s.platform_id=r.platform_id "
+                "AND s.tenant_id=r.tenant_id AND s.session_id=r.session_id "
+                f"WHERE r.platform_id=%s AND r.tenant_id=%s AND LOWER(REPLACE(s.engine_name,'-','_')) IN ({placeholders})",
+                (identity.platform_id, identity.tenant_id, *aliases),
+            )
+            row = cursor.fetchone()
+            cursor.execute(
+                "SELECT COUNT(DISTINCT worker_id) FROM runtime_worker_heartbeats "
+                "WHERE platform_id=%s AND engine_name IN (%s) AND status='ACTIVE' "
+                "AND heartbeat_at>=TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6))",
+                (identity.platform_id, normalized),
+            )
+            worker_row = cursor.fetchone()
+        worker_count = int(worker_row[0] or 0) if worker_row is not None else 0
+        return {
+            "queue_depth": int(row[0] or 0),
+            "active_workers": int(row[1] or 0),
+            "worker_count": worker_count,
+            "healthy": worker_count > 0,
+        }
+
+    def heartbeat_worker(
+        self,
+        platform_id: str,
+        worker_id: str,
+        engine_name: str,
+        *,
+        status: str = "ACTIVE",
+    ) -> None:
+        """受信 Worker 按平台/进程/引擎写入或收敛短期健康心跳。"""
+
+        normalized = engine_name.strip().casefold().replace("-", "_")
+        if not platform_id.strip() or not worker_id.strip() or not normalized or status not in {"ACTIVE", "STOPPING"}:
+            raise ValueError("Worker 心跳的平台、进程、引擎和状态必须有效")
+        if normalized == "deepseek":
+            normalized = "deepseek_harness"
+        with self._transaction() as (_, cursor):
+            cursor.execute(
+                "INSERT INTO runtime_worker_heartbeats (platform_id,worker_id,engine_name,status) "
+                "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE status=VALUES(status), "
+                "heartbeat_at=CURRENT_TIMESTAMP(6)",
+                (platform_id, worker_id, normalized, status),
+            )
+
     def acquire_lease(
         self, identity: IdentityContext, run_id: str, worker_id: str, *, lease_seconds: int = 30
     ) -> int | None:
@@ -804,19 +1027,39 @@ class MySqlExecutionRepository:
             return token
 
     def claim_next_queued_run(
-        self, platform_id: str, worker_id: str, *, lease_seconds: int = 30
+        self,
+        platform_id: str,
+        worker_id: str,
+        *,
+        lease_seconds: int = 30,
+        engine_names: tuple[str, ...] | None = None,
     ) -> RunClaim | None:
         """以平台队列领取一个 Run；后续状态写入必须重新限定到 claim 返回的租户。"""
 
         if not platform_id.strip() or not worker_id.strip() or lease_seconds <= 0:
             raise ValueError("platform_id、worker_id 和 lease_seconds 必须有效")
+        normalized_names: set[str] = set()
+        for name in engine_names or ():
+            normalized = name.strip().casefold().replace("-", "_")
+            if normalized:
+                normalized_names.add(normalized)
+                if normalized in {"deepseek", "deepseek_harness"}:
+                    normalized_names.update({"deepseek", "deepseek_harness"})
+        engine_filter = tuple(sorted(normalized_names))
+        engine_clause = ""
+        engine_parameters: tuple[str, ...] = ()
+        if engine_filter:
+            engine_clause = " AND LOWER(REPLACE(s.engine_name,'-','_')) IN (" + ",".join("%s" for _ in engine_filter) + ")"
+            engine_parameters = engine_filter
         with self._transaction() as (_, cursor):
             cursor.execute(
-                "SELECT tenant_id, run_id, session_id, fencing_token FROM runs "
-                "WHERE platform_id=%s AND state IN ('STARTING','RUNNING','CANCELLING') "
-                "AND lease_expires_at<=CURRENT_TIMESTAMP(6) "
-                "ORDER BY lease_expires_at, run_id LIMIT 1 FOR UPDATE SKIP LOCKED",
-                (platform_id,),
+                "SELECT r.tenant_id,r.run_id,r.session_id,r.fencing_token FROM runs r "
+                "JOIN sessions s ON s.platform_id=r.platform_id AND s.tenant_id=r.tenant_id "
+                "AND s.session_id=r.session_id WHERE r.platform_id=%s "
+                "AND r.state IN ('STARTING','RUNNING','CANCELLING') "
+                "AND r.lease_expires_at<=CURRENT_TIMESTAMP(6)" + engine_clause +
+                " ORDER BY r.lease_expires_at,r.run_id LIMIT 1 FOR UPDATE SKIP LOCKED",
+                (platform_id, *engine_parameters),
             )
             expired = cursor.fetchone()
             if expired is not None:
@@ -851,9 +1094,9 @@ class MySqlExecutionRepository:
                 "LEFT JOIN session_runtime_leases l ON l.platform_id=r.platform_id "
                 "AND l.tenant_id=r.tenant_id AND l.session_id=r.session_id "
                 "WHERE r.platform_id=%s AND r.state='QUEUED' AND s.status='ACTIVE' "
-                "AND l.session_id IS NULL ORDER BY r.created_at, r.run_id "
+                "AND l.session_id IS NULL" + engine_clause + " ORDER BY r.created_at, r.run_id "
                 "LIMIT 1 FOR UPDATE SKIP LOCKED",
-                (platform_id,),
+                (platform_id, *engine_parameters),
             )
             row = cursor.fetchone()
             if row is None:
@@ -1228,7 +1471,7 @@ class MySqlExecutionRepository:
         with self._transaction() as (_, cursor):
             cursor.execute(
                 "UPDATE runs SET state=%s, error_code=%s, result_ref=%s, runtime_session_ref=%s, "
-                "runtime_result_ref=%s, lease_expires_at=NULL, worker_id=NULL, "
+                "runtime_result_ref=%s, lease_expires_at=NULL, "
                 "fencing_token=CASE WHEN %s='UNKNOWN' THEN fencing_token+1 ELSE fencing_token END, "
                 "finished_at=CURRENT_TIMESTAMP(6) "
                 "WHERE platform_id=%s AND tenant_id=%s AND run_id=%s "
@@ -1667,7 +1910,8 @@ class MySqlExecutionRepository:
                 "SELECT runs.run_id, runs.session_id, runs.platform_id, runs.tenant_id, runs.trace_id, "
                 "runs.request_digest, runs.state, runs.error_code, runs.snapshot_json, "
                 "runs.context_snapshot_json, runs.runtime_session_ref, runs.runtime_result_ref, "
-                "runs.result_ref, runs.submitted_by_user_id, sessions.engine_name "
+                "runs.result_ref, runs.submitted_by_user_id, sessions.engine_name, "
+                "runs.orchestration_id, runs.task_id, runs.attempt_no, runs.worker_id, runs.fencing_token "
                 "FROM runs JOIN sessions ON sessions.platform_id=runs.platform_id "
                 "AND sessions.tenant_id=runs.tenant_id AND sessions.session_id=runs.session_id "
                 "WHERE runs.platform_id=%s AND runs.tenant_id=%s AND runs.run_id=%s",
@@ -1791,6 +2035,11 @@ class MySqlExecutionRepository:
             runtime_reference=runtime_reference,
             context_snapshot=context_snapshot,
             submitted_by_user_id=str(row[13]) if row[13] is not None else None,
+            orchestration_id=str(row[15]) if row[15] is not None else None,
+            task_id=str(row[16]) if row[16] is not None else None,
+            attempt_no=int(row[17]) if row[17] is not None else None,
+            worker_id=str(row[18]) if row[18] is not None else None,
+            fencing_token=int(row[19]),
         )
 
     @staticmethod

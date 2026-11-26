@@ -5,9 +5,9 @@
 - 文档类型：项目级功能设计
 - 设计版本：v0.1
 - 适用范围：智能编排型 Agent 团队群聊
-- 当前阶段：方案确认，尚未进入代码实施
-- 原型路径：`docs/原型/agent团队群聊.html`（后续创建）
-- 迁移计划：`docs/migrations/V011__agent_team_orchestration.sql`（以实际迁移序号为准）
+- 当前阶段：团队配置、Router 计划、任务执行、MySQL 仓储、产物预览下载和 Web 交付已接入；外部 IM 和跨机 Worker 扩缩容留待后续阶段
+- 原型路径：`docs/原型/agent团队群聊.html`（当前实现验收基线）
+- 迁移计划：`docs/migrations/V011__agent_team_orchestration.sql`、`docs/migrations/V012__team_attempt_leases.sql`、`docs/migrations/V013__conversation_agent_binding_cardinality.sql`、`docs/migrations/V014__runtime_worker_heartbeats.sql`
 
 ## 1. 目标与范围
 
@@ -334,7 +334,7 @@ runtime.deepseek_harness   -> DeepSeek Worker Pool
 runtime.fake               -> Fake Worker Pool
 ```
 
-Worker 领取时必须带 `engine_name` 过滤条件。Worker 只能使用本地注册的对应 RuntimeAdapter，并使用 RunSnapshot 中固定的执行配置。
+Worker 通过 `AGENT_PLATFORM_WORKER_ENGINE_NAMES` 带 `engine_name` 过滤条件；未设置时使用当前 `AGENT_PLATFORM_RUNTIME_ENGINE`。Worker 只能使用本地注册的对应 RuntimeAdapter，并使用 RunSnapshot 中固定的执行配置。V014 按 Worker ID 和 EngineProvider 记录短期心跳。
 
 ### 6.4 Runtime 请求
 
@@ -652,11 +652,17 @@ POST /api/v1/orchestration-tasks/{task_id}/cancel
 
 ```http
 POST /api/v1/teams
+POST /api/v1/teams/{team_id}/versions/{source_version}/fork
+POST /api/v1/teams/{team_id}/versions/{version}/members
+DELETE /api/v1/teams/{team_id}/versions/{version}/members/{member_id}
+PUT /api/v1/teams/{team_id}/versions/{version}/policy
+PUT /api/v1/teams/{team_id}/versions/{version}/roles
 GET /api/v1/teams/{team_id}/versions/{version}
+POST /api/v1/teams/{team_id}/versions/{version}/publish
 GET /api/v1/teams/{team_id}/worker-pools
+POST /api/v1/conversations/team
+POST /api/v1/conversations/{conversation_id}/team-turns
 GET /api/v1/conversations/{conversation_id}/team-activity
-PUT /api/v1/teams/{team_id}/draft
-POST /api/v1/teams/{team_id}/publish
 ```
 
 “团队管理”入口负责创建团队草稿、选择成员、指定路由 Agent 和汇总 Agent、配置编排模式和并发上限。团队草稿发布后生成不可变 TeamVersion，Conversation 只能绑定已发布版本。
@@ -666,7 +672,7 @@ POST /api/v1/teams/{team_id}/publish
 - Team Version 和当前 Conversation 固定版本。
 - 路由 Agent、汇总 Agent 和普通成员。
 - 每个成员的 EngineProvider、ModelRoute、能力快照和并发额度。
-- Codex、DeepSeek 等 Worker Pool 的队列长度、Worker 数量、健康状态和最近心跳。
+- 各 EngineProvider 的 MySQL QUEUED Run、有效运行租约数和 V014 最近心跳；30 秒内没有心跳的池显示不可用。
 - 编排模式、计划审批策略、最大并发、预算和产出物交付策略。
 
 团队活动查询需要返回每个成员当前正在认领或执行的任务：
@@ -684,6 +690,7 @@ POST /api/v1/teams/{team_id}/publish
 GET /api/v1/artifacts/{artifact_id}
 GET /api/v1/artifacts/{artifact_id}/preview
 POST /api/v1/artifacts/{artifact_id}/download-url
+GET /api/v1/artifacts/{artifact_id}/download
 POST /api/v1/orchestrations/{orchestration_id}/deliver
 POST /api/v1/artifact-deliveries/{delivery_id}/retry
 ```
@@ -904,7 +911,7 @@ worker_pool
 
 ### 14.4 团队配置入口
 
-侧栏提供“团队管理”入口，当前团队选择旁提供“新建团队”按钮。新建弹框先保存团队草稿，再由团队管理页完成成员和运行策略校验后发布版本。工作台顶部的“团队配置”入口用于查看当前 Conversation 所绑定的 TeamVersion。
+侧栏提供“团队管理”入口，当前团队选择旁提供“新建团队”按钮。新建弹框选择当前租户的 ACTIVE Deployment、成员、Router、Finalizer、编排模式和最大并发，并在提交时验证已发布 EngineProvider/ModelRoute 后保存草稿。团队配置入口用于查看当前版本、增加/移除成员、更新角色和交付策略、创建下一版草稿并发布。
 
 团队配置弹框沿用当前管理台弹框、字段和按钮样式，包含：
 
@@ -914,9 +921,9 @@ worker_pool
 - 最大并发任务数。
 - 产出物交付策略。
 - 每个成员的 EngineProvider、ModelRoute、能力标签和并发额度。
-- Codex、DeepSeek Worker Pool 的队列、Worker、健康状态和最近心跳。
+- 各 EngineProvider Worker Pool 的队列、活动 Worker 数、最大并发和健康状态。
 
-普通成员和 Viewer 只能查看固定版本；没有团队管理权限的用户不能保存配置。
+管理员可编辑草稿；成员可在有运行权限时提交消息、确认计划和操作任务；Viewer 只能查看固定版本，不能保存配置或控制运行。
 
 ### 14.5 成员当前活动
 
@@ -1000,7 +1007,7 @@ worker_pool
 - 不改写已应用 migration。
 - 通过 forward migration 增加新表和字段。
 - 为每个新表提供 down migration。
-- MySQL 集成测试通过 `information_schema.TABLES` 和 `information_schema.COLUMNS` 验证表和字段注释。
+- MySQL 集成测试通过 `information_schema.TABLES` 和 `information_schema.COLUMNS` 验证表和字段注释；V012 为 Attempt 增加 Worker 标识和 fencing token；V013 扩展 TEAM Conversation 的成员 Session 绑定基数并保留单员工唯一性；V014 增加 Worker 按引擎上报的短期健康心跳。
 
 ### 15.4 回滚边界
 
@@ -1009,6 +1016,19 @@ worker_pool
 - 保留已有 ObjectStore 文件和 Artifact 记录，避免删除用户已下载的产出物。
 - 只有在确认无引用后，才执行表结构回滚和对象垃圾回收。
 - 单 Agent Conversation 不依赖团队新表，可以继续使用旧路径。
+
+当前 MySQL 模式将团队、团队版本、Conversation 绑定、编排任务/依赖/Attempt/事件、Artifact、Delivery 元数据和 Worker 心跳写入 MySQL；文件正文通过租户授权的 ObjectStore 读取。V013 允许同一员工的不同 TeamMember 在团队对话中各自绑定 Session，同时保持单员工 Conversation 的员工唯一约束。V014 让 Worker Pool 健康来自最近 30 秒的引擎心跳，不用“引擎已注册”冒充 Worker 存活。Web 交付已接入；Slack、Teams 等外部渠道仍未接入。
+
+## 18 当前实现映射与验收边界
+
+- **团队工作台**：`frontend/src/features/platform/TeamWorkbench.tsx` 按 `docs/原型/agent团队群聊.html` 显示当前团队、团队对话、消息时间线、任务计划、成员活动、任务详情/最近事件弹框和产物操作。页面的任务、消息、事件、成员、Worker Pool 和产物均来自 `/api/v1` 查询，不再包含固定季度任务或固定成员示例。
+- **团队配置**：管理员新建草稿时选择员工 Deployment、Router、Finalizer、编排/审批策略、最大并发和交付策略；配置入口可从已发布 TeamVersion fork 下一草稿，修改成员/角色并发布。已有 Conversation 绑定的版本不变。
+- **Router 流程**：`POST /api/v1/conversations/{id}/team-turns` 先持久化 PLANNING Orchestration 和 QUEUED Router Run。消息中内部 SYSTEM 输入与用户可见原文分开保存；独立 Run Worker 按固定 Router Session/EngineProvider/ModelRoute 执行。活动查询在 Worker Run 终态后幂等验证 JSON 计划并原位创建任务；同幂等键在服务重启后恢复已有编排，改变消息则返回 `IDEMPOTENCY_CONFLICT`。
+- **任务执行**：MySQL 模式的 `TeamTaskExecutionService` 创建 Team/成员并发受限的 QUEUED 子 Run 和 TaskAttempt，不在 API 进程内执行 Runtime。Run Worker 按固定 Session 快照处理并在 MySQL 领取/续租/完成；活动查询把 Run 终态恢复为 Task/Attempt、Artifact、Agent 消息和事件。Worker 可用 `AGENT_PLATFORM_WORKER_ENGINE_NAMES` 只领取指定 EngineProvider；未设置时只领取当前 `AGENT_PLATFORM_RUNTIME_ENGINE`。Fake 模式保留独立的进程内模拟池。
+- **产物交付**：正文只通过 `ObjectStore` 保存和读取，MySQL 保存 `ExecutionArtifact`、SHA-256、来源和 `ArtifactDelivery`。Web 工作台预览、授权下载、交付 ZIP/清单及 Web 状态均已接通。
+- **权限边界**：管理员可以建团队、配置版本、发布和交付；管理员/成员可以提交、确认计划、分配/重试/取消任务；Viewer 仅读取。后端每次读写使用认证身份的 platform/tenant 范围，不能用请求体扩大租户。
+- **当前运行边界**：Compose 默认把 Run Worker 限定到当前 `AGENT_PLATFORM_RUNTIME_ENGINE`，本地启动 3 个同引擎副本以并行执行；不同引擎通过 engine filter 分池，需为每个已注册引擎提供对应 Worker 副本。`claim_next_queued_run` 按引擎和 MySQL fencing lease 领取任务；跨节点压力、故障和配额规模未做生产负载验收。外部 Slack/Teams 等 IM 渠道未接入，Web 是唯一已交付渠道。`ATTACHMENTS` 策略自动交付 Web Artifact；`CONFIRM`/`MANUAL` 由用户操作交付。
+- **验证命令**：完整命令见本文件“验证命令”章节；包含后端单元/API 测试、disposable MySQL 集成、Ruff/compileall、前端全量测试/生产构建、原型 DOM/脚本检查、OpenSpec strict 和 `git diff --check`。
 
 ## 16. 分阶段交付
 
@@ -1033,6 +1053,14 @@ worker_pool
 - 交付确认。
 - ZIP 打包。
 - 部分失败交付。
+
+### 阶段二：Web 工作台端到端交付
+
+- 新建团队和草稿配置、成员多引擎绑定及不可变版本发布。
+- 固定团队版本的群聊、Router 计划验证和任务状态可恢复。
+- 成员当前活动、任务/事件详情及权限反馈。
+- Artifact 预览、下载、打包和 Web 交付。
+- React/CSS 按独立 HTML 原型逐项验收。
 
 ### 阶段三：动态重规划和外部渠道
 
@@ -1102,51 +1130,58 @@ worker_pool
 - 从单员工对话点击“以团队协作继续”会创建新的 TEAM Conversation，并保留原 Conversation 不变。
 - 两种模式都能查看和交付 Artifact，Artifact 来源标明 Conversation、Run、Task（如有）和 EngineProvider。
 
-## 18. 已验证项与未验证项
+## 19. 实现情况与未验证项
 
-### 已验证项
+### 已实现项
 
-- 当前项目已有 EngineProviderRegistry 和 RuntimeAdapter 抽象。
-- Session 和 Run 已固定 EngineProvider 和 ModelRoute 快照。
-- 当前已有 RuntimeCapabilities 能力校验。
-- 当前已有 ObjectStore、MediaAsset 和对象引用隔离能力。
-- 当前已有 Conversation、AgentBinding、Run、Trace 和消息持久化基础。
+- 团队、版本、成员、Conversation 绑定、任务、依赖、Attempt、事件和 Artifact/Delivery 元数据都接入 MySQL 仓储；对象正文由租户授权的 ObjectStore 保存和读取。
+- 新建团队、成员引擎配置、角色/策略编辑、发布版本、创建绑定该版本的团队 Conversation 已有前后端 API 和工作台流程。
+- 团队消息由固定 Router Session 生成计划并由服务端校验；任务绑定成员 Session/EngineProvider/ModelRoute，执行状态、Attempt 和事件可恢复。
+- 团队统计、成员当前活动、任务详情和最近事件、计划控制、产出物预览/下载/打包/交付均由 API 数据驱动；Viewer 无写操作。
+- 原型规定的团队/员工模式上下文互斥、错误/空态、配置弹窗和活动详情有对应 React/CSS 与组件覆盖。
 
 ### 未验证项
 
-- 多个 EngineProvider 在不同 Worker 进程中的并行部署。
-- Worker Pool 按 `engine_name` 过滤领取队列。
-- Runtime Workspace 文件收集和 ArtifactCollector 接口。
-- 产出物扫描、预览、签名下载和大文件打包。
-- 外部渠道附件上传和幂等投递。
-- 运行中 DAG 增量重规划。
-- 多引擎同时占用同一租户预算的限流策略。
+- 本地 Docker Compose 使用 Fake Runtime，真实外部模型的 Router 计划质量、工具调用和长时执行尚未通过此功能的真实模型端到端验收；模拟路径会在界面明确标识。
+- 每个 EngineProvider 的并行池目前驻留在 API 进程内，未验证多实例跨机领取、扩缩容及进程崩溃后的自动续跑；失租的 Runtime 结果按 UNKNOWN 隔离，不会静默重放。
+- Slack/Teams 等外部 IM、云对象存储/签名 URL、生产身份中心和生产凭据系统不在当前可交付范围；本期交付目标为本地 Web 工作台。
+- 运行中 DAG 增量重规划和跨引擎租户级预算统一限流未实现。
 
-## 19. 验证命令
+## 20. 验证命令
 
-当前设计阶段建议执行：
+项目根目录下执行：
 
 ```bash
-openspec list --json
-openspec list --specs --json
-python -m pytest backend/tests/test_runtime_adapter.py backend/tests/test_engine_provider_registry.py -q
-python -m pytest backend/tests/test_session_runtime_resolution.py -q
-python -m pytest backend/tests/test_content_store.py backend/tests/test_mysql_migration_runner.py -q
+(cd backend && python -m pytest tests -q)
+(cd backend && python -m pytest tests/integration -q)
+(cd backend && python -m ruff check src tests)
+(cd backend && python -m compileall -q src tests)
+(cd frontend && npm test -- --run --maxWorkers=2 --minWorkers=2 --testTimeout=30000)
+(cd frontend && npm run build)
+openspec validate agent-team-orchestration --strict
 git diff --check
 ```
 
-实施阶段还需要补充：
+原型检查使用前端依赖中的 jsdom 解析 DOM、检查唯一 id 并以 Node `vm.Script` 编译内嵌脚本：
 
 ```bash
-python -m pytest backend/tests/test_team_orchestration.py -q
-python -m pytest backend/tests/test_worker_pool_routing.py -q
-python -m pytest backend/tests/test_execution_artifacts.py -q
-python -m pytest backend/tests/integration/test_mysql_team_orchestration.py -q
+(cd frontend && node --input-type=module - <<'NODE'
+import fs from 'node:fs';
+import vm from 'node:vm';
+import { JSDOM } from 'jsdom';
+const dom = new JSDOM(fs.readFileSync('../docs/原型/agent团队群聊.html', 'utf8'));
+const ids = [...dom.window.document.querySelectorAll('[id]')].map((item) => item.id);
+if (new Set(ids).size !== ids.length) throw new Error('原型存在重复 id');
+for (const script of dom.window.document.querySelectorAll('script:not([src])')) {
+  if (script.textContent.trim()) new vm.Script(script.textContent);
+}
+NODE
+)
 ```
 
-## 20. 后续 OpenSpec 产物
+## 21. OpenSpec 产物
 
-实现前需要创建独立 OpenSpec change：
+实现由独立 OpenSpec change 跟踪：
 
 ```text
 openspec/changes/agent-team-orchestration/
@@ -1163,4 +1198,4 @@ openspec/changes/agent-team-orchestration/
 - `spec.md` 描述多引擎任务编排、状态、权限、失败、超时、取消和交付场景。
 - `tasks.md` 列出后端、Worker Pool、Artifact、前端、原型、中文文档和验证任务。
 
-本 Markdown 文档是方案基线。进入实现前，OpenSpec 规格、任务清单和 `docs/原型/agent团队群聊.html` 必须与本文档保持一致。
+本 Markdown 文档记录方案和当前实现。OpenSpec 规格、任务清单、React 页面和 `docs/原型/agent团队群聊.html` 必须保持字段、状态和交互语义一致；任何暂时无法按原型实现的差异必须先写入设计并经评审。

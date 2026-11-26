@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -147,6 +148,7 @@ class ModelTestCreateRequest(TenantAwareRequest):
 class ConversationCreateRequest(TenantAwareRequest):
     title: str
     is_group: bool = False
+    conversation_mode: Literal["SINGLE_AGENT", "TEAM"] = "SINGLE_AGENT"
 
 
 class AgentBindingRequest(TenantAwareRequest):
@@ -166,6 +168,68 @@ class ConversationTurnRequest(TenantAwareRequest):
     text: str = Field(min_length=1, max_length=65535)
     idempotency_key: str = Field(min_length=1, max_length=255)
     employee_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class TeamCreateRequest(TenantAwareRequest):
+    name: str = Field(min_length=1, max_length=255)
+
+
+class TeamMemberCreateRequest(TenantAwareRequest):
+    member_id: str | None = Field(default=None, min_length=1, max_length=64)
+    employee_id: str = Field(min_length=1, max_length=64)
+    employee_version: int = Field(ge=1)
+    deployment_id: str = Field(min_length=1, max_length=64)
+    role: Literal["MEMBER", "ROUTER", "FINALIZER"] = "MEMBER"
+    engine_name: str = Field(min_length=1, max_length=64)
+    model_route_id: str | None = Field(default=None, max_length=64)
+    capabilities: list[str] = Field(default_factory=list)
+    max_concurrency: int = Field(default=1, ge=1, le=100)
+
+
+class TeamPolicyUpdateRequest(TenantAwareRequest):
+    orchestration_mode: Literal["USER", "ROUTER", "HYBRID"]
+    approval_mode: Literal["CONFIRM", "AUTO", "MANUAL"]
+    max_concurrency: int = Field(default=3, ge=1, le=100)
+    delivery_policy: Literal["CONFIRM", "ATTACHMENTS", "MANUAL"] = "CONFIRM"
+
+
+class TeamRolesUpdateRequest(TenantAwareRequest):
+    router_member_id: str = Field(min_length=1, max_length=64)
+    finalizer_member_id: str = Field(min_length=1, max_length=64)
+
+
+class OrchestrationCreateRequest(TenantAwareRequest):
+    team_id: str = Field(min_length=1, max_length=64)
+    team_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+    plan: list[dict[str, object]] = Field(min_length=1, max_length=100)
+
+
+class TeamTurnRequest(TenantAwareRequest):
+    text: str = Field(min_length=1, max_length=65535)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class TaskAssignRequest(TenantAwareRequest):
+    member_id: str = Field(min_length=1, max_length=64)
+    source: Literal["USER", "ROUTER", "SCHEDULER"] = "USER"
+
+
+class ArtifactDeliveryRequest(TenantAwareRequest):
+    artifact_ids: list[str] = Field(min_length=1, max_length=100)
+    channel_name: str = Field(min_length=1, max_length=64)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class TeamConversationCreateRequest(TenantAwareRequest):
+    title: str = Field(min_length=1, max_length=255)
+    team_id: str = Field(min_length=1, max_length=64)
+    team_version: int = Field(ge=1)
+
+
+class ContinueAsTeamRequest(TenantAwareRequest):
+    team_id: str = Field(min_length=1, max_length=64)
+    team_version: int = Field(ge=1)
 
 
 class ToolApprovalApproveRequest(TenantAwareRequest):

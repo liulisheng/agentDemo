@@ -13,6 +13,7 @@ from agent_platform.domain.common import DomainError, generate_database_id
 from agent_platform.domain.conversations import (
     AgentBinding,
     Conversation,
+    ConversationMode,
     DeliveryStatus,
     Message,
     MessageSource,
@@ -102,9 +103,21 @@ class ConversationService:
     def _scope(identity: IdentityContext, resource_id: str) -> tuple[str, str, str]:
         return identity.platform_id, identity.tenant_id, resource_id
 
-    def create_conversation(self, identity: IdentityContext, title: str, *, is_group: bool) -> Conversation:
+    def create_conversation(
+        self,
+        identity: IdentityContext,
+        title: str,
+        *,
+        is_group: bool,
+        conversation_mode: ConversationMode | str = ConversationMode.SINGLE_AGENT,
+    ) -> Conversation:
         conversation = Conversation(
-            generate_database_id(), identity.platform_id, identity.tenant_id, title, is_group
+            generate_database_id(),
+            identity.platform_id,
+            identity.tenant_id,
+            title,
+            is_group,
+            conversation_mode=conversation_mode,
         )
         if self.repository is not None:
             self.repository.save_conversation(identity, conversation)
@@ -181,16 +194,35 @@ class ConversationService:
         )
 
     def bind_agent(
-        self, identity: IdentityContext, conversation_id: str, employee_id: str, employee_name: str, session_id: str
+        self, identity: IdentityContext, conversation_id: str, employee_id: str, employee_name: str,
+        session_id: str, *, team_member_id: str | None = None,
+        team_member_role: str | None = None,
+        capabilities_snapshot: tuple[str, ...] = (),
     ) -> AgentBinding:
         conversation = self._get_conversation(identity, conversation_id)
-        binding = AgentBinding(conversation.conversation_id, employee_id, employee_name, session_id)
+        binding = AgentBinding(
+            conversation.conversation_id, employee_id, employee_name, session_id,
+            team_member_id=team_member_id,
+            team_member_role=team_member_role,
+            capabilities_snapshot=capabilities_snapshot,
+        )
         if self.repository is not None:
             self.repository.save_binding(identity, binding)
         self._bindings.setdefault(
             (identity.platform_id, identity.tenant_id, conversation_id), []
         ).append(binding)
         return binding
+
+    def resolve_member_binding(
+        self, identity: IdentityContext, conversation_id: str, team_member_id: str
+    ) -> AgentBinding:
+        """按固定 TeamMember ID 找到其独立 Session，避免同员工多次入队时绑错。"""
+
+        self._get_conversation(identity, conversation_id)
+        for binding in self._list_bindings(identity, conversation_id):
+            if binding.status == "ACTIVE" and binding.team_member_id == team_member_id:
+                return binding
+        raise DomainError("RESOURCE_NOT_FOUND", "团队成员 Session 绑定不存在", {"resource": "agent_binding"})
 
     def ingest(
         self,
@@ -203,6 +235,9 @@ class ConversationService:
         routing_depth: int = 0,
         session_id: str | None = None,
         message_id: str | None = None,
+        run_id: str | None = None,
+        sender_name: str | None = None,
+        team_member_id: str | None = None,
     ) -> Message:
         conversation = self._get_conversation(identity, conversation_id)
         message = Message(
@@ -214,6 +249,8 @@ class ConversationService:
             text,
             MessageSource(source),
             routing_depth=routing_depth,
+            sender_name=sender_name,
+            team_member_id=team_member_id,
         )
         if self.repository is not None:
             if self.object_store is None:
@@ -231,11 +268,15 @@ class ConversationService:
                 identity,
                 message,
                 session_id=bound_session,
+                run_id=run_id,
                 content_ref=content_ref,
                 content_sha256=content_sha256,
                 byte_length=byte_length,
                 content_type=content_type,
             )
+            if stored.content_ref != content_ref and self.object_store is not None:
+                # 幂等重放已复用旧消息正文，清理本次重复上传的孤立对象。
+                self.object_store.delete(content_ref, identity.platform_id, identity.tenant_id)
             message = replace(message, created_at=stored.created_at)
         self.remember_message(identity, message)
         return message
@@ -409,6 +450,8 @@ class ConversationService:
             stored.source,
             routing_depth=stored.routing_depth,
             created_at=stored.created_at,
+            sender_name=stored.sender_name,
+            team_member_id=stored.team_member_id,
         )
 
     def _list_memory_summaries(
@@ -425,6 +468,7 @@ class ConversationService:
                 platform_id != identity.platform_id
                 or tenant_id != identity.tenant_id
                 or conversation.status != status
+                or conversation.conversation_mode is not ConversationMode.SINGLE_AGENT
                 or identity.user_id
                 not in self._participants.get((platform_id, tenant_id, conversation_id), set())
             ):

@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import Header, HTTPException, Request, status
 
 from agent_platform.adapters.identity.fake import FakeIdentityProvider
+from agent_platform.application.artifacts import ArtifactService
 from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversation_turns import ConversationTurnService
@@ -11,11 +12,18 @@ from agent_platform.application.deployment_runtime import DeploymentRuntimeConfi
 from agent_platform.application.engine_providers import EngineProviderRegistry
 from agent_platform.application.model_management import ModelManagementService
 from agent_platform.application.model_routes import ModelRouteService
+from agent_platform.application.orchestration import OrchestrationService
 from agent_platform.application.resource_center import ResourceCenterService
 from agent_platform.application.runtime_defaults import RuntimeDefaultsService
 from agent_platform.application.skill_files import SkillFilePackageService
+from agent_platform.application.team_conversations import TeamConversationService
+from agent_platform.application.team_task_execution import TeamTaskExecutionService
+from agent_platform.application.team_turns import TeamTurnService
+from agent_platform.application.teams import TeamService
 from agent_platform.application.tool_approval import ToolApprovalService
+from agent_platform.application.worker_pools import WorkerPoolRegistry
 from agent_platform.domain.identity import IdentityContext
+from agent_platform.ports.artifact_repository import ArtifactRepository
 
 fake_identity_provider = FakeIdentityProvider()
 
@@ -55,6 +63,54 @@ def conversation_turn_service(request: Request) -> ConversationTurnService:
     """读取串联员工快照、消息对象和 Run 联合事务的 turn 服务。"""
 
     return request.app.state.conversation_turn_service
+
+
+def team_service(request: Request) -> TeamService:
+    """读取团队草稿、版本和 Conversation 绑定服务。"""
+
+    return request.app.state.team_service
+
+
+def team_conversation_service(request: Request) -> TeamConversationService:
+    """读取团队 Conversation 创建与继续协作服务。"""
+
+    return request.app.state.team_conversation_service
+
+
+def team_task_execution_service(request: Request) -> TeamTaskExecutionService:
+    """读取并行团队任务执行器。"""
+
+    return request.app.state.team_task_execution_service
+
+
+def team_turn_service(request: Request) -> TeamTurnService:
+    """读取 Router 计划生成与团队消息应用服务。"""
+
+    return request.app.state.team_turn_service
+
+
+def orchestration_service(request: Request) -> OrchestrationService:
+    """读取 Router 计划、任务 DAG 和编排状态服务。"""
+
+    return request.app.state.orchestration_service
+
+
+def artifact_repository(request: Request) -> ArtifactRepository:
+    """读取执行产出物的租户仓储。"""
+
+    return request.app.state.artifact_repository
+
+
+def artifact_service(request: Request) -> ArtifactService:
+    """读取产出物收集、预览、打包和交付服务。"""
+
+    return request.app.state.artifact_service
+
+
+def worker_pool_registry(request: Request) -> WorkerPoolRegistry:
+    """读取按 EngineProvider 隔离的 Worker Pool 状态。"""
+
+    return request.app.state.worker_pool_registry
 
 
 def deployment_runtime_config_service(request: Request) -> DeploymentRuntimeConfigService:

@@ -27,6 +27,8 @@ class StoredMessage:
     sequence_no: int
     routing_depth: int
     created_at: datetime | None = None
+    sender_name: str | None = None
+    team_member_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

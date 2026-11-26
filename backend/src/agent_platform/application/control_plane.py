@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
-from threading import Lock
+from threading import Event, Lock, Thread, get_ident
 
 from agent_platform.application.catalog_service import CatalogService
 from agent_platform.application.context import BusinessContextAssembler
@@ -153,6 +153,9 @@ class ControlPlaneService:
             or self.object_store is None
             or not run.result_ref
             or not run.result_text
+            # 团队 Router/Task Run 的用户可见答复由 TeamTurn/Task 协调器写入，
+            # 避免 Worker 通用答复和 Router 摘要争用同一个 run_id 消息标识。
+            or run.orchestration_id is not None
         ):
             return None
         try:
@@ -1147,6 +1150,106 @@ class ControlPlaneService:
             self._runs[self._scope(identity, run.run_id)] = run
             self._idempotency[key] = run.run_id
             return run
+
+    def prepare_orchestration_run(
+        self,
+        identity: IdentityContext,
+        session_id: str,
+        conversation_id: str,
+        prompt: str,
+        *,
+        orchestration_id: str,
+        task_id: str,
+        attempt_no: int,
+    ) -> RunRecord:
+        """为团队 Task 创建固定成员 Session 的子 Run，并保留父子 Trace 关联。"""
+
+        if not orchestration_id.strip() or not task_id.strip() or attempt_no < 1:
+            raise DomainError("INVALID_ARGUMENT", "编排、任务和尝试标识不能为空")
+        prepared = self.prepare_conversation_turn(identity, session_id, conversation_id, prompt)
+        return replace(
+            prepared,
+            orchestration_id=orchestration_id,
+            task_id=task_id,
+            attempt_no=attempt_no,
+        )
+
+    def run_orchestration_task(
+        self,
+        identity: IdentityContext,
+        session_id: str,
+        conversation_id: str,
+        prompt: str,
+        *,
+        orchestration_id: str,
+        task_id: str,
+        attempt_no: int,
+        idempotency_key: str,
+        on_run_submitted: Callable[[RunRecord, str, int], None] | None = None,
+        worker_id: str | None = None,
+    ) -> RunRecord:
+        """在指定成员 Session 上执行团队子任务，并固定父编排/任务/Attempt Trace 引用。"""
+
+        session = self.get_session(identity, session_id)
+        run = self.prepare_orchestration_run(
+            identity, session_id, conversation_id, prompt,
+            orchestration_id=orchestration_id, task_id=task_id, attempt_no=attempt_no,
+        )
+        deployment = self._require_active_deployment(identity, session.deployment_id)
+        resolved_agent = self._resolve_session_agent(identity, session, deployment)
+        persistent_submission = self.persistence is not None and hasattr(self.persistence, "submit_run")
+        if persistent_submission:
+            existing, created = self.persistence.submit_run(identity, run, idempotency_key)
+            if not created:
+                return self._load_result(identity, existing)
+            actual_worker_id = worker_id or f"team-runtime-{get_ident()}"
+            fencing_token = self.persistence.acquire_lease(
+                identity, run.run_id, actual_worker_id, lease_seconds=30
+            )
+            if fencing_token is None:
+                return self.persistence.get_run(identity, run.run_id)
+            if on_run_submitted is not None:
+                on_run_submitted(run, actual_worker_id, fencing_token)
+            stop_heartbeat = Event()
+            heartbeat = Thread(
+                target=self._maintain_direct_run_lease,
+                args=(identity, run.run_id, actual_worker_id, fencing_token, stop_heartbeat),
+                name="team-run-lease-heartbeat",
+                daemon=True,
+            )
+            heartbeat.start()
+            try:
+                return self._execute_run(
+                    identity, session, prompt, idempotency_key, run, resolved_agent,
+                    persistent_submission=True, claimed_fencing_token=fencing_token,
+                    worker_id=actual_worker_id,
+                )
+            finally:
+                stop_heartbeat.set()
+                heartbeat.join(timeout=2)
+        if on_run_submitted is not None:
+            on_run_submitted(run, worker_id or f"team-runtime-{get_ident()}", 0)
+        return self._execute_run(
+            identity, session, prompt, idempotency_key, run, resolved_agent,
+            persistent_submission=False,
+        )
+
+    def _maintain_direct_run_lease(
+        self, identity: IdentityContext, run_id: str, worker_id: str, fencing_token: int, stop: Event
+    ) -> None:
+        """同步 Runtime 在 API 执行线程运行时续租，避免模型调用超过基础租约后误标 UNKNOWN。"""
+
+        if self.persistence is None or not hasattr(self.persistence, "heartbeat"):
+            return
+        while not stop.wait(timeout=10):
+            try:
+                renewed = self.persistence.heartbeat(
+                    identity, run_id, fencing_token, worker_id=worker_id, lease_seconds=30
+                )
+            except Exception:  # noqa: BLE001 — 失败后不再伪报租约仍有效
+                return
+            if not renewed:
+                return
 
     def _prepare_run(
         self,

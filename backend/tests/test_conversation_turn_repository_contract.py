@@ -243,6 +243,42 @@ def test_turn_submission_rejects_message_object_digest_mismatch_before_sql() -> 
     assert query.statements == []
 
 
+def test_worker_run_submission_stores_hidden_input_and_visible_message_in_one_transaction() -> None:
+    query = _Cursor()
+    repository, connection = _repository(query)
+    identity, run, _ = _request()
+    run = replace(run, orchestration_id="orchestration-1", task_id="task-1", attempt_no=1)
+    input_message = Message(
+        "message-input", "conversation-1", identity.platform_id, identity.tenant_id,
+        identity.user_id, "内部任务指令", MessageSource.SYSTEM,
+    )
+    display_message = Message(
+        "message-display", "conversation-1", identity.platform_id, identity.tenant_id,
+        identity.user_id, "用户可见需求", MessageSource.USER,
+    )
+    input_bytes = input_message.text.encode()
+    display_bytes = display_message.text.encode()
+
+    stored, created = repository.submit_worker_run(
+        identity, "conversation-1", run, "worker-turn-1", input_message,
+        input_content_ref="object:input", input_content_sha256=hashlib.sha256(input_bytes).hexdigest(),
+        input_byte_length=len(input_bytes), input_content_type="text/plain; charset=utf-8",
+        display_message=display_message, display_content_ref="object:display",
+        display_content_sha256=hashlib.sha256(display_bytes).hexdigest(),
+        display_byte_length=len(display_bytes), display_content_type="text/plain; charset=utf-8",
+    )
+
+    assert created and stored.run_id == "run-1"
+    statements = [statement for statement, _ in query.statements]
+    run_insert = next(index for index, statement in enumerate(statements) if statement.startswith("INSERT INTO runs"))
+    message_inserts = [index for index, statement in enumerate(statements) if statement.startswith("INSERT INTO messages")]
+    assert len(message_inserts) == 2 and run_insert < min(message_inserts)
+    assert any("orchestration_id,task_id,attempt_no" in statement for statement in statements if statement.startswith("INSERT INTO runs"))
+    assert connection.committed and not connection.rolled_back
+    assert "内部任务指令" not in repr(query.statements)
+    assert "用户可见需求" not in repr(query.statements)
+
+
 class _AssistantCursor:
     def __init__(self) -> None:
         self.statements: list[tuple[str, tuple[object, ...] | None]] = []

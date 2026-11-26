@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import time
 from collections.abc import Callable
 
 from agent_platform.domain.common import DomainError
@@ -43,6 +44,8 @@ class RunWorker:
         cancellation_grace_seconds: float = 10.0,
         model_test_repository: CatalogRepository | None = None,
         model_test_executor: Callable[[ModelTestRecord], ModelTestResult] | None = None,
+        engine_names: tuple[str, ...] | None = None,
+        worker_heartbeat_interval_seconds: float = 10.0,
     ) -> None:
         if not platform_id.strip() or not worker_id.strip():
             raise ValueError("platform_id 和 worker_id 必须非空")
@@ -55,8 +58,8 @@ class RunWorker:
         )
         if not 0 < heartbeat_interval < lease_seconds:
             raise ValueError("heartbeat_interval_seconds 必须大于零且小于 lease_seconds")
-        if poll_interval_seconds <= 0 or cancellation_grace_seconds <= 0:
-            raise ValueError("Worker 轮询间隔和取消宽限时间必须大于零")
+        if poll_interval_seconds <= 0 or cancellation_grace_seconds <= 0 or worker_heartbeat_interval_seconds <= 0:
+            raise ValueError("Worker 轮询、心跳和取消宽限时间必须大于零")
         self.platform_id = platform_id
         self.worker_id = worker_id
         self.repository = repository
@@ -68,6 +71,20 @@ class RunWorker:
         self.cancellation_grace_seconds = cancellation_grace_seconds
         self.model_test_repository = model_test_repository
         self.model_test_executor = model_test_executor
+        from agent_platform.application.engine_providers import normalize_engine_provider_name
+
+        normalized_engines = tuple(sorted({normalize_engine_provider_name(name) for name in (engine_names or ())}))
+        self.engine_names = normalized_engines or None
+        registry = getattr(control_plane, "engine_providers", None)
+        registered_names = tuple(
+            sorted({normalize_engine_provider_name(name) for name in registry.available_names()})
+        ) if registry is not None else normalized_engines
+        self.worker_engine_names = tuple(
+            name for name in registered_names
+            if self.engine_names is None or name in self.engine_names
+        )
+        self.worker_heartbeat_interval_seconds = worker_heartbeat_interval_seconds
+        self._last_worker_heartbeat = 0.0
         self._prefer_model_test = False
 
     async def run_once(self) -> bool:
@@ -78,11 +95,15 @@ class RunWorker:
             if await self._run_next_model_test():
                 return True
 
-        claim = self.repository.claim_next_queued_run(
-            self.platform_id,
-            self.worker_id,
-            lease_seconds=self.lease_seconds,
-        )
+        if self.engine_names is None:
+            claim = self.repository.claim_next_queued_run(
+                self.platform_id, self.worker_id, lease_seconds=self.lease_seconds
+            )
+        else:
+            claim = self.repository.claim_next_queued_run(
+                self.platform_id, self.worker_id, lease_seconds=self.lease_seconds,
+                engine_names=self.engine_names,
+            )
         if claim is None:
             return await self._run_next_model_test()
         self._prefer_model_test = (
@@ -252,18 +273,37 @@ class RunWorker:
     async def run_forever(self, stop: asyncio.Event) -> None:
         """持续 claim；收到进程停止信号后不再领取新 Run。"""
 
-        while not stop.is_set():
-            try:
-                worked = await self.run_once()
-            except Exception:  # 单轮数据库/依赖异常不能伪造 Run 终态
-                logger.exception("Run Worker 轮询失败，将在下一轮重试")
-                worked = False
-            if worked or stop.is_set():
-                continue
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=self.poll_interval_seconds)
-            except TimeoutError:
-                pass
+        self._update_worker_heartbeats(force=True)
+        try:
+            while not stop.is_set():
+                self._update_worker_heartbeats()
+                try:
+                    worked = await self.run_once()
+                except Exception:  # 单轮数据库/依赖异常不能伪造 Run 终态
+                    logger.exception("Run Worker 轮询失败，将在下一轮重试")
+                    worked = False
+                if worked or stop.is_set():
+                    continue
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=self.poll_interval_seconds)
+                except TimeoutError:
+                    pass
+        finally:
+            self._update_worker_heartbeats(status="STOPPING", force=True)
+
+    def _update_worker_heartbeats(self, *, status: str = "ACTIVE", force: bool = False) -> None:
+        """周期性持久化本进程可接收的 Engine Pool，供工作台显示真实 Worker 心跳。"""
+
+        heartbeat = getattr(self.repository, "heartbeat_worker", None)
+        now = time.monotonic()
+        if not callable(heartbeat) or (not force and now - self._last_worker_heartbeat < self.worker_heartbeat_interval_seconds):
+            return
+        try:
+            for engine_name in self.worker_engine_names:
+                heartbeat(self.platform_id, self.worker_id, engine_name, status=status)
+            self._last_worker_heartbeat = now
+        except Exception:  # 心跳可观测性故障不能让已配置 Runtime 停止领取任务
+            logger.exception("Run Worker 引擎心跳写入失败 worker_id=%s", self.worker_id)
 
     async def _maintain_lease(
         self,
@@ -290,6 +330,7 @@ class RunWorker:
                 worker_id=claim.worker_id,
                 lease_seconds=self.lease_seconds,
             )
+            self._update_worker_heartbeats()
             current = self.repository.get_run(identity, claim.run_id)
             if current.status in _TERMINAL_STATES:
                 return
@@ -429,6 +470,14 @@ def main() -> int:
             "AGENT_PLATFORM_WORKER_HEARTBEAT_SECONDS", str(lease_seconds / 3)
         )
     )
+    worker_heartbeat_interval = float(
+        os.environ.get("AGENT_PLATFORM_WORKER_HEARTBEAT_SECONDS", "10")
+    )
+    configured_worker_engines = os.environ.get("AGENT_PLATFORM_WORKER_ENGINE_NAMES", "").strip()
+    if not configured_worker_engines:
+        # 缺省进程只领取当前 Runtime Engine，避免一个 Pool 误领其他引擎的 Run。
+        configured_worker_engines = os.environ.get("AGENT_PLATFORM_RUNTIME_ENGINE", "deepseek")
+    engine_names = tuple(value.strip() for value in configured_worker_engines.split(",") if value.strip())
 
     app = create_app_from_environment()
     if app.state.mode != "mysql":
@@ -453,6 +502,8 @@ def main() -> int:
         ),
         model_test_repository=control_plane.catalog.repository,
         model_test_executor=getattr(app.state, "model_test_executor", None),
+        engine_names=engine_names,
+        worker_heartbeat_interval_seconds=worker_heartbeat_interval,
     )
 
     async def _run() -> None:

@@ -104,6 +104,48 @@ def test_prepared_conversation_turn_is_queued_and_idempotent_without_running_run
     assert conflict.value.code == "IDEMPOTENCY_CONFLICT"
 
 
+def test_prepared_orchestration_run_pins_parent_task_and_attempt() -> None:
+    service, identity, deployment = _published_service()
+    session = service.create_session(identity, deployment.deployment_id)
+
+    run = service.prepare_orchestration_run(
+        identity,
+        session.session_id,
+        "conversation-team",
+        "执行团队子任务",
+        orchestration_id="orchestration-1",
+        task_id="task-1",
+        attempt_no=2,
+    )
+
+    assert run.orchestration_id == "orchestration-1"
+    assert run.task_id == "task-1"
+    assert run.attempt_no == 2
+    assert run.trace_id == session.trace_id
+
+
+def test_orchestration_task_executes_on_its_fixed_session_and_returns_linked_run() -> None:
+    service, identity, deployment = _published_service()
+    session = service.create_session(identity, deployment.deployment_id)
+
+    run = service.run_orchestration_task(
+        identity,
+        session.session_id,
+        "conversation-team",
+        "执行团队子任务",
+        orchestration_id="orchestration-1",
+        task_id="task-1",
+        attempt_no=1,
+        idempotency_key="task-1-attempt-1",
+    )
+
+    assert run.status.value == "succeeded"
+    assert run.orchestration_id == "orchestration-1"
+    assert run.task_id == "task-1"
+    assert run.attempt_no == 1
+    assert run.result_text
+
+
 def test_run_started_before_deployment_disable_can_finish_and_replay() -> None:
     class BlockingFakeRuntime(FakeRuntimeAdapter):
         """允许测试在 Runtime 等待期间变更 Deployment 状态。"""

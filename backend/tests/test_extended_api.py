@@ -31,6 +31,34 @@ def test_model_route_and_conversation_api_contracts() -> None:
     assert routed.json()["session_ids"] == []
 
 
+def test_visible_conversation_message_api_does_not_expose_internal_worker_prompts() -> None:
+    from agent_platform.adapters.identity.fake import FakeIdentityProvider
+
+    client = TestClient(create_app())
+    headers = {"X-Fake-User": "admin-local"}
+    response = client.post("/api/v1/conversations", headers=headers, json={"title": "内部输入过滤", "is_group": True})
+    conversation_id = response.json()["id"]
+    client.post(
+        f"/api/v1/conversations/{conversation_id}/bindings",
+        headers=headers,
+        json={"employee_id": "employee-a", "employee_name": "Router", "session_id": "session-router"},
+    )
+    client.post(
+        f"/api/v1/conversations/{conversation_id}/messages",
+        headers=headers,
+        json={"sender_id": "admin-local", "text": "用户原始需求"},
+    )
+    identity = FakeIdentityProvider().resolve_identity("admin-local")
+    client.app.state.conversation_service.ingest(
+        identity, conversation_id, identity.user_id, "只供 Run Worker 使用的 Router Prompt",
+        source="system", session_id="session-router",
+    )
+
+    visible = client.get(f"/api/v1/conversations/{conversation_id}/messages", headers=headers)
+
+    assert [message["text"] for message in visible.json()["items"]] == ["用户原始需求"]
+
+
 def test_model_route_update_rejects_a_stale_expected_version() -> None:
     client = TestClient(create_app())
     admin = {"X-Fake-User": "admin-local"}

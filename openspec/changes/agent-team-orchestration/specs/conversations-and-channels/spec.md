@@ -26,6 +26,14 @@
 - **WHEN** `SINGLE_AGENT` Conversation 收到一条有效用户消息
 - **THEN** 系统为该 Conversation 的固定 Session 创建一个幂等 Run
 
+#### Scenario: Ordinary group message
+- **WHEN** 群聊消息没有 @提及、命令或规则命中
+- **THEN** 系统保存消息但不创建 Run
+
+#### Scenario: Mentioned agent
+- **WHEN** 群聊消息 @提及某个 ACTIVE 数字员工
+- **THEN** 系统只为被提及的 AgentBinding 创建 Run
+
 #### Scenario: Ordinary team message
 - **WHEN** `TEAM` Conversation 消息没有 @提及、命令、启用路由规则或团队提交入口
 - **THEN** 系统保存消息但不创建 OrchestrationRun 或子 Run
@@ -51,6 +59,7 @@
 #### Scenario: Single-agent workbench context
 - **WHEN** 用户切换到数字员工对话模式
 - **THEN** 右上角显示当前数字员工和运行配置入口，左侧只显示单员工 Conversation，不显示当前团队选择器
+- **AND** 员工会话列表只返回 `SINGLE_AGENT` Conversation，不混入同一员工作为 TeamMember 参与的团队对话
 
 ### Requirement: Continue as team creates a new Conversation
 

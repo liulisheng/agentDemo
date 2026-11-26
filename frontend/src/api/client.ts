@@ -187,6 +187,115 @@ export interface DeploymentSummary {
   }
 }
 
+export interface TeamMemberSummary {
+  member_id: string
+  employee_id: string
+  employee_version: number
+  deployment_id: string
+  role: 'MEMBER' | 'ROUTER' | 'FINALIZER'
+  engine_name: string
+  model_route_id: string | null
+  capabilities: string[]
+  max_concurrency: number
+  status: string
+}
+
+export interface TeamVersionSummary {
+  team_id: string
+  version: number
+  name: string
+  status: string
+  orchestration_mode: string
+  approval_mode: string
+  max_concurrency?: number
+  delivery_policy?: 'CONFIRM' | 'ATTACHMENTS' | 'MANUAL'
+  router_member_id: string | null
+  finalizer_member_id: string | null
+  members: TeamMemberSummary[]
+}
+
+export interface TeamPermissions {
+  can_manage: boolean
+  can_operate: boolean
+}
+
+export interface ConversationMessageSummary {
+  id: string
+  conversation_id: string
+  sender_id: string
+  sender_name?: string | null
+  team_member_id?: string | null
+  source: 'user' | 'agent' | 'system' | 'channel'
+  text: string
+  routing_depth: number
+  created_at: string | null
+}
+
+export interface OrchestrationTaskSummary {
+  task_id: string
+  client_key: string
+  title: string
+  status: string
+  assigned_member_id: string | null
+  assignment_source: string | null
+  attempt: number
+  error_code: string | null
+  required_capabilities?: string[]
+  engine_name?: string | null
+  worker_pool?: string | null
+  output_ref?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  depends_on?: string[]
+  latest_attempt?: {
+    attempt_no: number
+    status: string
+    worker_id: string | null
+    fencing_token: number
+    run_id: string | null
+    error_code: string | null
+    worker_pool?: string | null
+    trace_id?: string | null
+  } | null
+}
+
+export interface OrchestrationEventSummary {
+  event_id: string
+  orchestration_id: string
+  task_id: string | null
+  attempt_id: string | null
+  event_type: string
+  actor_type: string
+  sequence: number
+  created_at: string
+  payload: Record<string, unknown>
+}
+
+export interface TeamArtifactSummary {
+  artifact_id: string
+  conversation_id: string
+  orchestration_id: string | null
+  task_id: string | null
+  run_id: string | null
+  filename: string
+  mime_type: string
+  size_bytes: number
+  content_sha256: string
+  source_engine: string | null
+  visibility: string
+  status: string
+  created_at: string
+}
+
+export interface WorkerPoolSummary {
+  engine_name: string
+  healthy: boolean
+  queue_depth: number
+  active_workers: number
+  worker_count?: number
+  max_concurrency: number
+}
+
 export interface EngineProviderSummary {
   engine_name: string
   display_name: string
@@ -388,6 +497,15 @@ async function request<T>(
   }
   if (response.status === 204) return undefined as T
   return (await response.json()) as T
+}
+
+async function requestBlob(path: string, fakeUser = DEFAULT_FAKE_USER): Promise<Blob> {
+  const response = await fetch(path, { headers: { 'X-Fake-User': fakeUser } })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as ErrorBody
+    throw new ApiError(body.message ?? `请求失败（HTTP ${response.status}）`, response.status, body.code ?? `HTTP_${response.status}`, body.details)
+  }
+  return response.blob()
 }
 
 function queryString(values: object): string {
@@ -1437,6 +1555,213 @@ export async function listConversations(
     `/api/v1/conversations${queryString({ employee_id: employeeId, ...query })}`,
     fakeUser,
   )
+}
+
+export async function listTeams(fakeUser = DEFAULT_FAKE_USER): Promise<{ items: TeamVersionSummary[]; permissions?: TeamPermissions }> {
+  return request('/api/v1/teams', fakeUser)
+}
+
+export async function createTeam(
+  name: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ team_id: string; version: number; name: string; status: string }> {
+  return request('/api/v1/teams', fakeUser, { method: 'POST', body: jsonBody({ name }) })
+}
+
+export async function addTeamMember(
+  teamId: string,
+  version: number,
+  input: {
+    member_id?: string
+    employee_id: string
+    employee_version: number
+    deployment_id: string
+    role: 'MEMBER' | 'ROUTER' | 'FINALIZER'
+    engine_name: string
+    capabilities: string[]
+    model_route_id?: string | null
+    max_concurrency?: number
+  },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<TeamVersionSummary> {
+  return request(`/api/v1/teams/${encodeURIComponent(teamId)}/versions/${version}/members`, fakeUser, {
+    method: 'POST',
+    body: jsonBody(input),
+  })
+}
+
+export async function removeTeamMember(teamId: string, version: number, memberId: string, fakeUser = DEFAULT_FAKE_USER): Promise<TeamVersionSummary> {
+  return request(`/api/v1/teams/${encodeURIComponent(teamId)}/versions/${version}/members/${encodeURIComponent(memberId)}`, fakeUser, { method: 'DELETE' })
+}
+
+export async function updateTeamPolicy(
+  teamId: string,
+  version: number,
+  input: { orchestration_mode: 'USER' | 'ROUTER' | 'HYBRID'; approval_mode: 'CONFIRM' | 'AUTO' | 'MANUAL'; max_concurrency: number; delivery_policy: 'CONFIRM' | 'ATTACHMENTS' | 'MANUAL' },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<TeamVersionSummary> {
+  return request(`/api/v1/teams/${encodeURIComponent(teamId)}/versions/${version}/policy`, fakeUser, { method: 'PUT', body: jsonBody(input) })
+}
+
+export async function updateTeamRoles(
+  teamId: string,
+  version: number,
+  input: { router_member_id: string; finalizer_member_id: string },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<TeamVersionSummary> {
+  return request(`/api/v1/teams/${encodeURIComponent(teamId)}/versions/${version}/roles`, fakeUser, { method: 'PUT', body: jsonBody(input) })
+}
+
+export async function forkTeamRevision(teamId: string, sourceVersion: number, fakeUser = DEFAULT_FAKE_USER): Promise<TeamVersionSummary> {
+  return request(`/api/v1/teams/${encodeURIComponent(teamId)}/versions/${sourceVersion}/fork`, fakeUser, { method: 'POST' })
+}
+
+export async function publishTeam(teamId: string, version: number, fakeUser = DEFAULT_FAKE_USER): Promise<TeamVersionSummary> {
+  return request(`/api/v1/teams/${encodeURIComponent(teamId)}/versions/${version}/publish`, fakeUser, { method: 'POST' })
+}
+
+export async function continueConversationAsTeam(
+  conversationId: string,
+  input: { team_id: string; team_version: number },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ id: string; source_conversation_id: string; conversation_mode: string; team_id: string; team_version: number }> {
+  return request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/continue-as-team`, fakeUser, {
+    method: 'POST',
+    body: jsonBody(input),
+  })
+}
+
+export interface TeamConversationSummary {
+  conversation_id: string
+  title: string
+  conversation_mode: string
+  team_id: string
+  team_version: number
+  status: string
+  updated_at: string
+  last_message_preview?: string
+}
+
+export async function listTeamConversations(teamId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ items: TeamConversationSummary[] }> {
+  return request(`/api/v1/teams/${encodeURIComponent(teamId)}/conversations`, fakeUser)
+}
+
+export async function createTeamConversation(
+  input: { title: string; team_id: string; team_version: number },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ id: string; title: string; conversation_mode: string; team_id: string; team_version: number }> {
+  return request('/api/v1/conversations/team', fakeUser, { method: 'POST', body: jsonBody(input) })
+}
+
+export async function createTeamOrchestration(
+  conversationId: string,
+  input: { team_id: string; team_version: number; idempotency_key: string; plan: Array<Record<string, unknown>> },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ orchestration_id: string; conversation_id: string; status: string; plan_revision: number }> {
+  return request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/orchestrations`, fakeUser, { method: 'POST', body: jsonBody(input) })
+}
+
+export async function submitTeamTurn(
+  conversationId: string,
+  input: { text: string; idempotency_key: string },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ orchestration_id: string; conversation_id: string; status: string; plan_revision: number; router_run_id: string; summary: string; task_count: number; created: boolean }> {
+  return request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/team-turns`, fakeUser, { method: 'POST', body: jsonBody(input) })
+}
+
+export async function replanTeamOrchestration(
+  orchestrationId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ orchestration_id: string; conversation_id: string; status: string; plan_revision: number; router_run_id: string; summary: string; task_count: number; created: boolean }> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/replan`, fakeUser, { method: 'POST' })
+}
+
+export async function getConversationMessages(conversationId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ items: ConversationMessageSummary[] }> {
+  return request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`, fakeUser)
+}
+
+export async function listOrchestrationTasks(orchestrationId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ items: OrchestrationTaskSummary[]; next_cursor: string | null }> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/tasks`, fakeUser)
+}
+
+export async function listOrchestrationEvents(orchestrationId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ items: OrchestrationEventSummary[] }> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/events`, fakeUser)
+}
+
+export async function listOrchestrationArtifacts(orchestrationId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ items: TeamArtifactSummary[] }> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/artifacts`, fakeUser)
+}
+
+export async function previewArtifact(artifactId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ artifact_id: string; filename: string; content: string }> {
+  return request(`/api/v1/artifacts/${encodeURIComponent(artifactId)}/preview`, fakeUser)
+}
+
+export async function downloadArtifact(artifactId: string, fakeUser = DEFAULT_FAKE_USER): Promise<Blob> {
+  return requestBlob(`/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`, fakeUser)
+}
+
+export async function approveTeamPlan(orchestrationId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ orchestration_id: string; status: string }> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/plan/approve`, fakeUser, { method: 'POST' })
+}
+
+export async function pauseTeamOrchestration(orchestrationId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ orchestration_id: string; status: string }> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/pause`, fakeUser, { method: 'POST' })
+}
+
+export async function resumeTeamOrchestration(orchestrationId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ orchestration_id: string; status: string }> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/resume`, fakeUser, { method: 'POST' })
+}
+
+export async function cancelTeamOrchestration(orchestrationId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ orchestration_id: string; status: string }> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/cancel`, fakeUser, { method: 'POST' })
+}
+
+export async function retryTeamTask(taskId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ task_id: string; status: string; attempt: number }> {
+  return request(`/api/v1/orchestration-tasks/${encodeURIComponent(taskId)}/retry`, fakeUser, { method: 'POST' })
+}
+
+export async function assignTeamTask(taskId: string, memberId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ task_id: string; status: string; assigned_member_id: string; assignment_source: string }> {
+  return request(`/api/v1/orchestration-tasks/${encodeURIComponent(taskId)}`, fakeUser, { method: 'PATCH', body: jsonBody({ member_id: memberId, source: 'USER' }) })
+}
+
+export async function cancelTeamTask(taskId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ task_id: string; status: string }> {
+  return request(`/api/v1/orchestration-tasks/${encodeURIComponent(taskId)}/cancel`, fakeUser, { method: 'POST' })
+}
+
+export async function deliverTeamArtifacts(
+  orchestrationId: string,
+  input: { artifact_ids: string[]; channel_name: string; idempotency_key: string },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<{ items: Array<{ delivery_id: string; artifact_id: string; status: string }> }> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/deliver`, fakeUser, { method: 'POST', body: jsonBody(input) })
+}
+
+export async function bundleTeamArtifacts(
+  orchestrationId: string,
+  input: { artifact_ids: string[]; channel_name: string; idempotency_key: string },
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<TeamArtifactSummary> {
+  return request(`/api/v1/orchestrations/${encodeURIComponent(orchestrationId)}/bundle`, fakeUser, { method: 'POST', body: jsonBody(input) })
+}
+
+export async function getTeamActivity(conversationId: string, fakeUser = DEFAULT_FAKE_USER): Promise<{ conversation_id: string; items: Array<Record<string, unknown>> }> {
+  return request(`/api/v1/conversations/${encodeURIComponent(conversationId)}/team-activity`, fakeUser)
+}
+
+export async function getTeam(
+  teamId: string,
+  version: number,
+  fakeUser = DEFAULT_FAKE_USER,
+): Promise<TeamVersionSummary> {
+  return request(`/api/v1/teams/${encodeURIComponent(teamId)}/versions/${version}`, fakeUser)
+}
+
+export async function listTeamWorkerPools(
+  teamId: string,
+  fakeUser = DEFAULT_FAKE_USER,
+  version?: number,
+): Promise<{ team_id: string; items: WorkerPoolSummary[] }> {
+  return request(`/api/v1/teams/${encodeURIComponent(teamId)}/worker-pools${queryString({ version })}`, fakeUser)
 }
 
 /** 为新工作台对话创建受租户约束的控制面对象。 */

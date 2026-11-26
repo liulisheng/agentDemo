@@ -87,6 +87,7 @@ export interface ConversationWorkbenchProps {
   onLoadMore?: () => void
   onNewConversation?: () => void
   onSubmit?: (text: string) => void | Promise<unknown>
+  onContinueAsTeam?: () => void | Promise<unknown>
   onApprove?: (previewSha256: string) => void
   onReject?: () => void
 }
@@ -165,6 +166,7 @@ export function ConversationWorkbench({
   onLoadMore,
   onNewConversation,
   onSubmit,
+  onContinueAsTeam,
   onApprove,
   onReject,
 }: ConversationWorkbenchProps) {
@@ -465,6 +467,11 @@ export function ConversationWorkbench({
             </div>
           ) : (
             <div className="workbench-details-empty">选择对话后查看固定员工版本、Skill 和工具权限。</div>
+          )}
+          {selectedConversation && onContinueAsTeam && (
+            <button type="button" className="workbench-runtime-config-button" onClick={onContinueAsTeam}>
+              以团队协作继续
+            </button>
           )}
 
           {approval && selectedConversation?.runStatus === 'AWAITING_APPROVAL' && (

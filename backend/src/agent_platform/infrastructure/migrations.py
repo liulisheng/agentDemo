@@ -109,6 +109,27 @@ V009_SESSION_COLUMNS = frozenset(
     {"runtime_config_version", "runtime_profile_source", "runtime_model_route_source"}
 )
 V010_SENTINEL_OBJECTS = frozenset({"runtime_strategy_bindings"})
+V011_SENTINEL_OBJECTS = frozenset(
+    {
+        "teams",
+        "team_versions",
+        "team_members",
+        "conversation_team_bindings",
+        "orchestration_runs",
+        "orchestration_tasks",
+        "orchestration_task_dependencies",
+        "orchestration_task_attempts",
+        "orchestration_task_events",
+        "execution_artifacts",
+        "artifact_links",
+        "artifact_deliveries",
+    }
+)
+V011_CONVERSATION_COLUMNS = frozenset({"conversation_mode"})
+V011_RUN_COLUMNS = frozenset({"orchestration_id", "task_id", "parent_run_id", "attempt_no"})
+V011_AGENT_BINDING_COLUMNS = frozenset({"team_member_id", "team_member_role", "capabilities_snapshot_json"})
+V014_SENTINEL_OBJECTS = frozenset({"runtime_worker_heartbeats"})
+V014_WORKER_HEARTBEAT_COLUMNS = frozenset({"worker_id", "engine_name", "status", "heartbeat_at"})
 V001_SENTINEL_OBJECTS = frozenset(
     {"schema_version", "platforms", "tenants", "users", "sessions", "runs", "audit_events"}
 )
@@ -727,6 +748,102 @@ class MigrationPreflight:
                 current,
                 warnings=tuple(warnings),
                 errors=("partial_v010_schema:" + ",".join(missing),),
+            )
+
+        found_v011_objects = baseline.schema_objects.intersection(V011_SENTINEL_OBJECTS)
+        conversation_columns = baseline.schema_columns.get("conversations", frozenset())
+        run_columns = baseline.schema_columns.get("runs", frozenset())
+        agent_binding_columns = baseline.schema_columns.get("agent_bindings", frozenset())
+        found_v011_conversation_columns = conversation_columns.intersection(V011_CONVERSATION_COLUMNS)
+        found_v011_run_columns = run_columns.intersection(V011_RUN_COLUMNS)
+        found_v011_agent_binding_columns = agent_binding_columns.intersection(V011_AGENT_BINDING_COLUMNS)
+        found_any_v011 = bool(
+            found_v011_objects
+            or found_v011_conversation_columns
+            or found_v011_run_columns
+            or found_v011_agent_binding_columns
+        )
+        complete_v011 = (
+            found_v011_objects == V011_SENTINEL_OBJECTS
+            and found_v011_conversation_columns == V011_CONVERSATION_COLUMNS
+            and found_v011_run_columns == V011_RUN_COLUMNS
+            and found_v011_agent_binding_columns == V011_AGENT_BINDING_COLUMNS
+        )
+        if found_any_v011 and not complete_v011:
+            missing = sorted(V011_SENTINEL_OBJECTS.difference(found_v011_objects))
+            missing.extend(
+                "conversations." + column
+                for column in sorted(V011_CONVERSATION_COLUMNS.difference(found_v011_conversation_columns))
+            )
+            missing.extend(
+                "runs." + column
+                for column in sorted(V011_RUN_COLUMNS.difference(found_v011_run_columns))
+            )
+            missing.extend(
+                "agent_bindings." + column
+                for column in sorted(V011_AGENT_BINDING_COLUMNS.difference(found_v011_agent_binding_columns))
+            )
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v011_schema:" + ",".join(missing),),
+            )
+        if complete_v011 and (current is None or current < 11):
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                errors=("v011_objects_present_without_schema_version",),
+            )
+        if current is not None and current >= 11 and not complete_v011:
+            missing = sorted(V011_SENTINEL_OBJECTS.difference(found_v011_objects))
+            missing.extend(
+                "conversations." + column
+                for column in sorted(V011_CONVERSATION_COLUMNS.difference(found_v011_conversation_columns))
+            )
+            missing.extend(
+                "runs." + column
+                for column in sorted(V011_RUN_COLUMNS.difference(found_v011_run_columns))
+            )
+            missing.extend(
+                "agent_bindings." + column
+                for column in sorted(V011_AGENT_BINDING_COLUMNS.difference(found_v011_agent_binding_columns))
+            )
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v011_schema:" + ",".join(missing),),
+            )
+
+        found_v014_objects = baseline.schema_objects.intersection(V014_SENTINEL_OBJECTS)
+        worker_columns = baseline.schema_columns.get("runtime_worker_heartbeats", frozenset())
+        found_v014_columns = worker_columns.intersection(V014_WORKER_HEARTBEAT_COLUMNS)
+        complete_v014 = found_v014_objects == V014_SENTINEL_OBJECTS and found_v014_columns == V014_WORKER_HEARTBEAT_COLUMNS
+        found_any_v014 = bool(found_v014_objects or found_v014_columns)
+        if found_any_v014 and not complete_v014:
+            missing = sorted(V014_SENTINEL_OBJECTS.difference(found_v014_objects))
+            missing.extend("runtime_worker_heartbeats." + column for column in sorted(V014_WORKER_HEARTBEAT_COLUMNS.difference(found_v014_columns)))
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v014_schema:" + ",".join(missing),),
+            )
+        if complete_v014 and (current is None or current < 14):
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                errors=("v014_objects_present_without_schema_version",),
+            )
+        if current is not None and current >= 14 and not complete_v014:
+            missing = sorted(V014_SENTINEL_OBJECTS.difference(found_v014_objects))
+            missing.extend("runtime_worker_heartbeats." + column for column in sorted(V014_WORKER_HEARTBEAT_COLUMNS.difference(found_v014_columns)))
+            return MigrationPreflightResult(
+                PreflightAction.BLOCK_PARTIAL_MIGRATION,
+                current,
+                warnings=tuple(warnings),
+                errors=("partial_v014_schema:" + ",".join(missing),),
             )
 
         v003_present = found_v003_objects == V003_SENTINEL_OBJECTS

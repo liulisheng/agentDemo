@@ -26,6 +26,7 @@ from agent_platform.adapters.runtime.codex_app_server import (
 from agent_platform.adapters.runtime.fake import FakeRuntimeAdapter
 from agent_platform.adapters.secrets import EnvironmentSecretProvider
 from agent_platform.api.routes import router
+from agent_platform.application.artifacts import ArtifactService
 from agent_platform.application.catalog_service import CatalogService, InMemoryCatalogRepository
 from agent_platform.application.control_plane import ControlPlaneService
 from agent_platform.application.conversation_turns import ConversationTurnService
@@ -37,23 +38,34 @@ from agent_platform.application.engine_providers import (
 )
 from agent_platform.application.model_management import ModelManagementService
 from agent_platform.application.model_routes import ModelRouteService
+from agent_platform.application.orchestration import OrchestrationService
 from agent_platform.application.resource_center import ResourceCenterService
 from agent_platform.application.runtime_defaults import RuntimeDefaultsService
 from agent_platform.application.skill_files import SkillFilePackageService
+from agent_platform.application.team_conversations import TeamConversationService
+from agent_platform.application.team_task_execution import TeamTaskExecutionService
+from agent_platform.application.team_turns import TeamTurnService
+from agent_platform.application.teams import TeamService
 from agent_platform.application.tool_approval import ToolApprovalService
+from agent_platform.application.worker_pools import WorkerPoolRegistry
 from agent_platform.domain.common import DomainError
+from agent_platform.infrastructure.artifact_repository import InMemoryArtifactRepository
 from agent_platform.infrastructure.migrations import (
     MigrationPreflight,
     MySqlMigrationStateReader,
     PreflightAction,
     load_migration_checksums,
 )
+from agent_platform.infrastructure.mysql_artifacts import MySqlArtifactRepository
 from agent_platform.infrastructure.mysql_catalog import MySqlCatalogRepository
 from agent_platform.infrastructure.mysql_conversations import MySqlConversationRepository
 from agent_platform.infrastructure.mysql_database import MySqlConfig, MySqlConnectionPool
 from agent_platform.infrastructure.mysql_execution import MySqlExecutionRepository
 from agent_platform.infrastructure.mysql_mcp import MySqlMcpRepository
+from agent_platform.infrastructure.mysql_orchestration import MySqlOrchestrationRepository
 from agent_platform.infrastructure.mysql_storage import MySqlMediaAssetRepository
+from agent_platform.infrastructure.mysql_teams import MySqlTeamRepository
+from agent_platform.infrastructure.orchestration_repository import InMemoryOrchestrationRepository
 from agent_platform.ports.catalog_repository import CatalogRepository
 from agent_platform.ports.conversation_repository import ConversationRepository
 from agent_platform.ports.execution_repository import ExecutionRepository
@@ -73,6 +85,9 @@ def create_app(
     catalog_repository: CatalogRepository | None = None,
     execution_repository: ExecutionRepository | None = None,
     conversation_repository: ConversationRepository | None = None,
+    team_repository=None,
+    orchestration_repository=None,
+    artifact_repository=None,
     mcp_repository: McpRepository | None = None,
     resource_center_repository: ResourceCenterRepository | None = None,
     object_store: ObjectStore | None = None,
@@ -107,6 +122,9 @@ def create_app(
         try:
             yield
         finally:
+            task_executor = getattr(app.state, "team_task_execution_service", None)
+            if task_executor is not None:
+                task_executor.close()
             for resource in reversed(tuple(lifecycle_resources)):
                 close = getattr(resource, "close", None)
                 if close is not None:
@@ -137,6 +155,22 @@ def create_app(
     )
     app.state.engine_provider_registry = resolved_engine_providers
     app.state.conversation_service = ConversationService(conversation_repository, object_store)
+    app.state.team_service = TeamService(team_repository)
+    app.state.team_conversation_service = TeamConversationService(
+        app.state.conversation_service, app.state.team_service
+    )
+    app.state.orchestration_repository = orchestration_repository or InMemoryOrchestrationRepository()
+    app.state.orchestration_service = OrchestrationService(
+        app.state.orchestration_repository, app.state.team_service
+    )
+    app.state.artifact_repository = artifact_repository or InMemoryArtifactRepository()
+    app.state.artifact_service = ArtifactService(app.state.artifact_repository, object_store)
+    app.state.worker_pool_registry = WorkerPoolRegistry()
+    team_max_workers = int(os.environ.get("AGENT_PLATFORM_TEAM_MAX_WORKERS", "8"))
+    from agent_platform.application.engine_providers import normalize_engine_provider_name
+
+    for engine_name in sorted({normalize_engine_provider_name(name) for name in resolved_engine_providers.available_names()}):
+        app.state.worker_pool_registry.register(engine_name, max_concurrency=team_max_workers)
     app.state.tool_approval_service = (
         ToolApprovalService(mcp_repository, object_store)
         if mcp_repository is not None and object_store is not None
@@ -174,6 +208,22 @@ def create_app(
         app.state.conversation_service,
         app.state.control_plane_service,
     )
+    app.state.team_task_execution_service = TeamTaskExecutionService(
+        app.state.team_service,
+        app.state.orchestration_service,
+        app.state.conversation_service,
+        app.state.control_plane_service,
+        app.state.artifact_service,
+        max_workers=team_max_workers,
+        worker_pools=app.state.worker_pool_registry,
+    )
+    app.state.team_turn_service = TeamTurnService(
+        app.state.conversation_service,
+        app.state.team_service,
+        app.state.orchestration_service,
+        app.state.control_plane_service,
+        app.state.team_task_execution_service,
+    )
     app.state.deployment_runtime_config_service = DeploymentRuntimeConfigService(
         resolved_catalog_repository,
         app.state.model_management_service,
@@ -199,6 +249,7 @@ def create_app(
     async def domain_error_handler(request: Request, error: DomainError) -> JSONResponse:
         status_by_code = {
             "RESOURCE_NOT_FOUND": 404,
+            "RESOURCE_CONFLICT": 409,
             "AUTHORIZATION_DENIED": 403,
             "DEPENDENCY_VALIDATION_ERROR": 409,
             "ENGINE_MODEL_INCOMPATIBLE": 409,
@@ -212,7 +263,15 @@ def create_app(
             "MODEL_ROUTE_VERSION_CONFLICT": 409,
             "RUNTIME_CONFIGURATION_REQUIRED": 409,
             "RUNTIME_CONFIG_REVISION_CONFLICT": 409,
+            "TEAM_VERSION_CONFLICT": 409,
             "INVALID_STATE": 409,
+            "CONVERSATION_MODE_MISMATCH": 409,
+            "PLAN_INVALID": 409,
+            "TASK_GRAPH_CYCLE": 409,
+            "ENGINE_POOL_UNAVAILABLE": 409,
+            "ENGINE_POOL_BUSY": 409,
+            "LEASE_FENCING_CONFLICT": 409,
+            "RETRY_EXHAUSTED": 409,
             "INVALID_ARGUMENT": 422,
         }
         request_id = request.headers.get("X-Request-ID", f"req-{uuid4().hex}")
@@ -320,6 +379,9 @@ def create_app_from_environment() -> FastAPI:
             catalog_repository=MySqlCatalogRepository(pool.connection),
             execution_repository=MySqlExecutionRepository(pool.connection),
             conversation_repository=MySqlConversationRepository(pool.connection),
+            team_repository=MySqlTeamRepository(pool.connection),
+            orchestration_repository=MySqlOrchestrationRepository(pool.connection),
+            artifact_repository=MySqlArtifactRepository(pool.connection),
             mcp_repository=MySqlMcpRepository(pool.connection),
             resource_center_repository=MySqlResourceCenterRepository(pool.connection),
             object_store=object_store,

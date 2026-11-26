@@ -13,6 +13,8 @@
 - 增加 Team、TeamVersion、TeamMember 和 ConversationTeamBinding，支持新建团队草稿、配置成员、指定 Router Agent/汇总 Agent、发布不可变版本。
 - 增加基于 DAG 的任务拆分、依赖、分配、认领、执行、阻塞、完成、失败、取消、重试和重新规划。
 - 为 Codex CLI、DeepSeek Harness 等 EngineProvider 建立独立 Worker Pool 和按引擎队列；Worker 只领取对应 `engine_name` 的 Run。
+- MySQL 模式的 Router 和成员 Run 先写为 QUEUED，由带凭据边界的 Run Worker 执行；API 通过持久状态恢复 PLANNING、Task 和 Artifact，不在 API 进程内运行模型。
+- 通过 V014 Worker 心跳和 MySQL 队列/租约呈现 Engine Worker Pool 健康、队列深度与活跃 Run。
 - 支持团队成员使用不同 EngineProvider、ExecutionProfile 和 ModelRoute；任务按能力要求匹配成员，禁止隐式切换引擎。
 - 增加标准化 TaskOutput、ExecutionArtifact、ArtifactDelivery 和 Delivery Manifest，支持文本、结构化结果、文件、预览、下载、打包、部分失败交付和后续外部渠道投递。
 - 在工作台展示当前团队/当前数字员工、运行配置、成员当前活动、任务详情弹框、最近事件弹框、Worker Pool 状态和产出物交付状态。
@@ -26,6 +28,7 @@
 
 - Web 工作台中的单员工/团队模式统一入口。
 - Router Agent 计划提案、Hybrid 确认和 DAG 并行调度。
+- Run Worker 负责 Router/成员 Runtime 调用；API 容器不注入模型 SecretRef，规划和任务状态可在重启后恢复。
 - 独立 Engine Worker Pool、能力校验、任务租约和子 Run 关联。
 - 团队成员、团队配置、成员活动、任务详情和最近事件原型对应的可观察行为。
 - 产出物索引、对象存储复用、交付清单和 Web 交付确认。
@@ -68,6 +71,7 @@
 
 - 用户可以在同一执行工作台切换数字员工对话和团队协作，且右上角只显示当前模式对应的上下文：单员工显示当前数字员工和运行配置，团队显示当前团队和团队配置。
 - 单员工 Conversation 继续创建单个固定 Session/Run；团队 Conversation 能由 Router Agent 生成可确认的任务 DAG，并并行创建多个成员子 Run。
+- 团队提交先显示 PLANNING；Run Worker 使用自身凭据边界执行 Router/Task，API 无凭据时仍可安全创建/查询队列，Run 终态刷新后恢复到 UI。
 - 团队成员可以分别使用 Codex CLI、DeepSeek Harness 等 EngineProvider；每个 Worker Pool 只领取自己的 Run，引擎不可用时展示明确阻塞原因。
 - 工作台能看到成员当前认领的任务、阶段、Worker Pool、运行时长、任务详情和最近事件。
 - 用户可以查看任务状态、重试、取消、重新分配并看到父级编排聚合状态。

@@ -22,6 +22,13 @@ class DeliveryStatus(StrEnum):
     RETRYING = "retrying"
 
 
+class ConversationMode(StrEnum):
+    """用户可见 Conversation 的执行模式；模式创建后保持固定。"""
+
+    SINGLE_AGENT = "SINGLE_AGENT"
+    TEAM = "TEAM"
+
+
 def _text(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must not be blank")
@@ -37,6 +44,16 @@ class Conversation:
     is_group: bool = False
     status: str = "ACTIVE"
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    conversation_mode: ConversationMode | str = ConversationMode.SINGLE_AGENT
+
+    def __post_init__(self) -> None:
+        try:
+            mode = ConversationMode(self.conversation_mode)
+        except ValueError as error:
+            raise ValueError("conversation_mode must be SINGLE_AGENT or TEAM") from error
+        if mode is ConversationMode.TEAM and not self.is_group:
+            raise ValueError("TEAM conversation must be a group")
+        object.__setattr__(self, "conversation_mode", mode)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +70,9 @@ class AgentBinding:
     employee_name: str
     session_id: str
     status: str = "ACTIVE"
+    team_member_id: str | None = None
+    team_member_role: str | None = None
+    capabilities_snapshot: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +89,8 @@ class Message:
     routing_depth: int = 0
     trigger_kind: str | None = None
     created_at: datetime | None = field(default_factory=lambda: datetime.now(UTC))
+    sender_name: str | None = None
+    team_member_id: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.message_id, "message_id")

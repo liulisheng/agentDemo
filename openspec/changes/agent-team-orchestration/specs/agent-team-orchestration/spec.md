@@ -27,16 +27,16 @@
 系统 SHALL 将 Router Agent 的结构化输出视为计划提案，并在执行前校验任务数量、DAG 无环性、成员范围、能力、预算、租户和工具策略。
 
 #### Scenario: Valid parallel plan
-- **WHEN** Router Agent 提出两个无依赖任务和一个依赖两者的汇总任务
-- **THEN** 系统保存计划版本，标记可并行分支，并进入计划确认或自动批准状态
+- **WHEN** 用户提交团队消息且固定 Router Session 的 QUEUED Run 由 Run Worker 成功生成两个无依赖任务和一个依赖两者的汇总任务
+- **THEN** 初次 HTTP 响应保持 `PLANNING`，后续 Activity 查询保存计划版本，标记可并行分支，并进入计划确认或自动批准状态
 
 #### Scenario: Invalid member reference
-- **WHEN** Router Agent 将任务分配给不属于当前 TeamVersion 的成员
-- **THEN** 系统拒绝计划并返回可定位的成员校验错误，不创建子 Run
+- **WHEN** Run Worker 返回的计划将任务分配给不属于当前 TeamVersion 的成员
+- **THEN** Orchestration 进入 `FAILED` 并记录成员校验错误，不创建 Task 或子 Run
 
 #### Scenario: Cyclic plan
-- **WHEN** Router Agent 的依赖关系形成环
-- **THEN** 系统拒绝计划并保持 OrchestrationRun 为计划失败状态，不派发任何任务
+- **WHEN** Run Worker 返回的任务依赖关系形成环
+- **THEN** Orchestration 进入 `FAILED` 并记录 `TASK_GRAPH_CYCLE`，不派发任何任务
 
 ### Requirement: Task graph exposes observable lifecycle
 
